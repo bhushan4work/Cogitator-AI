@@ -34,20 +34,18 @@ for (const packageDir of packageDirs) {
 
   checked++;
   try {
-    execFileSync(
-      process.execPath,
-      ['--input-type=module', '-e', `await import('${pkg.name}')`, '--', '--version'],
-      {
-        cwd: packageDir,
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }
-    );
+    execFileSync(process.execPath, ['--input-type=module', '-e', `await import('${pkg.name}')`], {
+      cwd: packageDir,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 30_000,
+    });
   } catch (err: unknown) {
-    const errorOutput =
-      (err as { stderr?: string; stdout?: string }).stderr?.trim() ||
-      (err as { stderr?: string; stdout?: string }).stdout?.trim() ||
-      (err as Error).message;
+    const { stderr, stdout, message } = err as Error & {
+      stderr?: string;
+      stdout?: string;
+    };
+    const errorOutput = stderr?.trim() || stdout?.trim() || message;
 
     failures.push({
       packageName: pkg.name,
