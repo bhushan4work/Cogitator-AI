@@ -74,6 +74,8 @@ jobs:
 
       - run: pnpm build
 
+      - run: pnpm check:esm
+
       # The test jobs run on this build instead of building again. tar keeps the
       # executable bits of the CLI entries, which an artifact alone would drop.
       - run: tar -czf build.tgz packages/*/dist packages/core/docs
