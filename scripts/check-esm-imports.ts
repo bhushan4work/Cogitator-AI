@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const PACKAGES_DIR = join(ROOT, 'packages');
+const CLI_SAFE_ARGS = ['--', '--version'];
 
 const requestedDirs = process.argv.slice(2);
 const packageDirs =
@@ -34,12 +35,16 @@ for (const packageDir of packageDirs) {
 
   checked++;
   try {
-    execFileSync(process.execPath, ['--input-type=module', '-e', `await import('${pkg.name}')`], {
-      cwd: packageDir,
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 30_000,
-    });
+    execFileSync(
+      process.execPath,
+      ['--input-type=module', '-e', `await import('${pkg.name}')`, ...CLI_SAFE_ARGS],
+      {
+        cwd: packageDir,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 30_000,
+      }
+    );
   } catch (err: unknown) {
     const { stderr, stdout, message } = err as Error & {
       stderr?: string;
