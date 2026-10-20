@@ -1,5 +1,13 @@
 # @cogitator-ai/browser
 
+## 0.4.18
+
+### Patch Changes
+
+- Updated dependencies [[`8524d15`](https://github.com/cogitator-ai/Cogitator-AI/commit/8524d1557e03b856de9dd2ec9bccfce91ab74765), [`8524d15`](https://github.com/cogitator-ai/Cogitator-AI/commit/8524d1557e03b856de9dd2ec9bccfce91ab74765), [`8524d15`](https://github.com/cogitator-ai/Cogitator-AI/commit/8524d1557e03b856de9dd2ec9bccfce91ab74765)]:
+  - @cogitator-ai/core@0.41.0
+  - @cogitator-ai/types@0.43.0
+
 ## 0.4.17
 
 ### Patch Changes

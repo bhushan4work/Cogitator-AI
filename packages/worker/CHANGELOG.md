@@ -1,5 +1,14 @@
 # @cogitator-ai/worker
 
+## 0.9.8
+
+### Patch Changes
+
+- Updated dependencies [[`8524d15`](https://github.com/cogitator-ai/Cogitator-AI/commit/8524d1557e03b856de9dd2ec9bccfce91ab74765), [`8524d15`](https://github.com/cogitator-ai/Cogitator-AI/commit/8524d1557e03b856de9dd2ec9bccfce91ab74765), [`8524d15`](https://github.com/cogitator-ai/Cogitator-AI/commit/8524d1557e03b856de9dd2ec9bccfce91ab74765)]:
+  - @cogitator-ai/core@0.41.0
+  - @cogitator-ai/types@0.43.0
+  - @cogitator-ai/swarms@0.12.8
+
 ## 0.9.7
 
 ### Patch Changes

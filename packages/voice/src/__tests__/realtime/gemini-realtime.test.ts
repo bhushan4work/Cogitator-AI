@@ -479,6 +479,87 @@ describe('GeminiRealtimeAdapter', () => {
       ]);
     });
 
+    describe('a result made of parts', () => {
+      const PNG =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+      const tools = () => [
+        {
+          name: 'screenshot',
+          description: 'Screenshot a page',
+          parameters: {},
+          execute: vi.fn().mockResolvedValue({
+            type: 'tool-content',
+            content: [
+              { type: 'text', text: 'Screenshot of example.com' },
+              { type: 'image', data: PNG, mediaType: 'image/png' },
+            ],
+          }),
+        },
+      ];
+      const call = JSON.stringify({
+        toolCall: { functionCalls: [{ id: 'call_s', name: 'screenshot', args: {} }] },
+      });
+
+      it('answers with the text of its parts, the image described', async () => {
+        adapter = new GeminiRealtimeAdapter(createConfig({ tools: tools() }));
+        await adapter.connect();
+        mockWs.send.mockClear();
+
+        mockWs.emit('message', call);
+        await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalledTimes(1));
+
+        const sent = JSON.parse(mockWs.send.mock.calls[0]![0] as string);
+        expect(sent.toolResponse.functionResponses).toEqual([
+          {
+            id: 'call_s',
+            name: 'screenshot',
+            response: { result: 'Screenshot of example.com\n[image/png image, 70 B]' },
+          },
+        ]);
+      });
+
+      it("cuts a plain result longer than the tool's maxResultLength", async () => {
+        const dump = [
+          {
+            name: 'dump',
+            description: 'Dump',
+            parameters: {},
+            maxResultLength: 100,
+            execute: vi.fn().mockResolvedValue({ rows: 'x'.repeat(5000) }),
+          },
+        ];
+        adapter = new GeminiRealtimeAdapter(createConfig({ tools: dump }));
+        await adapter.connect();
+        mockWs.send.mockClear();
+
+        mockWs.emit(
+          'message',
+          JSON.stringify({ toolCall: { functionCalls: [{ id: 'd', name: 'dump', args: {} }] } })
+        );
+        await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalledTimes(1));
+
+        const result = JSON.parse(mockWs.send.mock.calls[0]![0] as string).toolResponse
+          .functionResponses[0].response.result as string;
+        expect(typeof result).toBe('string');
+        expect(result.length).toBeLessThan(200);
+        expect(result).toContain('characters of this tool result were left out');
+      });
+
+      it('adds the images as inlineData parts with toolImages', async () => {
+        adapter = new GeminiRealtimeAdapter(createConfig({ tools: tools(), toolImages: true }));
+        await adapter.connect();
+        mockWs.send.mockClear();
+
+        mockWs.emit('message', call);
+        await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalledTimes(1));
+
+        const sent = JSON.parse(mockWs.send.mock.calls[0]![0] as string);
+        expect(sent.toolResponse.functionResponses[0].parts).toEqual([
+          { inlineData: { mimeType: 'image/png', data: PNG } },
+        ]);
+      });
+    });
+
     it('sends error result when tool execution fails', async () => {
       const tools = [
         {

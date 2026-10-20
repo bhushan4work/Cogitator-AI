@@ -31,12 +31,14 @@ DATABASE_URL=postgresql://postgres:cogitator@localhost:5432/cogitator
 
 ## Examples
 
-| #   | File                    | Requires   | Description                                                  |
-| --- | ----------------------- | ---------- | ------------------------------------------------------------ |
-| 01  | `01-redis-memory.ts`    | Redis      | Redis memory adapter, thread persistence, multi-turn chatbot |
-| 02  | `02-postgres-memory.ts` | PostgreSQL | PostgreSQL memory with facts, long-term persistence          |
-| 03  | `03-worker-queue.ts`    | Redis      | BullMQ job queue, worker pool, Prometheus metrics            |
-| 04  | `04-deploy-docker.ts`   | Docker     | Project analysis, deployment planning, dry-run deploy        |
+| #   | File                      | Requires   | Description                                                   |
+| --- | ------------------------- | ---------- | ------------------------------------------------------------- |
+| 01  | `01-redis-memory.ts`      | Redis      | Redis memory adapter, thread persistence, multi-turn chatbot  |
+| 02  | `02-postgres-memory.ts`   | PostgreSQL | PostgreSQL memory with facts, long-term persistence           |
+| 03  | `03-worker-queue.ts`      | Redis      | BullMQ job queue, worker pool, Prometheus metrics             |
+| 04  | `04-deploy-docker.ts`     | Docker     | Project analysis, deployment planning, dry-run deploy         |
+| 05  | `05-sandbox-execution.ts` | Docker     | Docker and WASM sandboxing, resource limits, native fallback  |
+| 06  | `06-redis-client.ts`      | Redis      | Shared Redis client, key prefix, TTL, atomic counter, pub/sub |
 
 ## Running
 
@@ -45,4 +47,6 @@ npx tsx examples/infrastructure/01-redis-memory.ts
 npx tsx examples/infrastructure/02-postgres-memory.ts
 npx tsx examples/infrastructure/03-worker-queue.ts
 npx tsx examples/infrastructure/04-deploy-docker.ts
+npx tsx examples/infrastructure/05-sandbox-execution.ts
+npx tsx examples/infrastructure/06-redis-client.ts
 ```

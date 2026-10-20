@@ -13,7 +13,13 @@ import type { SandboxManager } from './initializers';
 type SandboxRunOutput = NonNullable<Awaited<ReturnType<SandboxManager['execute']>>['data']>;
 import type { ConstitutionalAI } from '../constitutional/index';
 import { createLinkedAbortController } from '../utils/abort';
-import { toolPartsToMessageContent, toolPartsToText, toolResultParts } from '../tool-content';
+import {
+  DEFAULT_TOOL_RESULT_MAX_LENGTH,
+  toolPartsToMessageContent,
+  toolPartsToText,
+  toolResultParts,
+  truncateToolResultText,
+} from '../tool-content';
 
 type ExtraToolContext = Record<string, unknown> & {
   threadId?: string;
@@ -253,15 +259,26 @@ async function executeInSandbox(
         command: [],
         stdin: JSON.stringify(args),
         timeout: tool.timeout,
+        signal,
       }
     : {
         command: ['sh', '-c', String(args.command ?? '')],
         cwd: args.cwd as string | undefined,
         env: args.env as Record<string, string> | undefined,
         timeout: tool.timeout,
+        signal,
       };
 
   const result = await manager.execute(request, sandboxConfig);
+
+  if (signal?.aborted) {
+    return {
+      callId: toolCall.id,
+      name: toolCall.name,
+      result: null,
+      error: toError(signal.reason, `Tool "${tool.name}" aborted`).message,
+    };
+  }
 
   if (!result.success) {
     return {
@@ -338,15 +355,20 @@ function wasmFailure(tool: Tool, data: SandboxRunOutput): string | undefined {
  * The message that answers a tool call. A result that carries media (a `toolContent()` result,
  * or an object with a base64 image in `image` or `imageBase64`, see `toolResultParts`) reaches
  * the model as text and image parts, so vision models see a screenshot instead of its base64
- * text, and files only as a description.
+ * text, and files only as a description. The text is cut to `maxLength` characters (see
+ * `truncateToolResultText`), the `ToolResult` the application gets keeps all of it.
  */
-export function createToolMessage(toolCall: ToolCall, result: ToolResult): Message {
+export function createToolMessage(
+  toolCall: ToolCall,
+  result: ToolResult,
+  maxLength = DEFAULT_TOOL_RESULT_MAX_LENGTH
+): Message {
   const parts = result.error ? undefined : toolResultParts(result.result);
   const content: MessageContent = result.error
-    ? JSON.stringify({ error: result.error })
+    ? JSON.stringify({ error: truncateToolResultText(result.error, maxLength) })
     : parts
-      ? toolPartsToMessageContent(parts)
-      : JSON.stringify(result.result ?? null);
+      ? toolPartsToMessageContent(parts, maxLength)
+      : truncateToolResultText(JSON.stringify(result.result ?? null), maxLength);
   return {
     role: 'tool',
     content,

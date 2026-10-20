@@ -13,6 +13,7 @@ import type {
   SandboxWasmConfig,
 } from '@cogitator-ai/types';
 import { BaseSandboxExecutor } from './base';
+import { abortMessage, untilAborted } from '../utils/abort';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -50,6 +51,7 @@ interface CallOutcome {
   stderr: string;
   exitCode: number;
   timedOut: boolean;
+  aborted?: boolean;
 }
 
 const DEFAULT_TIMEOUT = 30_000;
@@ -118,6 +120,9 @@ export class WasmSandboxExecutor extends BaseSandboxExecutor {
     if (!wasmModule) {
       return this.failure('No WASM module specified in config');
     }
+    if (request.signal?.aborted) {
+      return this.failure(abortMessage(request.signal));
+    }
 
     const allowedHosts =
       config.network?.mode === 'none' ? [] : [...(config.network?.allowedHosts ?? [])].sort();
@@ -129,26 +134,42 @@ export class WasmSandboxExecutor extends BaseSandboxExecutor {
       allowedHosts,
     };
 
-    let plugin: ExtismPlugin;
+    const generation = this.generation;
+    const acquiring = this.acquire(spec);
+    let plugin: ExtismPlugin | undefined;
     try {
-      plugin = await this.acquire(spec);
+      plugin = await untilAborted(acquiring, request.signal);
     } catch (error) {
       return this.failure(`WASM execution failed: ${describeError(error)}`);
     }
+    if (!plugin) {
+      acquiring.then(
+        async (late) => {
+          this.activePlugins.delete(late);
+          await this.closePlugin(late);
+        },
+        () => undefined
+      );
+      return this.failure(abortMessage(request.signal!));
+    }
 
-    const generation = this.generation;
     const outcome = await this.callWithTimeout(
       plugin,
       functionName,
       this.buildInput(request),
-      timeout
+      timeout,
+      request.signal
     );
 
-    if (outcome.timedOut || generation !== this.generation) {
+    if (outcome.timedOut || outcome.aborted || generation !== this.generation) {
       this.activePlugins.delete(plugin);
       await this.closePlugin(plugin);
     } else {
       await this.release(spec.key, plugin);
+    }
+
+    if (outcome.aborted) {
+      return this.failure(abortMessage(request.signal!));
     }
 
     return this.success({
@@ -245,7 +266,8 @@ export class WasmSandboxExecutor extends BaseSandboxExecutor {
     plugin: ExtismPlugin,
     functionName: string,
     input: string,
-    timeoutMs: number
+    timeoutMs: number,
+    signal: AbortSignal | undefined
   ): Promise<CallOutcome> {
     const call = (async (): Promise<CallOutcome> => {
       try {
@@ -262,16 +284,24 @@ export class WasmSandboxExecutor extends BaseSandboxExecutor {
     })();
 
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<CallOutcome>((resolve) => {
+    let onAbort: (() => void) | undefined;
+    const stopped = new Promise<CallOutcome>((resolve) => {
       timer = setTimeout(() => {
         resolve({ stdout: '', stderr: 'Execution timed out', exitCode: 124, timedOut: true });
       }, timeoutMs);
+      if (signal) {
+        onAbort = () =>
+          resolve({ stdout: '', stderr: '', exitCode: 130, timedOut: false, aborted: true });
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      }
     });
 
     try {
-      return await Promise.race([call, timeout]);
+      return await Promise.race([call, stopped]);
     } finally {
       clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
     }
   }
 }

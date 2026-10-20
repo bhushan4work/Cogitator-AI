@@ -75,6 +75,7 @@ import {
 } from './cogitator/message-builder';
 import { createSpan, getTextContent } from './cogitator/span-factory';
 import { executeTool, createToolMessage } from './cogitator/tool-executor';
+import { DEFAULT_TOOL_RESULT_MAX_LENGTH, toolResultLengthError } from './tool-content';
 import { streamChat } from './cogitator/streaming';
 import { RunLimiter } from './cogitator/run-limiter';
 import { findHandoffAgent, handoffTools } from './cogitator/handoffs';
@@ -228,6 +229,13 @@ export class Cogitator implements ToolInvoker {
    *   logger (`getLogger()`); the last runtime created with `logging` sets it
    */
   constructor(config: CogitatorConfig = {}) {
+    const lengthError = toolResultLengthError(
+      config.limits?.maxToolResultLength,
+      'limits.maxToolResultLength'
+    );
+    if (lengthError) {
+      throw new CogitatorError({ message: lengthError, code: ErrorCode.CONFIGURATION_ERROR });
+    }
     this.config = config;
     this.pricer = new CallPricer(config.llm?.pricing, (name) =>
       Object.hasOwn(config.llm?.backends ?? {}, name)
@@ -587,9 +595,10 @@ export class Cogitator implements ToolInvoker {
 
       const buildRegistry = (owner: Agent) => {
         const ownerRegistry = new ToolRegistry();
-        ownerRegistry.registerMany(this.tools.getAll());
-        if (owner.tools.length > 0) ownerRegistry.registerMany(owner.tools);
         const handoff = handoffTools(owner);
+        const own = new Set([...owner.tools, ...handoff.tools].map((t) => t.name));
+        ownerRegistry.registerMany(this.tools.getAll().filter((t) => !own.has(t.name)));
+        ownerRegistry.registerMany(owner.tools);
         ownerRegistry.registerMany(handoff.tools);
         return { registry: ownerRegistry, targets: handoff.targets };
       };
@@ -899,7 +908,13 @@ export class Cogitator implements ToolInvoker {
 
           options.onToolResult?.(result);
 
-          const toolMessage = createToolMessage(toolCall, result);
+          const toolMessage = createToolMessage(
+            toolCall,
+            result,
+            registry.get(toolCall.name)?.maxResultLength ??
+              this.config.limits?.maxToolResultLength ??
+              DEFAULT_TOOL_RESULT_MAX_LENGTH
+          );
           messages.push(toolMessage);
 
           if (

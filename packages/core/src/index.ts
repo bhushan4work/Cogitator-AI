@@ -27,11 +27,20 @@ export type { PausableRun, PausedRun, PausedRunInfo } from './run-pause';
 export { tool, toolset, toolToSchema } from './tool';
 export { toToolParameters } from './tool-schema';
 export {
+  TOOL_NAME_MAX_LENGTH,
+  assertToolName,
+  isProviderSafeToolName,
+  normalizeToolName,
+  normalizeToolNames,
+} from './tool-name';
+export {
   toolContent,
   isToolContentResult,
   toolResultParts,
   toolPartsToMessageContent,
   toolPartsToText,
+  truncateToolResultText,
+  DEFAULT_TOOL_RESULT_MAX_LENGTH,
 } from './tool-content';
 export { defineSkill, validateSkill, mergeSkillsIntoAgent } from './skill';
 export { agentAsTool } from './agent-tool';
@@ -49,7 +58,7 @@ export {
 } from './decisions/openrouter';
 export { validateDecision } from './decisions/decide';
 export type { AgentAsToolOptions, AgentToolResult } from './agent-tool';
-export { ToolRegistry } from './registry';
+export { ToolRegistry, type ToolRegisterOptions } from './registry';
 
 export {
   calculator,

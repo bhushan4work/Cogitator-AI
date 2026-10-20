@@ -1,5 +1,14 @@
 # create-cogitator-app
 
+## 0.8.2
+
+### Patch Changes
+
+- [#205](https://github.com/cogitator-ai/Cogitator-AI/pull/205) [`8524d15`](https://github.com/cogitator-ai/Cogitator-AI/commit/8524d1557e03b856de9dd2ec9bccfce91ab74765) - The voice helper of a scaffolded project passes each tool's `maxResultLength` on to the realtime session, so a tool reads as much of its result in a voice call as in a run.
+- Updated dependencies [[`8524d15`](https://github.com/cogitator-ai/Cogitator-AI/commit/8524d1557e03b856de9dd2ec9bccfce91ab74765)]:
+  - @cogitator-ai/config@0.16.0
+  - @cogitator-ai/deploy@0.6.7
+
 ## 0.8.1
 
 ### Patch Changes

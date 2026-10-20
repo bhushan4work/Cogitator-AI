@@ -393,6 +393,167 @@ describe('OpenAIRealtimeAdapter', () => {
       expect(responseCreate.type).toBe('response.create');
     });
 
+    describe('a result made of parts', () => {
+      const PNG =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+      const screenshotTool = () => ({
+        name: 'screenshot',
+        description: 'Screenshot a page',
+        parameters: {},
+        execute: vi.fn().mockResolvedValue({
+          type: 'tool-content',
+          content: [
+            { type: 'text', text: 'Screenshot of example.com' },
+            { type: 'json', value: { width: 1 } },
+            { type: 'image', data: PNG, mediaType: 'image/png' },
+          ],
+        }),
+      });
+
+      const sentEvents = () =>
+        mockWs.send.mock.calls.map(([raw]) => JSON.parse(raw as string) as Record<string, unknown>);
+
+      it('reaches the model as the text of its parts, the image described', async () => {
+        adapter = new OpenAIRealtimeAdapter(createConfig({ tools: [screenshotTool()] }));
+        await adapter.connect();
+        mockWs.send.mockClear();
+
+        mockWs.emit('message', functionCallsDone([['screenshot', 'call_s', '{}']]));
+        await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalledTimes(2));
+
+        const [output, response] = sentEvents();
+        expect((output!.item as { output: string }).output).toBe(
+          'Screenshot of example.com\n{"width":1}\n[image/png image, 70 B]'
+        );
+        expect(JSON.stringify(output)).not.toContain(PNG);
+        expect(response!.type).toBe('response.create');
+      });
+
+      it('sends the images as input_image parts with toolImages', async () => {
+        adapter = new OpenAIRealtimeAdapter(
+          createConfig({ tools: [screenshotTool()], toolImages: true })
+        );
+        await adapter.connect();
+        mockWs.send.mockClear();
+
+        mockWs.emit('message', functionCallsDone([['screenshot', 'call_s', '{}']]));
+        await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalledTimes(3));
+
+        const [output, images, response] = sentEvents();
+        expect((output!.item as { type: string }).type).toBe('function_call_output');
+        expect(images!.item).toEqual({
+          type: 'message',
+          role: 'user',
+          content: [
+            { type: 'input_text', text: 'Images returned by the screenshot tool:' },
+            { type: 'input_image', image_url: `data:image/png;base64,${PNG}` },
+          ],
+        });
+        expect(response!.type).toBe('response.create');
+      });
+
+      it('keeps images in formats a model does not take out of the input_image parts', async () => {
+        const tools = [
+          {
+            name: 'draw',
+            description: 'Draw',
+            parameters: {},
+            execute: vi.fn().mockResolvedValue({
+              type: 'tool-content',
+              content: [{ type: 'image', data: 'PHN2Zz4=', mediaType: 'image/svg+xml' }],
+            }),
+          },
+        ];
+        adapter = new OpenAIRealtimeAdapter(createConfig({ tools, toolImages: true }));
+        await adapter.connect();
+        mockWs.send.mockClear();
+
+        mockWs.emit('message', functionCallsDone([['draw', 'call_svg', '{}']]));
+        await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalledTimes(2));
+
+        const [output, response] = sentEvents();
+        expect((output!.item as { output: string }).output).toBe('[image/svg+xml image, 5 B]');
+        expect(response!.type).toBe('response.create');
+      });
+
+      it('cuts a huge error message like a result', async () => {
+        const tools = [
+          {
+            name: 'boom',
+            description: 'Boom',
+            parameters: {},
+            maxResultLength: 200,
+            execute: vi.fn().mockRejectedValue(new Error(`stderr: ${'e'.repeat(10_000)}`)),
+          },
+        ];
+        adapter = new OpenAIRealtimeAdapter(createConfig({ tools }));
+        await adapter.connect();
+        mockWs.send.mockClear();
+
+        mockWs.emit('message', functionCallsDone([['boom', 'call_boom', '{}']]));
+        await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalledTimes(2));
+
+        const output = JSON.parse((sentEvents()[0]!.item as { output: string }).output) as {
+          error: string;
+        };
+        expect(output.error.length).toBeLessThan(300);
+        expect(output.error).toContain('were left out');
+      });
+
+      it.each([0, -1, 2.5, Number.NaN])(
+        'refuses a tool with maxResultLength %s when the session is created',
+        (maxResultLength) => {
+          const tools = [
+            { name: 't', description: 'd', parameters: {}, execute: vi.fn(), maxResultLength },
+          ];
+          expect(() => new OpenAIRealtimeAdapter(createConfig({ tools }))).toThrow(
+            /maxResultLength of realtime tool "t" must be a positive integer/
+          );
+        }
+      );
+
+      it('answers null for a result JSON cannot hold', async () => {
+        const tools = [
+          {
+            name: 'odd',
+            description: 'Odd',
+            parameters: {},
+            execute: vi.fn().mockResolvedValue(() => 'a function'),
+          },
+        ];
+        adapter = new OpenAIRealtimeAdapter(createConfig({ tools }));
+        await adapter.connect();
+        mockWs.send.mockClear();
+
+        mockWs.emit('message', functionCallsDone([['odd', 'call_odd', '{}']]));
+        await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalledTimes(2));
+
+        expect((sentEvents()[0]!.item as { output: string }).output).toBe('null');
+      });
+
+      it("cuts a long result to the tool's maxResultLength", async () => {
+        const tools = [
+          {
+            name: 'dump',
+            description: 'Dump',
+            parameters: {},
+            maxResultLength: 100,
+            execute: vi.fn().mockResolvedValue('x'.repeat(5000)),
+          },
+        ];
+        adapter = new OpenAIRealtimeAdapter(createConfig({ tools }));
+        await adapter.connect();
+        mockWs.send.mockClear();
+
+        mockWs.emit('message', functionCallsDone([['dump', 'call_d', '{}']]));
+        await vi.waitFor(() => expect(mockWs.send).toHaveBeenCalledTimes(2));
+
+        const output = (sentEvents()[0]!.item as { output: string }).output;
+        expect(output.length).toBeLessThan(200);
+        expect(output).toContain('characters of this tool result were left out');
+      });
+    });
+
     it('sends error result when tool execution fails', async () => {
       const tools = [
         {

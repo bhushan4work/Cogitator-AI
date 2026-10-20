@@ -1,5 +1,15 @@
 # @cogitator-ai/koa
 
+## 0.7.8
+
+### Patch Changes
+
+- Updated dependencies [[`8524d15`](https://github.com/cogitator-ai/Cogitator-AI/commit/8524d1557e03b856de9dd2ec9bccfce91ab74765), [`8524d15`](https://github.com/cogitator-ai/Cogitator-AI/commit/8524d1557e03b856de9dd2ec9bccfce91ab74765), [`8524d15`](https://github.com/cogitator-ai/Cogitator-AI/commit/8524d1557e03b856de9dd2ec9bccfce91ab74765)]:
+  - @cogitator-ai/core@0.41.0
+  - @cogitator-ai/types@0.43.0
+  - @cogitator-ai/memory@0.12.8
+  - @cogitator-ai/server-shared@0.5.8
+
 ## 0.7.7
 
 ### Patch Changes
