@@ -1,20 +1,11 @@
 import { header, section } from '../_shared/setup.js';
 import { Cogitator } from '@cogitator-ai/core';
 import { loadConfig } from '@cogitator-ai/config';
-import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-header('Config: Loading YAML and Environment Overrides');
+header('01 — Config: Loading YAML and Environment Overrides');
 
 const configPath = join(import.meta.dirname, 'cogitator.yml');
-
-// Ensure cogitator.yml exists if not present
-if (!existsSync(configPath)) {
-  writeFileSync(
-    configPath,
-    'llm:\n  defaultProvider: ollama\n  defaultModel: ollama/llama3.2\n  providers:\n    ollama:\n      baseUrl: http://localhost:11434\n'
-  );
-}
 
 section('1. Load configuration from YAML file');
 
