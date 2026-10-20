@@ -331,7 +331,7 @@ All with Swagger docs, SSE streaming, and WebSocket support, built on the shared
 
 ---
 
-## 77 Runnable Examples
+## 78 Runnable Examples
 
 Every major feature has a working example you can run right now.
 
@@ -352,7 +352,7 @@ npx tsx examples/core/01-basic-agent.ts
 | [`voice/`](./examples/voice/)                               | 4     | Voice pipeline, realtime sessions, voice agents                                                                                                                                                      |
 | [`browser/`](./examples/browser/)                           | 4     | Web scraping, form automation, stealth agents, crypto price scraper                                                                                                                                  |
 | [`integrations/`](./examples/integrations/)                 | 10    | Express, Fastify, Hono, Koa, Next.js, OpenAI compat, AI SDK, Tetsu on Bun, Deno, Cloudflare Workers                                                                                                  |
-| [`infrastructure/`](./examples/infrastructure/)             | 5     | Redis, PostgreSQL, job queues, Docker deploy, sandbox execution                                                                                                                                      |
+| [`infrastructure/`](./examples/infrastructure/)             | 6     | Redis, PostgreSQL, job queues, Docker deploy, sandbox execution                                                                                                                                      |
 | [`channels/`](./examples/channels/)                         | 5     | Telegram assistant, multi-channel super-assistant, WebChat bot, social feed publisher, Bluesky and Threads bot                                                                                       |
 | [`device-tools/`](./examples/device-tools/)                 | 6     | Local screenshots, clipboard, notifications, URL opening, shell execution, device skill setup                                                                                                        |
 | [`create-cogitator-app/`](./examples/create-cogitator-app/) | 1     | Programmatic project scaffolding                                                                                                                                                                     |
