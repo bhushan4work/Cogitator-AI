@@ -32,7 +32,7 @@ export function exactMatch(opts?: MatchOptions): MetricFn {
   }) as MetricFn);
 }
 
-function levenshteinDistance(s1: string, s2: string): number {
+function levenshteinDistance(s1: readonly string[], s2: readonly string[]): number {
   const m = s1.length;
   const n = s2.length;
   if (m === 0) return n;
@@ -47,12 +47,12 @@ function levenshteinDistance(s1: string, s2: string): number {
 
   for (let i = 1; i <= m; i++) {
     curr[0] = i;
-    const codeA = s1.charCodeAt(i - 1);
+    const char1 = s1[i - 1];
     for (let j = 1; j <= n; j++) {
-      const cost = codeA === s2.charCodeAt(j - 1) ? 0 : 1;
+      const cost = char1 === s2[j - 1] ? 0 : 1;
       curr[j] = Math.min(
-        prev[j] + 1,       // deletion
-        curr[j - 1] + 1,   // insertion
+        prev[j] + 1, // deletion
+        curr[j - 1] + 1, // insertion
         prev[j - 1] + cost // substitution
       );
     }
@@ -80,18 +80,22 @@ export function similarity(opts?: MatchOptions): MetricFn {
     const s1 = caseSensitive ? output : output.toLowerCase();
     const s2 = caseSensitive ? target : target.toLowerCase();
 
-    const maxLen = Math.max(s1.length, s2.length);
+    const outChars = [...s1];
+    const expChars = [...s2];
+
+    const maxLen = Math.max(outChars.length, expChars.length);
     if (maxLen === 0) {
       return { name, score: 1 };
     }
 
-    const distance = levenshteinDistance(s1, s2);
+    const distance = levenshteinDistance(outChars, expChars);
     const score = 1 - distance / maxLen;
 
     return {
       name,
       score,
-      details: score < 1 ? `expected "${target}", got "${output}" (distance: ${distance})` : undefined,
+      details:
+        score < 1 ? `expected "${target}", got "${output}" (distance: ${distance})` : undefined,
     };
   }) as MetricFn);
 }

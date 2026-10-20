@@ -163,7 +163,14 @@ Metrics that compare output against expected values using string operations or s
 | `jsonSchema` | Output is valid JSON matching a Zod schema     | No                  |
 
 ```typescript
-import { exactMatch, contains, similarity, regex, jsonSchema, threshold } from '@cogitator-ai/evals';
+import {
+  exactMatch,
+  contains,
+  similarity,
+  regex,
+  jsonSchema,
+  threshold,
+} from '@cogitator-ai/evals';
 import { z } from 'zod';
 
 const metrics = [
@@ -469,22 +476,22 @@ result.report('ci');
 
 ### Metrics
 
-| Export         | Type          | Description                         |
-| -------------- | ------------- | ----------------------------------- |
+| Export         | Type          | Description                           |
+| -------------- | ------------- | ------------------------------------- |
 | `exactMatch`   | Deterministic | Exact string match                    |
 | `contains`     | Deterministic | Substring match                       |
 | `similarity`   | Deterministic | Levenshtein distance similarity score |
 | `regex`        | Deterministic | Regex pattern match                   |
-| `jsonSchema`   | Deterministic | Zod schema validation               |
-| `faithfulness` | LLM Judge     | Factual accuracy                    |
-| `relevance`    | LLM Judge     | Topical relevance                   |
-| `coherence`    | LLM Judge     | Logical structure                   |
-| `helpfulness`  | LLM Judge     | Practical usefulness                |
-| `llmMetric`    | LLM Judge     | Custom judge prompt                 |
-| `latency`      | Statistical   | Response time percentiles           |
-| `cost`         | Statistical   | Token cost aggregation              |
-| `tokenUsage`   | Statistical   | Input/output token counts           |
-| `metric`       | Custom        | Factory for domain-specific metrics |
+| `jsonSchema`   | Deterministic | Zod schema validation                 |
+| `faithfulness` | LLM Judge     | Factual accuracy                      |
+| `relevance`    | LLM Judge     | Topical relevance                     |
+| `coherence`    | LLM Judge     | Logical structure                     |
+| `helpfulness`  | LLM Judge     | Practical usefulness                  |
+| `llmMetric`    | LLM Judge     | Custom judge prompt                   |
+| `latency`      | Statistical   | Response time percentiles             |
+| `cost`         | Statistical   | Token cost aggregation                |
+| `tokenUsage`   | Statistical   | Input/output token counts             |
+| `metric`       | Custom        | Factory for domain-specific metrics   |
 
 ### Assertions
 

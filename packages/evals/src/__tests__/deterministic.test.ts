@@ -251,6 +251,21 @@ describe('similarity', () => {
     expect(unrelated.details).toContain('distance: 5');
   });
 
+  it('handles Unicode code points and emojis correctly', async () => {
+    const metric = similarity();
+    const emojiMismatch = await metric(makeResult('😀', '😃'));
+    expect(emojiMismatch.score).toBe(0);
+    expect(emojiMismatch.details).toBe('expected "😃", got "😀" (distance: 1)');
+
+    const sameEmoji = await metric(makeResult('🎉🚀', '🎉🚀'));
+    expect(sameEmoji.score).toBe(1);
+    expect(sameEmoji.details).toBeUndefined();
+
+    const partialEmoji = await metric(makeResult('hello 😀', 'hello 😃'));
+    expect(partialEmoji.score).toBeCloseTo(1 - 1 / 7);
+    expect(partialEmoji.details).toContain('distance: 1');
+  });
+
   it('calculates score based on insertions, deletions, and substitutions', async () => {
     // Substitution
     const sub = await similarity()(makeResult('cat', 'bat'));
