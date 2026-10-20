@@ -105,6 +105,9 @@ importers:
       '@cogitator-ai/channels':
         specifier: workspace:*
         version: link:../packages/channels
+      '@cogitator-ai/config':
+        specifier: workspace:*
+        version: link:../packages/config
       '@cogitator-ai/core':
         specifier: workspace:*
         version: link:../packages/core

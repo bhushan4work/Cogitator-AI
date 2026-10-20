@@ -1,0 +1,6 @@
+llm:
+  defaultProvider: ollama
+  defaultModel: ollama/llama3.2
+  providers:
+    ollama:
+      baseUrl: http://localhost:11434

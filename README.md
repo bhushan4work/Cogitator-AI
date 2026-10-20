@@ -331,7 +331,7 @@ All with Swagger docs, SSE streaming, and WebSocket support, built on the shared
 
 ---
 
-## 78 Runnable Examples
+## 79 Runnable Examples
 
 Every major feature has a working example you can run right now.
 
@@ -356,6 +356,7 @@ npx tsx examples/core/01-basic-agent.ts
 | [`channels/`](./examples/channels/)                         | 5     | Telegram assistant, multi-channel super-assistant, WebChat bot, social feed publisher, Bluesky and Threads bot                                                                                                                    |
 | [`device-tools/`](./examples/device-tools/)                 | 6     | Local screenshots, clipboard, notifications, URL opening, shell execution, device skill setup                                                                                                                                     |
 | [`create-cogitator-app/`](./examples/create-cogitator-app/) | 1     | Programmatic project scaffolding                                                                                                                                                                                                  |
+| [`config/`](./examples/config/)                             | 1     | YAML configuration, environment variable overrides, runtime initialization                                                                                                                                                        |
 | [`advanced/`](./examples/advanced/)                         | 3     | Self-modifying agents, neuro-symbolic reasoning, WASM tools                                                                                                                                                                       |
 
 The [`cli/`](./examples/cli/README.md) folder adds step-by-step `cogitator` CLI walkthroughs on top of these.
