@@ -44,7 +44,7 @@ import { withLLMRetry } from './llm/retry';
 import { normalizeTurn } from './llm/turn';
 import { PiiMasker, withPiiDecisions, withPiiMasking } from './security/pii';
 import { createLoggerFromConfig, getLogger, setLogger } from './logger';
-import { RunCostMeter } from './cogitator/run-cost';
+import { CallPricer, RunCostMeter } from './cogitator/run-cost';
 import { isDecisionModel } from '@cogitator-ai/models';
 import type {
   DecideOptions,
@@ -188,6 +188,8 @@ function isEmptyAnswer(response: ChatResponse): boolean {
 export class Cogitator implements ToolInvoker {
   private config: CogitatorConfig;
   private observers: RunObserver[];
+  /** Prices model calls whose provider reports no cost: by `llm.pricing`, then by the model registry. */
+  readonly pricer: CallPricer;
   private backends = new Map<string, LLMBackend>();
   private readonly decisionBackends = new Map<string, DecisionBackend>();
   private processCheckpoints?: InMemoryRunCheckpointStore;
@@ -227,6 +229,11 @@ export class Cogitator implements ToolInvoker {
    */
   constructor(config: CogitatorConfig = {}) {
     this.config = config;
+    this.pricer = new CallPricer(config.llm?.pricing, (name) =>
+      Object.hasOwn(config.llm?.backends ?? {}, name)
+        ? config.llm?.backends?.[name]?.provider
+        : undefined
+    );
     this.observers = [...(config.observers ?? [])];
     if (config.logging) setLogger(createLoggerFromConfig(config.logging));
   }
@@ -637,7 +644,7 @@ export class Cogitator implements ToolInvoker {
         if (costRouter) {
           const budgetCheck = recommendation
             ? costRouter.checkBudget(recommendation.estimatedCost)
-            : costRouter.checkRunBudget(input, model);
+            : costRouter.checkRunBudget(input, this.pricedModel(effectiveModel, routeProvider));
           if (!budgetCheck.allowed) {
             throw new CogitatorError({
               message: `Budget exceeded: ${budgetCheck.reason}`,
@@ -656,8 +663,8 @@ export class Cogitator implements ToolInvoker {
       let cachedInputTokens = checkpoint?.usage.cachedInputTokens ?? 0;
       let cacheWriteTokens = checkpoint?.usage.cacheWriteTokens ?? 0;
       let reasoningTokens = checkpoint?.usage.reasoningTokens ?? 0;
-      const costMeter = new RunCostMeter(checkpoint?.usage.cost, checkpoint?.usage);
-      const costModel = effectiveModel;
+      const costMeter = new RunCostMeter(this.pricer, checkpoint?.usage.cost, checkpoint?.usage);
+      const costModel = this.pricedModel(effectiveModel, routeProvider);
       usageSoFar = () => ({
         inputTokens: totalInputTokens,
         outputTokens: totalOutputTokens,
@@ -1051,7 +1058,8 @@ export class Cogitator implements ToolInvoker {
         response = normalizeTurn(response);
 
         const spentBefore = costMeter.total(costModel);
-        costMeter.add(response.usage, effectiveModel);
+        const callModel = this.pricedModel(effectiveModel, routeProvider);
+        costMeter.add(response.usage, callModel);
         const callCost = costMeter.total(costModel) - spentBefore;
 
         const llmSpan = createSpan(
@@ -1087,7 +1095,7 @@ export class Cogitator implements ToolInvoker {
         reasoningTokens += response.usage.reasoningTokens ?? 0;
         lastFinishReason = response.finishReason;
         if (response.usage.cost === undefined) {
-          this.state.costRouter?.noteUnreportedCost(effectiveModel);
+          this.pricer.noteUnpriced(callModel);
         }
         this.state.costRouter?.recordCost({
           runId,
@@ -1682,7 +1690,7 @@ export class Cogitator implements ToolInvoker {
 
   private ensureCostRouting(): void {
     if (this.config.costRouting?.enabled && !this.state.costRoutingInitialized) {
-      initializeCostRouting(this.config, this.state);
+      initializeCostRouting(this.config, this.state, (model) => this.pricer.pricing(model));
     }
   }
 
@@ -1733,6 +1741,7 @@ export class Cogitator implements ToolInvoker {
         retry: this.config.llm?.retry,
         observers: [...this.observers],
         recordCost: (record) => this.getCostRouter()?.recordCost(record),
+        price: (qualified, usage) => this.pricer.costOrNull(qualified, usage),
         checkBudget: (estimatedCost) => this.assertDecisionBudget(estimatedCost),
       },
       options
@@ -1764,6 +1773,18 @@ export class Cogitator implements ToolInvoker {
     });
     this.decisionBackends.set(provider, backend);
     return backend;
+  }
+
+  /**
+   * The model string a call to `modelString` is priced by: the provider it routes to, by the
+   * name it is registered under (`llm.backends`, a plugin, a built-in provider), and the model,
+   * so a bare `llama3.3` on Ollama is `ollama/llama3.3` and a backend of your own registered as
+   * `vllm` prices as `vllm/...` whatever provider name it reports. A model on an Ollama or vLLM
+   * backend registered under a name of your own (`gpu2/llama3.3`) is free like `ollama/...`.
+   */
+  pricedModel(modelString: string, explicitProvider?: string): string {
+    const { provider, model } = this.resolveRoute(modelString, explicitProvider);
+    return `${provider}/${model}`;
   }
 
   private resolveRoute(
@@ -1962,11 +1983,17 @@ export class Cogitator implements ToolInvoker {
     model?: string;
   }): Promise<CostEstimate> {
     if (!this.costEstimator) {
-      this.costEstimator = new CostEstimator();
+      this.costEstimator = new CostEstimator({
+        ownPricing: (model) => this.pricer.ownPricing(model),
+        pricing: (model) => this.pricer.pricing(model),
+      });
     }
     return this.costEstimator.estimate({
       ...params,
-      model: params.model ?? this.resolveModel(params.agent),
+      model: this.pricedModel(
+        params.model ?? this.resolveModel(params.agent),
+        params.model ? undefined : params.agent.config.provider
+      ),
     });
   }
 

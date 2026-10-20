@@ -1,5 +1,49 @@
 # @cogitator-ai/types
 
+## 0.42.0
+
+### Minor Changes
+
+- [#202](https://github.com/cogitator-ai/Cogitator-AI/pull/202) [`06ea6ec`](https://github.com/cogitator-ai/Cogitator-AI/commit/06ea6ec3eb96b4530d5f90f255c2e3abe630dfbd) - Model prices of your own and an offline catalogue. `llm.pricing` sets prices in USD per million tokens by model, for a fine-tune, a model newer than the catalogue or a negotiated rate: `pricing: { 'openai/gpt-4o': { input: 2, output: 8 } }`. A key matches the model string a run uses or its tail after any `/`: `openai/gpt-4o` prices that model string and the ones ending in it, such as `openrouter/openai/gpt-4o`, and `gpt-4o` the model at every provider that serves it under that name. These prices win over the model registry for run costs, cost-routing budgets, `estimateCost()`, Tree of Thoughts and `decide()`, and `Cogitator.pricer` exposes them.
+
+  A call whose provider reports no cost and whose model has no price used to count as $0 without a word. It still counts as $0, and the runtime now warns once per model, naming the `llm.pricing` key that fixes it. Ollama and vLLM run on your own hardware, so their calls are free unless `llm.pricing` prices them, even when a reseller lists a model of the same name, and stay quiet. A call is priced by the provider it routes to, under the name it is registered by (`llm.backends.vllm` prices as `vllm/...`), and a model string without a provider by the provider it runs on, `cog.pricedModel(model)` says which.
+
+  An Ollama or vLLM backend you register under a name of your own (`llm.backends.gpu2`) is free the same way.
+
+  A catalogue model listed without a price is no longer priced at $0: it keeps its context window and capabilities, carries `priceUnknown: true`, and the price lookups answer `null`, so its calls warn like any model without a price. A listing with a price wins over one without when a name matches several, automatic model selection skips cloud models without a price, and file caches written by earlier versions are fetched again (offline, an older cache gives way to the bundled copy).
+
+  `@cogitator-ai/models` ships a trimmed copy of the LiteLLM catalogue with its MIT notice (`LITELLM_SNAPSHOT`), the priced text and embedding models at a pinned LiteLLM commit named in `source`. The registry prices models from it when it can neither fetch the catalogue nor read its cache, and for lookups made before `initializeModels()`, where it used to know only the built-in models. Refresh it with `pnpm --filter @cogitator-ai/models snapshot`. `ModelPricer` prices by overrides of your own over the registry and `costOf` prices usage at a given `ModelPricing`.
+
+- [#202](https://github.com/cogitator-ai/Cogitator-AI/pull/202) [`06ea6ec`](https://github.com/cogitator-ai/Cogitator-AI/commit/06ea6ec3eb96b4530d5f90f255c2e3abe630dfbd) - OpenAI-compatible servers get only the request fields they understand. A server profile says which field takes the output token limit, whether streams ask for usage with `stream_options` and which `reasoning_effort` values the server takes. Set it with `profile` on `llm.providers.openai` or `llm.providers.vllm`, by preset name (`openai`, `generic`, `vllm`, `ollama`, `lmstudio`, `llamacpp`, `groq`, `together`, `deepseek`, `mistral`, `openrouter`) or field by field over a preset. An effort the server does not take is sent as the nearest one it does.
+
+  The built-in providers use their own preset. Mistral rejects fields it does not know, so it no longer gets `stream_options` (its streams failed with 422) or efforts beyond `high`. DeepSeek gets `none`, `low`, `high` or `max`, Together `low`, `medium` or `high` and no `stream_options`, Groq `max_completion_tokens`. A server without a preset keeps the request it got before. The Responses API path of the official OpenAI provider follows the profile's `reasoningEffort` too.
+
+- [#202](https://github.com/cogitator-ai/Cogitator-AI/pull/202) [`06ea6ec`](https://github.com/cogitator-ai/Cogitator-AI/commit/06ea6ec3eb96b4530d5f90f255c2e3abe630dfbd) - Anthropic and Google take `baseUrl` and `headers`, for a gateway or proxy in front of the provider: `llm.providers.anthropic.baseUrl` (or `ANTHROPIC_BASE_URL`, `COGITATOR_ANTHROPIC_BASE_URL`) and `llm.providers.google.baseUrl` (or `COGITATOR_GOOGLE_BASE_URL`), the Gemini one with its API version, `https://generativelanguage.googleapis.com/v1beta` by default. `headers` also works for `openai`, `openrouter` (for example OpenRouter's `HTTP-Referer` and `X-Title`) and `vllm`, and Bedrock takes an `endpoint` for VPC endpoints and proxies.
+
+- [#202](https://github.com/cogitator-ai/Cogitator-AI/pull/202) [`06ea6ec`](https://github.com/cogitator-ai/Cogitator-AI/commit/06ea6ec3eb96b4530d5f90f255c2e3abe630dfbd) - LLM errors are classified by the provider's own error codes, not by the HTTP status alone. Every `LLMError` carries `kind` (also as `details.kind`): `rate_limit`, `quota`, `authentication`, `permission`, `not_found`, `invalid_request`, `context_overflow`, `content_filter`, `overloaded`, `server_error`, `timeout`, `network` or `invalid_response`. The tables read OpenAI and OpenAI-compatible servers by `error.code` and `type`, Anthropic by `error.type`, Gemini by its status and the quota that ran out, Bedrock by the exception name. Errors a provider sends inside a stream that already began are classified the same way. `classifyProviderError` is exported for backends of your own.
+
+  New `ErrorCode.LLM_QUOTA_EXCEEDED` for an account out of credits or over a quota that waiting a moment will not lift: OpenAI's `insufficient_quota`, `credit_balance_exhausted` and spend or usage limits, a 402 from OpenRouter and other OpenAI-compatible servers, Anthropic's `billing_error`, a balance too low and a reached usage limit, a Gemini quota counted per day or prepaid credits that ran out, Bedrock's `ServiceQuotaExceededException`. These are never retried, and server adapters answer them with HTTP 402, which clients do not retry either.
+
+  An error with a numeric `code` inside a stream, as OpenRouter reports the failure of the model's own provider, is read as that HTTP status, and a Gemini error passed on by an OpenAI-compatible endpoint or proxy is read by Gemini's rules.
+
+  A call the caller aborts fails with the reason the caller aborted with (`signal.reason`), on every built-in backend, not with a retryable provider error a retry or fallback layer would act on. The OpenAI and Bedrock SDKs end a stream quietly when it is aborted, so a cut-off answer used to pass for a whole one. `abortReason(signal)` is exported.
+
+  Migration:
+
+  - A 429 for exhausted credits or a spend cap was `LLM_RATE_LIMITED` and retried. It is now `LLM_QUOTA_EXCEEDED`, not retryable. Code that waits and retries on `LLM_RATE_LIMITED` keeps working for real rate limits.
+  - A 504 from a provider was `LLM_UNAVAILABLE`, it is now `LLM_TIMEOUT` (still retryable). A 408 was `LLM_INVALID_RESPONSE` and not retried, it is now `LLM_TIMEOUT` and retried.
+  - A 402 was `LLM_INVALID_RESPONSE`, it is now `LLM_QUOTA_EXCEEDED`. A 413 or 422 was `LLM_INVALID_RESPONSE`, it is now `VALIDATION_ERROR` (or `LLM_CONTEXT_LENGTH_EXCEEDED` when the provider says the prompt is too long).
+  - An Anthropic 400 about a credit balance too low or a reached usage limit was `VALIDATION_ERROR`, it is now `LLM_QUOTA_EXCEEDED`. A Gemini 400 `FAILED_PRECONDITION` (no free tier in the region and no billing) was `VALIDATION_ERROR`, it is now `LLM_UNAVAILABLE` with `kind: 'permission'`.
+  - A prompt Gemini blocks was `LLM_INVALID_RESPONSE`, it is now `LLM_CONTENT_FILTERED`.
+  - An aborted call rejects with the abort reason. Check `signal.aborted` or the error you aborted with, not `LLMError`.
+  - A 403 is reported as `Permission denied (403)` instead of `Authentication failed (403)`, a 503 or 529 as `Provider overloaded`, both with the same code as before.
+
+## 0.41.1
+
+### Patch Changes
+
+- [#199](https://github.com/cogitator-ai/Cogitator-AI/pull/199) [`fd99224`](https://github.com/cogitator-ai/Cogitator-AI/commit/fd992243b89f3941f76c2acb607b59468a35480a) - Packages declare `"sideEffects": false`, so bundlers can leave out the modules an app does not use. None of them runs code at import time that depends on being kept. The repository URL in each package.json uses the `git+https` form npm expects.
+
 ## 0.41.0
 
 ### Minor Changes

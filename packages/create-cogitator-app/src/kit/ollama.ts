@@ -1,3 +1,4 @@
+import { resolveOllamaHost } from '@cogitator-ai/config';
 import { DEFAULT_OLLAMA_URL } from './providers.js';
 
 export interface OllamaModel {
@@ -9,22 +10,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** `value` without the slashes it ends with, in linear time, unlike `replace(/\/+$/, '')`. */
-function trimTrailingSlashes(value: string): string {
-  let end = value.length;
-  while (end > 0 && value[end - 1] === '/') end--;
-  return value.slice(0, end);
-}
-
 /**
- * The Ollama server the generated code talks to: `OLLAMA_BASE_URL`, which it
- * reads, then `OLLAMA_HOST`, which the Ollama CLI reads, then the local default.
+ * The Ollama server the generated project talks to: `OLLAMA_BASE_URL`, which
+ * its `cogitator.yml` reads, else the local default. `OLLAMA_HOST` is where
+ * the Ollama server listens, often `0.0.0.0`, and the project never reads it.
+ * A bare host gets port 11434, the way Ollama reads its own address.
  */
 export function resolveOllamaUrl(env: Record<string, string | undefined> = process.env): string {
-  const raw = env.OLLAMA_BASE_URL?.trim() || env.OLLAMA_HOST?.trim();
-  if (!raw) return DEFAULT_OLLAMA_URL;
-  const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
-  return trimTrailingSlashes(withScheme);
+  return resolveOllamaHost(env.OLLAMA_BASE_URL) ?? DEFAULT_OLLAMA_URL;
 }
 
 /** The models installed in the Ollama at `baseUrl`, or `undefined` when it does not answer. */

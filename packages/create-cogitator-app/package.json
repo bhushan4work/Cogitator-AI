@@ -1,6 +1,6 @@
 {
   "name": "create-cogitator-app",
-  "version": "0.7.0",
+  "version": "0.8.1",
   "description": "Create a new Cogitator AI agent project",
   "keywords": [
     "cogitator",
@@ -14,7 +14,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/cogitator-ai/Cogitator-AI.git",
+    "url": "git+https://github.com/cogitator-ai/Cogitator-AI.git",
     "directory": "packages/create-cogitator-app"
   },
   "type": "module",
@@ -24,6 +24,7 @@
   "exports": {
     ".": "./dist/lib.js"
   },
+  "sideEffects": false,
   "files": [
     "dist"
   ],
@@ -39,6 +40,7 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.8.1",
+    "@cogitator-ai/config": "workspace:^",
     "@cogitator-ai/deploy": "workspace:^",
     "@cogitator-ai/models": "workspace:^",
     "picocolors": "^1.1.0",

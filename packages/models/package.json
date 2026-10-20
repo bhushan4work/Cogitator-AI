@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/models",
-  "version": "18.4.0",
+  "version": "18.5.0",
   "description": "Dynamic model registry with pricing for Cogitator",
   "keywords": [
     "cogitator",
@@ -20,6 +20,7 @@
       "default": "./dist/index.js"
     }
   },
+  "sideEffects": false,
   "files": [
     "dist"
   ],
@@ -29,7 +30,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "test:watch": "vitest",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "snapshot": "tsx scripts/update-litellm-snapshot.ts"
   },
   "engines": {
     "node": ">=22.12.0"
@@ -44,7 +46,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/cogitator-ai/Cogitator-AI.git",
+    "url": "git+https://github.com/cogitator-ai/Cogitator-AI.git",
     "directory": "packages/models"
   },
   "publishConfig": {

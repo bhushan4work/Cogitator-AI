@@ -18,13 +18,96 @@ import { LLMJudge } from './judge';
 const TEST_MODEL = process.env.TEST_MODEL || 'gpt-oss:20b';
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
 
-export async function isOllamaRunning(): Promise<boolean> {
+const OLLAMA_PROBE_TIMEOUT_MS = 5_000;
+
+/** OLLAMA_URL for messages, without the credentials a URL may carry. */
+function displayOllamaUrl(): string {
+  let url: URL;
   try {
-    const res = await fetch(`${OLLAMA_URL}/api/tags`);
-    return res.ok;
+    url = new URL(OLLAMA_URL);
   } catch {
-    return false;
+    return OLLAMA_URL;
   }
+  if (!url.username && !url.password) return OLLAMA_URL;
+  url.username = '';
+  url.password = '';
+  return url.href.replace(/\/$/, '');
+}
+
+interface OllamaTagsResponse {
+  models?: Array<{ name?: string; model?: string }>;
+}
+
+type OllamaModels = { ok: true; names: string[] } | { ok: false; reason: string };
+
+async function listOllamaModels(): Promise<OllamaModels> {
+  let res: Response;
+  try {
+    res = await fetch(`${OLLAMA_URL}/api/tags`, {
+      signal: AbortSignal.timeout(OLLAMA_PROBE_TIMEOUT_MS),
+    });
+  } catch {
+    return { ok: false, reason: `Ollama is not reachable at ${displayOllamaUrl()}` };
+  }
+  if (!res.ok) {
+    return {
+      ok: false,
+      reason: `Ollama at ${displayOllamaUrl()} answered /api/tags with ${res.status}`,
+    };
+  }
+  try {
+    const body = (await res.json()) as OllamaTagsResponse;
+    const names = (body.models ?? []).flatMap((m) => [m.name, m.model]);
+    return { ok: true, names: names.filter((n): n is string => typeof n === 'string') };
+  } catch {
+    return {
+      ok: false,
+      reason: `Ollama at ${displayOllamaUrl()} answered /api/tags with invalid JSON`,
+    };
+  }
+}
+
+/** Ollama lists an untagged pull as `<name>:latest`. */
+function matchesOllamaModel(pulled: string, wanted: string): boolean {
+  const withTag = wanted.includes(':') ? wanted : `${wanted}:latest`;
+  return pulled === wanted || pulled === withTag;
+}
+
+/** Whether the local Ollama answers and has `model` pulled. */
+export async function ollamaHasModel(model: string = TEST_MODEL): Promise<boolean> {
+  const listed = await listOllamaModels();
+  return listed.ok && listed.names.some((name) => matchesOllamaModel(name, model));
+}
+
+async function probeOllama(): Promise<string | null> {
+  if (process.env.TEST_OLLAMA !== 'true') return 'TEST_OLLAMA is not "true"';
+  const listed = await listOllamaModels();
+  if (!listed.ok) return listed.reason;
+  if (!listed.names.some((name) => matchesOllamaModel(name, TEST_MODEL))) {
+    return `model ${TEST_MODEL} is not pulled, run: ollama pull ${TEST_MODEL}`;
+  }
+  return null;
+}
+
+let ollamaProbe: Promise<string | null> | undefined;
+
+/**
+ * Why the local Ollama e2e cannot run here, or null when they can: TEST_OLLAMA is "true",
+ * Ollama answers at OLLAMA_URL and TEST_MODEL is pulled. Probed once per test file, and the
+ * reason is printed when TEST_OLLAMA asked for these tests, the way the Studio e2e reports a
+ * missing Chromium. In CI a run that asked for them fails instead: a job that set up Ollama
+ * must not go green with every Ollama suite skipped.
+ */
+export function ollamaSkipReason(): Promise<string | null> {
+  ollamaProbe ??= probeOllama().then((reason) => {
+    if (reason === null || process.env.TEST_OLLAMA !== 'true') return reason;
+    if (process.env.CI === 'true') {
+      throw new Error(`TEST_OLLAMA is "true" in CI, but ${reason}`);
+    }
+    console.warn(`Skipping the Ollama e2e: ${reason}`);
+    return reason;
+  });
+  return ollamaProbe;
 }
 
 export function createTestCogitator(opts?: { memory?: boolean }): Cogitator {

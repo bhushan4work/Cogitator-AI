@@ -2,6 +2,7 @@ import type { ModelInfo, ModelFilter, ModelPricing, RegistryOptions, ProviderInf
 import { ModelCache } from './cache';
 import { fetchLiteLLMData, normalizeProviderId, transformLiteLLMData } from './fetcher';
 import { BUILTIN_MODELS, BUILTIN_PROVIDERS } from './providers/index';
+import { LITELLM_SNAPSHOT } from './snapshot';
 
 /** Providers a bare model name prefers, first-party APIs and the major clouds first. */
 const PREFERRED_PROVIDERS: readonly string[] = BUILTIN_PROVIDERS.map((provider) => provider.id);
@@ -24,7 +25,8 @@ function compareText(a: string, b: string): number {
 }
 
 /**
- * Orders the models a name could mean, best first: active before deprecated,
+ * Orders the models a name could mean, best first: active before deprecated, a listing with a
+ * price before one without,
  * a first-party listing (a built-in model or an unprefixed catalogue key)
  * before resellers, then {@link PREFERRED_PROVIDERS}, then a model named
  * exactly so before one it is the tail of, then the shorter id, then
@@ -33,6 +35,7 @@ function compareText(a: string, b: string): number {
 function compareCandidates(name: string, a: ModelInfo, b: ModelInfo): number {
   return (
     Number(a.deprecated ?? false) - Number(b.deprecated ?? false) ||
+    Number(a.priceUnknown ?? false) - Number(b.priceUnknown ?? false) ||
     Number(!isFirstParty(a)) - Number(!isFirstParty(b)) ||
     providerRank(a.provider) - providerRank(b.provider) ||
     Number(a.id.toLowerCase() !== name) - Number(b.id.toLowerCase() !== name) ||
@@ -40,6 +43,63 @@ function compareCandidates(name: string, a: ModelInfo, b: ModelInfo): number {
     compareText(a.provider, b.provider) ||
     compareText((a.catalogId ?? a.id).toLowerCase(), (b.catalogId ?? b.id).toLowerCase())
   );
+}
+
+let offline: ModelInfo[] | null = null;
+
+/**
+ * The models the registry knows without the network: the built-in ones, priced and sized from
+ * the copy of the LiteLLM catalogue bundled with the package, and the rest of that copy.
+ */
+function offlineModels(): ModelInfo[] {
+  offline ??= mergeCatalogue(transformLiteLLMData(LITELLM_SNAPSHOT.models));
+  return offline;
+}
+
+/** The built-in models with `fetched` catalogue models over them, their prices and limits taken from the catalogue. */
+function mergeCatalogue(fetched: ModelInfo[]): ModelInfo[] {
+  const modelMap = new Map<string, ModelInfo>();
+
+  for (const model of BUILTIN_MODELS) {
+    modelMap.set(modelKey(model), model);
+  }
+
+  for (const model of fetched) {
+    const key = modelKey(model);
+    const existing = modelMap.get(key);
+    if (existing) {
+      const aliases = [...new Set([...(existing.aliases ?? []), ...(model.aliases ?? [])])];
+      modelMap.set(key, {
+        ...existing,
+        ...(model.catalogId !== undefined && { catalogId: model.catalogId }),
+        pricing: model.priceUnknown ? existing.pricing : model.pricing,
+        contextWindow: model.contextWindow ?? existing.contextWindow,
+        maxOutputTokens: model.maxOutputTokens ?? existing.maxOutputTokens,
+        capabilities: mergeCapabilities(existing.capabilities, model.capabilities),
+        deprecated: existing.deprecated || model.deprecated || undefined,
+        ...(aliases.length > 0 && { aliases }),
+      });
+    } else {
+      modelMap.set(key, model);
+    }
+  }
+
+  return Array.from(modelMap.values());
+}
+
+function mergeCapabilities(
+  existing: ModelInfo['capabilities'],
+  fetched: ModelInfo['capabilities']
+): ModelInfo['capabilities'] {
+  if (!existing && !fetched) return undefined;
+
+  return {
+    supportsVision: fetched?.supportsVision ?? existing?.supportsVision,
+    supportsTools: fetched?.supportsTools ?? existing?.supportsTools,
+    supportsFunctions: fetched?.supportsFunctions ?? existing?.supportsFunctions,
+    supportsStreaming: fetched?.supportsStreaming ?? existing?.supportsStreaming,
+    supportsJson: fetched?.supportsJson ?? existing?.supportsJson,
+  };
 }
 
 export class ModelRegistry {
@@ -70,9 +130,11 @@ export class ModelRegistry {
 
   /**
    * Loads the model catalogue: from the cache when it is fresh, otherwise from LiteLLM, falling
-   * back to the built-in models when both fail and `fallbackToBuiltin` is set. Lookups made
-   * before it use the built-in models without counting as initialization, so calling it later
-   * still loads the full catalogue. Overlapping calls share one load.
+   * back to the offline catalogue when both fail and `fallbackToBuiltin` is set: the built-in
+   * models and the copy of the LiteLLM catalogue bundled with the package
+   * (`LITELLM_SNAPSHOT.fetchedAt` says how old it is). Lookups made before it use the offline
+   * catalogue without counting as initialization, so calling it later still loads the current
+   * one. Overlapping calls share one load.
    */
   async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -96,7 +158,7 @@ export class ModelRegistry {
       }
     } catch (error) {
       if (this.options.fallbackToBuiltin) {
-        this.loadModels(BUILTIN_MODELS);
+        this.loadModels(offlineModels());
         this.initialized = true;
       } else {
         throw error;
@@ -113,7 +175,7 @@ export class ModelRegistry {
       const data = await fetchLiteLLMData();
       const models = transformLiteLLMData(data);
 
-      const allModels = this.mergeWithBuiltin(models);
+      const allModels = mergeCatalogue(models);
 
       await this.cache.set(allModels);
       this.loadModels(allModels);
@@ -127,7 +189,7 @@ export class ModelRegistry {
       }
 
       if (this.options.fallbackToBuiltin) {
-        this.loadModels(BUILTIN_MODELS);
+        this.loadModels(offlineModels());
         this.initialized = true;
         return;
       }
@@ -150,12 +212,13 @@ export class ModelRegistry {
 
   getPrice(id: string): { input: number; output: number } | null {
     const model = this.getModel(id);
-    if (!model?.pricing) return null;
+    if (!model?.pricing || model.priceUnknown) return null;
     return { input: model.pricing.input, output: model.pricing.output };
   }
 
   getPricing(id: string): ModelPricing | null {
-    return this.getModel(id)?.pricing ?? null;
+    const model = this.getModel(id);
+    return model && !model.priceUnknown ? model.pricing : null;
   }
 
   listModels(filter?: ModelFilter): ModelInfo[] {
@@ -191,6 +254,7 @@ export class ModelRegistry {
         }
 
         if (filter.maxPricePerMillion !== undefined) {
+          if (model.priceUnknown) return false;
           const avgPrice = (model.pricing.input + model.pricing.output) / 2;
           if (avgPrice > filter.maxPricePerMillion) {
             return false;
@@ -287,51 +351,6 @@ export class ModelRegistry {
     }
   }
 
-  private mergeWithBuiltin(fetched: ModelInfo[]): ModelInfo[] {
-    const modelMap = new Map<string, ModelInfo>();
-
-    for (const model of BUILTIN_MODELS) {
-      modelMap.set(modelKey(model), model);
-    }
-
-    for (const model of fetched) {
-      const key = modelKey(model);
-      const existing = modelMap.get(key);
-      if (existing) {
-        const aliases = [...new Set([...(existing.aliases ?? []), ...(model.aliases ?? [])])];
-        modelMap.set(key, {
-          ...existing,
-          ...(model.catalogId !== undefined && { catalogId: model.catalogId }),
-          pricing: model.pricing,
-          contextWindow: model.contextWindow ?? existing.contextWindow,
-          maxOutputTokens: model.maxOutputTokens ?? existing.maxOutputTokens,
-          capabilities: this.mergeCapabilities(existing.capabilities, model.capabilities),
-          deprecated: existing.deprecated || model.deprecated || undefined,
-          ...(aliases.length > 0 && { aliases }),
-        });
-      } else {
-        modelMap.set(key, model);
-      }
-    }
-
-    return Array.from(modelMap.values());
-  }
-
-  private mergeCapabilities(
-    existing: ModelInfo['capabilities'],
-    fetched: ModelInfo['capabilities']
-  ): ModelInfo['capabilities'] {
-    if (!existing && !fetched) return undefined;
-
-    return {
-      supportsVision: fetched?.supportsVision ?? existing?.supportsVision,
-      supportsTools: fetched?.supportsTools ?? existing?.supportsTools,
-      supportsFunctions: fetched?.supportsFunctions ?? existing?.supportsFunctions,
-      supportsStreaming: fetched?.supportsStreaming ?? existing?.supportsStreaming,
-      supportsJson: fetched?.supportsJson ?? existing?.supportsJson,
-    };
-  }
-
   private resolve(id: string): ModelInfo | null {
     const direct = this.keys.get(id) ?? this.aliases.get(id);
     if (direct) return direct;
@@ -375,14 +394,14 @@ export class ModelRegistry {
   }
 
   private ensureInitialized(): void {
-    if (!this.loaded) this.loadModels(BUILTIN_MODELS);
+    if (!this.loaded) this.loadModels(offlineModels());
   }
 
   private refreshInBackground(): void {
     void fetchLiteLLMData()
       .then(async (data) => {
         const models = transformLiteLLMData(data);
-        const allModels = this.mergeWithBuiltin(models);
+        const allModels = mergeCatalogue(models);
         await this.cache.set(allModels);
         this.loadModels(allModels);
       })
@@ -445,7 +464,11 @@ export interface TokenUsageForCost {
  */
 export function calculateCost(modelId: string, usage: TokenUsageForCost): number | null {
   const pricing = getPricing(modelId);
-  if (!pricing) return null;
+  return pricing ? costOf(pricing, usage) : null;
+}
+
+/** Cost in USD of `usage` at `pricing`, cache reads and writes priced as {@link calculateCost} does. */
+export function costOf(pricing: ModelPricing, usage: TokenUsageForCost): number {
   const cached = Math.min(usage.cachedInputTokens ?? 0, usage.inputTokens);
   const written = Math.min(usage.cacheWriteTokens ?? 0, usage.inputTokens - cached);
   const writtenFor1h = Math.min(usage.cacheWrite1hTokens ?? 0, written);

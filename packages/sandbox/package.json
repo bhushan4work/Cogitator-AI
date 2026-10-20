@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/sandbox",
-  "version": "0.5.14",
+  "version": "0.5.16",
   "description": "Sandbox execution for Cogitator agents (Docker and WASM)",
   "keywords": [
     "cogitator",
@@ -22,6 +22,7 @@
       "default": "./dist/index.js"
     }
   },
+  "sideEffects": false,
   "files": [
     "dist"
   ],
@@ -64,7 +65,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/cogitator-ai/Cogitator-AI.git",
+    "url": "git+https://github.com/cogitator-ai/Cogitator-AI.git",
     "directory": "packages/sandbox"
   },
   "publishConfig": {

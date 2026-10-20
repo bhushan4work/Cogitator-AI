@@ -13,7 +13,6 @@ import type {
   LLMBackend,
 } from '@cogitator-ai/types';
 import { DEFAULT_TOT_CONFIG } from '@cogitator-ai/types';
-import { callCost } from '../cogitator/run-cost';
 import type { Cogitator } from '../runtime';
 import { BranchGenerator } from './branch-generator';
 import { BranchEvaluator } from './branch-evaluator';
@@ -51,6 +50,7 @@ export class ThoughtTreeExecutor {
   private llm?: LLMBackend;
   private model = '';
   private modelString = '';
+  private priceKey = '';
 
   private nodes = new Map<string, ThoughtNode>();
   private open: ThoughtNode[] = [];
@@ -76,6 +76,7 @@ export class ThoughtTreeExecutor {
     this.modelString = this.cogitator.resolveModel(agent);
     const route = this.cogitator.route(this.modelString, agent.config.provider);
     this.model = route.model;
+    this.priceKey = this.cogitator.pricedModel(this.modelString, agent.config.provider);
     this.llm = this.trackUsage(route.backend);
 
     this.branchGenerator = new BranchGenerator(this.llm, this.model);
@@ -503,7 +504,7 @@ export class ThoughtTreeExecutor {
   private recordUsage(usage: ChatUsage): void {
     this.stats.tokenUsage.input += usage.inputTokens;
     this.stats.tokenUsage.output += usage.outputTokens;
-    this.cost += callCost(this.modelString, usage);
+    this.cost += this.cogitator.pricer.callCost(this.priceKey, usage);
   }
 
   private getReflectionEngine(): ReflectionEngine | undefined {

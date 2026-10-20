@@ -1,5 +1,26 @@
 # @cogitator-ai/test-utils
 
+## 0.3.0
+
+### Minor Changes
+
+- [#202](https://github.com/cogitator-ai/Cogitator-AI/pull/202) [`06ea6ec`](https://github.com/cogitator-ai/Cogitator-AI/commit/06ea6ec3eb96b4530d5f90f255c2e3abe630dfbd) - A conformance kit for LLM backends. `backendConformanceCases(target)` runs one set of scenarios through a backend's real SDK against a fake provider that answers in that provider's wire format: an answer, tool calls with a tool stop and with a plain stop, a tool call cut at the token limit, a content filter, an error inside a stream, an abort, and rate limit, quota, authentication, overload, server and context overflow errors. The cases do not depend on a test runner, each `run()` throws an `AssertionError` when the backend breaks the contract.
+
+  `startFakeProvider` serves HTTP/1.1 or HTTP/2 without TLS, and wires are included for OpenAI Chat Completions and Responses, Anthropic, Gemini, Ollama and Bedrock Converse, so a backend of your own for an OpenAI-compatible server can be checked with `openAIChatWire`.
+
+### Patch Changes
+
+- Updated dependencies [[`06ea6ec`](https://github.com/cogitator-ai/Cogitator-AI/commit/06ea6ec3eb96b4530d5f90f255c2e3abe630dfbd), [`06ea6ec`](https://github.com/cogitator-ai/Cogitator-AI/commit/06ea6ec3eb96b4530d5f90f255c2e3abe630dfbd), [`06ea6ec`](https://github.com/cogitator-ai/Cogitator-AI/commit/06ea6ec3eb96b4530d5f90f255c2e3abe630dfbd), [`06ea6ec`](https://github.com/cogitator-ai/Cogitator-AI/commit/06ea6ec3eb96b4530d5f90f255c2e3abe630dfbd)]:
+  - @cogitator-ai/types@0.42.0
+
+## 0.2.20
+
+### Patch Changes
+
+- [#199](https://github.com/cogitator-ai/Cogitator-AI/pull/199) [`fd99224`](https://github.com/cogitator-ai/Cogitator-AI/commit/fd992243b89f3941f76c2acb607b59468a35480a) - Packages declare `"sideEffects": false`, so bundlers can leave out the modules an app does not use. None of them runs code at import time that depends on being kept. The repository URL in each package.json uses the `git+https` form npm expects.
+- Updated dependencies [[`fd99224`](https://github.com/cogitator-ai/Cogitator-AI/commit/fd992243b89f3941f76c2acb607b59468a35480a)]:
+  - @cogitator-ai/types@0.41.1
+
 ## 0.2.19
 
 ### Patch Changes

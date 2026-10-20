@@ -18,6 +18,39 @@ export const LLMProviderSchema = z.enum([
   'openrouter',
 ]);
 
+const ProviderHeadersSchema = z.record(
+  z.string(),
+  z.string().refine((value) => !/[\r\n]/.test(value), {
+    message: 'A header value cannot contain a line break',
+  })
+);
+
+export const OpenAICompatibleServerSchema = z.enum([
+  'openai',
+  'generic',
+  'vllm',
+  'ollama',
+  'lmstudio',
+  'llamacpp',
+  'groq',
+  'together',
+  'deepseek',
+  'mistral',
+  'openrouter',
+]);
+
+const ReasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+
+export const OpenAICompatibleProfileSchema = z.union([
+  OpenAICompatibleServerSchema,
+  z.object({
+    server: OpenAICompatibleServerSchema.optional(),
+    maxTokensField: z.enum(['max_tokens', 'max_completion_tokens']).optional(),
+    streamUsage: z.boolean().optional(),
+    reasoningEffort: z.union([z.boolean(), z.array(ReasoningEffortSchema)]).optional(),
+  }),
+]);
+
 export const ProvidersConfigSchema = z.object({
   ollama: z
     .object({ baseUrl: z.string().optional(), apiKey: z.string().optional() })
@@ -31,10 +64,24 @@ export const ProvidersConfigSchema = z.object({
       apiKey: z.string(),
       baseUrl: z.string().optional(),
       api: z.enum(['responses', 'chat-completions']).optional(),
+      profile: OpenAICompatibleProfileSchema.optional(),
+      headers: ProviderHeadersSchema.optional(),
     })
     .optional(),
-  anthropic: z.object({ apiKey: z.string() }).optional(),
-  google: z.object({ apiKey: z.string() }).optional(),
+  anthropic: z
+    .object({
+      apiKey: z.string(),
+      baseUrl: z.string().optional(),
+      headers: ProviderHeadersSchema.optional(),
+    })
+    .optional(),
+  google: z
+    .object({
+      apiKey: z.string(),
+      baseUrl: z.string().optional(),
+      headers: ProviderHeadersSchema.optional(),
+    })
+    .optional(),
   azure: z
     .object({
       apiKey: z.string(),
@@ -51,14 +98,27 @@ export const ProvidersConfigSchema = z.object({
       secretAccessKey: z.string().optional(),
       sessionToken: z.string().optional(),
       profile: z.string().optional(),
+      endpoint: z.string().optional(),
     })
     .optional(),
-  vllm: z.object({ baseUrl: z.string() }).optional(),
+  vllm: z
+    .object({
+      baseUrl: z.string(),
+      profile: OpenAICompatibleProfileSchema.optional(),
+      headers: ProviderHeadersSchema.optional(),
+    })
+    .optional(),
   mistral: z.object({ apiKey: z.string() }).optional(),
   groq: z.object({ apiKey: z.string() }).optional(),
   together: z.object({ apiKey: z.string() }).optional(),
   deepseek: z.object({ apiKey: z.string() }).optional(),
-  openrouter: z.object({ apiKey: z.string(), baseUrl: z.string().optional() }).optional(),
+  openrouter: z
+    .object({
+      apiKey: z.string(),
+      baseUrl: z.string().optional(),
+      headers: ProviderHeadersSchema.optional(),
+    })
+    .optional(),
 });
 
 export const LLMRetryConfigSchema = z.union([
@@ -72,11 +132,22 @@ export const LLMRetryConfigSchema = z.union([
   }),
 ]);
 
+const PriceSchema = z.number().nonnegative();
+
+export const ModelPriceSchema = z.object({
+  input: PriceSchema,
+  output: PriceSchema,
+  inputCached: PriceSchema.optional(),
+  inputCacheWrite: PriceSchema.optional(),
+  inputCacheWrite1h: PriceSchema.optional(),
+});
+
 export const LLMConfigSchema = z.object({
   defaultProvider: LLMProviderSchema.optional(),
   defaultModel: z.string().optional(),
   providers: ProvidersConfigSchema.optional(),
   retry: LLMRetryConfigSchema.optional(),
+  pricing: z.record(z.string(), ModelPriceSchema).optional(),
   promptCache: z
     .union([
       z.literal(false),

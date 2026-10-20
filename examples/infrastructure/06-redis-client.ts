@@ -108,10 +108,6 @@ async function main() {
     const received = await messagePromise;
     console.log(`  [Subscriber] Verified message payload: ${received}`);
 
-    // Unsubscribe from channel
-    await subscriber.unsubscribe(channel);
-    console.log(`  [Subscriber] Unsubscribed from "${channel}".`);
-
     // Clean up temporary keys
     await client.del('app:name', 'app:version', 'app:status', 'stats:visits');
     console.log('\nCleaned up demo keys.');
@@ -142,4 +138,4 @@ async function main() {
   console.log('\nDone.');
 }
 
-main().catch(console.error);
+main();

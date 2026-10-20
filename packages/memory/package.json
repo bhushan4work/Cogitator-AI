@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/memory",
-  "version": "0.12.5",
+  "version": "0.12.7",
   "description": "Memory adapters for Cogitator AI agents",
   "keywords": [
     "cogitator",
@@ -26,6 +26,7 @@
       "default": "./dist/index.js"
     }
   },
+  "sideEffects": false,
   "files": [
     "dist"
   ],
@@ -84,7 +85,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/cogitator-ai/Cogitator-AI.git",
+    "url": "git+https://github.com/cogitator-ai/Cogitator-AI.git",
     "directory": "packages/memory"
   },
   "publishConfig": {

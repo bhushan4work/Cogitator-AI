@@ -1,5 +1,26 @@
 # @cogitator-ai/tetsu
 
+## 0.5.7
+
+### Patch Changes
+
+- Updated dependencies [[`06ea6ec`](https://github.com/cogitator-ai/Cogitator-AI/commit/06ea6ec3eb96b4530d5f90f255c2e3abe630dfbd), [`06ea6ec`](https://github.com/cogitator-ai/Cogitator-AI/commit/06ea6ec3eb96b4530d5f90f255c2e3abe630dfbd), [`06ea6ec`](https://github.com/cogitator-ai/Cogitator-AI/commit/06ea6ec3eb96b4530d5f90f255c2e3abe630dfbd), [`06ea6ec`](https://github.com/cogitator-ai/Cogitator-AI/commit/06ea6ec3eb96b4530d5f90f255c2e3abe630dfbd)]:
+  - @cogitator-ai/types@0.42.0
+  - @cogitator-ai/core@0.40.0
+  - @cogitator-ai/memory@0.12.7
+  - @cogitator-ai/server-shared@0.5.7
+
+## 0.5.6
+
+### Patch Changes
+
+- [#199](https://github.com/cogitator-ai/Cogitator-AI/pull/199) [`fd99224`](https://github.com/cogitator-ai/Cogitator-AI/commit/fd992243b89f3941f76c2acb607b59468a35480a) - Packages declare `"sideEffects": false`, so bundlers can leave out the modules an app does not use. None of them runs code at import time that depends on being kept. The repository URL in each package.json uses the `git+https` form npm expects.
+- Updated dependencies [[`fd99224`](https://github.com/cogitator-ai/Cogitator-AI/commit/fd992243b89f3941f76c2acb607b59468a35480a)]:
+  - @cogitator-ai/core@0.39.1
+  - @cogitator-ai/memory@0.12.6
+  - @cogitator-ai/server-shared@0.5.6
+  - @cogitator-ai/types@0.41.1
+
 ## 0.5.5
 
 ### Patch Changes

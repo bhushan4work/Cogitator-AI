@@ -7,12 +7,16 @@ import {
   detectPackageManagerSpec,
   firstRunNotice,
   installFailure,
+  isInteractive,
+  offerServices,
   parseSpec,
   payloadFor,
   scaffold,
   sendTelemetry,
+  servicesToStart,
   telemetryDisabledReason,
   validateProjectName,
+  type ProjectPlan,
   type ProjectSpecInput,
   type ScaffoldLogger,
 } from 'create-cogitator-app';
@@ -107,6 +111,20 @@ export function initSecrets(answers: InitAnswers): Record<string, string> {
     secrets.DATABASE_URL = answers.databaseUrl;
   }
   return secrets;
+}
+
+type ComposeServices = Pick<ProjectPlan, 'services' | 'oneShotServices'>;
+
+/**
+ * The compose services `cogitator init` offers to start: all of them, but
+ * Postgres when the project connects to a database of its own.
+ */
+export function initServices(plan: ComposeServices, answers: InitAnswers): ComposeServices {
+  if (initSecrets(answers).DATABASE_URL === undefined) return plan;
+  return {
+    services: plan.services.filter((name) => name !== 'postgres'),
+    oneShotServices: plan.oneShotServices.filter((name) => name !== 'postgres'),
+  };
 }
 
 function cancelled(): never {
@@ -335,11 +353,17 @@ export const initCommand = new Command('init')
       }
       if (telemetry) await sendTelemetry(payloadFor(result.plan.spec, installFailure(result)));
 
+      const services = isInteractive({ yes: false, json: false })
+        ? await servicesToStart(initServices(result.plan, answers))
+        : undefined;
+      const servicesStarted = services !== undefined && (await offerServices(directory, services));
       const steps = result.plan.nextSteps({
         directory: answers.projectName,
         installed: result.install.status === 'done',
         keyWritten: true,
         modelReady: answers.provider !== 'ollama',
+        servicesStarted,
+        modelPulling: servicesStarted && services.services.includes('ollama'),
       });
       p.note(
         steps.map((step) => `${step.command}${step.note ? `  # ${step.note}` : ''}`).join('\n'),

@@ -27,12 +27,19 @@ import type {
   Message,
   MessageContent,
   ReasoningConfig,
+  ReasoningEffort,
   ToolCall,
   ToolCallReplayState,
   ToolChoice,
   ToolSchema,
 } from '@cogitator-ai/types';
+import {
+  OPENAI_COMPATIBLE_PROFILES,
+  reasoningEffortFor,
+  type ResolvedOpenAICompatibleProfile,
+} from './openai-profiles';
 import { createLLMError, llmInvalidResponse, type LLMError, type LLMErrorContext } from './errors';
+import { classifyProviderError, statusOfKind } from './error-tables';
 import { finishRunsTools, normalizeTurn, toolCallArguments } from './turn';
 
 export const DEFAULT_OPENAI_MODEL = 'gpt-6.1-sol';
@@ -51,8 +58,17 @@ export function isOpenAIReasoningModel(model: string): boolean {
 
 export type ResponsesRequestParams = Omit<ResponseCreateParamsBase, 'stream'>;
 
-export function buildResponsesParams(request: ChatRequest, model: string): ResponsesRequestParams {
+/**
+ * The Responses API request for `request`. `profile` decides which `reasoning.effort` goes out,
+ * as it does for Chat Completions.
+ */
+export function buildResponsesParams(
+  request: ChatRequest,
+  model: string,
+  profile: ResolvedOpenAICompatibleProfile = OPENAI_COMPATIBLE_PROFILES.openai
+): ResponsesRequestParams {
   const reasoning = isOpenAIReasoningModel(model);
+  const effort = reasoningEffortFor(profile, request.reasoning?.effort);
   const { instructions, input } = toResponsesInput(request.messages, reasoning);
 
   return {
@@ -67,15 +83,15 @@ export function buildResponsesParams(request: ChatRequest, model: string): Respo
     ...(reasoning
       ? {
           include: ['reasoning.encrypted_content'],
-          ...(request.reasoning && { reasoning: toReasoningParam(request.reasoning) }),
+          ...(request.reasoning && { reasoning: toReasoningParam(request.reasoning, effort) }),
         }
       : { temperature: request.temperature, top_p: request.topP }),
   };
 }
 
-function toReasoningParam(config: ReasoningConfig): Reasoning {
+function toReasoningParam(config: ReasoningConfig, effort: ReasoningEffort | undefined): Reasoning {
   return {
-    ...(config.effort && { effort: config.effort }),
+    ...(effort && { effort }),
     ...(config.summary && { summary: 'auto' as const }),
   };
 }
@@ -420,25 +436,23 @@ function toUsage(usage: ResponseUsage | null | undefined): ChatUsage {
   };
 }
 
+/**
+ * The error of a failed response (`response.failed`, or `status: 'failed'`), classified by its
+ * `ResponseError.code` like an API error. A code the tables do not know is a bad request, as the
+ * API reports the failures it does not retry itself.
+ */
 function toResponsesError(
   error: { code: string | null; message: string } | null | undefined,
   ctx: LLMErrorContext
 ): LLMError {
   const code = error?.code ?? 'response_failed';
   const message = error?.message ?? 'The model failed to generate a response';
-  return createLLMError(ctx, statusForErrorCode(code), `${code}: ${message}`);
-}
-
-function statusForErrorCode(code: string): number {
-  switch (code) {
-    case 'rate_limit_exceeded':
-      return 429;
-    case 'server_error':
-    case 'vector_store_timeout':
-      return 500;
-    default:
-      return 400;
-  }
+  const body = JSON.stringify({ error: { code, message: `${code}: ${message}` } });
+  const kind = classifyProviderError(ctx.provider, undefined, body);
+  const known = kind !== 'server_error' || code === 'server_error';
+  return createLLMError(ctx, known ? statusOfKind(kind) : 400, body, {
+    kind: known ? kind : 'invalid_request',
+  });
 }
 
 function toFunctionTool(tool: ToolSchema): FunctionTool {

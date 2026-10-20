@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from 'vitest';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { createGatewayEntry, gatewayBuildOptions } from '../commands/build.js';
+import { buildCommand, createGatewayEntry, gatewayBuildOptions } from '../commands/build.js';
 
 describe('createGatewayEntry', () => {
   let dir: string;
@@ -72,5 +72,51 @@ describe('gatewayBuildOptions', () => {
     });
     expect(options).toMatchObject({ bundle: true, packages: 'external', format: 'esm' });
     expect(options).not.toHaveProperty('external');
+  });
+});
+
+interface BuildTestState {
+  calls: string[];
+}
+
+const testGlobal = globalThis as { cliBuildTest?: BuildTestState };
+
+describe('cogitator build', () => {
+  let dir: string;
+  let once: MockInstance<typeof process.once>;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'cli-build-project-'));
+    once = vi.spyOn(process, 'once');
+  });
+  afterEach(() => {
+    for (const [event, listener] of once.mock.calls) {
+      if (event === 'SIGINT' || event === 'SIGTERM') process.removeListener(event, listener);
+    }
+    delete testGlobal.cliBuildTest;
+    rmSync(dir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('bundles a TypeScript gateway with the esbuild the CLI depends on', async () => {
+    mkdirSync(join(dir, 'src'));
+    writeFileSync(
+      join(dir, 'src', 'gateway.ts'),
+      `const state: { calls: string[] } = { calls: [] };
+(globalThis as { cliBuildTest?: typeof state }).cliBuildTest = state;
+export const gateway = {
+  async start(): Promise<void> { state.calls.push('start'); },
+  async stop(): Promise<void> { state.calls.push('stop'); },
+};`
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await buildCommand.parseAsync(['--quiet', '--no-sourcemap'], { from: 'user' });
+
+    const outfile = join(dir, 'dist', 'cogitator.mjs');
+    expect(existsSync(outfile)).toBe(true);
+
+    await import(pathToFileURL(outfile).href);
+    expect(testGlobal.cliBuildTest?.calls).toEqual(['start']);
   });
 });

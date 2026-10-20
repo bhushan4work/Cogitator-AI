@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/voice",
-  "version": "0.5.5",
+  "version": "0.5.7",
   "description": "Voice/Realtime agent capabilities for Cogitator",
   "keywords": [
     "cogitator",
@@ -22,6 +22,7 @@
       "default": "./dist/index.js"
     }
   },
+  "sideEffects": false,
   "files": [
     "dist"
   ],
@@ -43,7 +44,7 @@
     "zod": "^4.6.5"
   },
   "peerDependencies": {
-    "@cogitator-ai/core": "workspace:>=0.39.0",
+    "@cogitator-ai/core": "workspace:>=0.40.0",
     "openai": "^6.0.0 || ^7.0.0"
   },
   "peerDependenciesMeta": {
@@ -61,7 +62,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/cogitator-ai/Cogitator-AI.git",
+    "url": "git+https://github.com/cogitator-ai/Cogitator-AI.git",
     "directory": "packages/voice"
   },
   "publishConfig": {

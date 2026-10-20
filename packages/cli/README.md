@@ -80,7 +80,7 @@ cogitator init my-assistant            # prompts for provider, model, channels, 
 cogitator init my-assistant --no-install --no-git --no-telemetry
 ```
 
-The prompts cover the LLM provider (Anthropic, OpenAI, Google or Ollama) and model, channels (Telegram, Discord, Slack, WebChat, Bluesky, Threads) with their tokens, and the memory adapter (SQLite, in-memory or Postgres). Tokens and keys go to `.env` (mode 600). The project is the same as `npx create-cogitator-app my-assistant --preset channels`: the registry in `src/cogitator.ts`, tests on a mocked model, `cogitator.yml`, `AGENTS.md`, Cogitator Studio and the rest. The assistant is `src/gateway.ts`, the `gateway` export that `cogitator assistant`, `cogitator build` and `cogitator daemon` run, and `src/index.ts` starts it for `dev` and `start`.
+The prompts cover the LLM provider (Anthropic, OpenAI, Google or Ollama) and model, channels (Telegram, Discord, Slack, WebChat, Bluesky, Threads) with their tokens, and the memory adapter (SQLite, in-memory or Postgres). Tokens and keys go to `.env` (mode 600). The project is the same as `npx create-cogitator-app my-assistant --preset channels`: the registry in `src/cogitator.ts`, tests on a mocked model, `cogitator.yml`, `AGENTS.md`, Cogitator Studio and the rest. The assistant is `src/gateway.ts`, the `gateway` export that `cogitator assistant`, `cogitator build` and `cogitator daemon` run, and `src/index.ts` starts it for `dev` and `start`. When the project has compose services (Postgres memory, the Ollama container) and Docker is running, it offers to start them the way create-cogitator-app does, before it prints the next steps. A Postgres URL of your own leaves the compose Postgres out.
 
 ---
 
@@ -239,10 +239,9 @@ Interactive commands: `/model [name]`, `/clear`, `/help`, `exit` / `quit` (Ctrl+
 
 ### cogitator build
 
-Bundles a gateway module with [esbuild](https://esbuild.github.io) into a single self-starting ES module. The bundle starts the exported `gateway` and stops it gracefully on `SIGINT`/`SIGTERM`.
+Bundles a gateway module with [esbuild](https://esbuild.github.io) into a single self-starting ES module. The bundle starts the exported `gateway` and stops it gracefully on `SIGINT`/`SIGTERM`. esbuild ships with the CLI, so the project needs no extra dependency.
 
 ```bash
-pnpm add -D esbuild
 cogitator build                     # src/gateway.ts → dist/cogitator.mjs
 cogitator build -c src/gw.ts -o out/bot.mjs --minify --no-sourcemap
 node dist/cogitator.mjs

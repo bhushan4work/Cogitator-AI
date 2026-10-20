@@ -14,6 +14,7 @@ import type {
 import { BaseLLMBackend } from './base';
 import {
   LLMError,
+  abortReason,
   wrapSDKError,
   llmInvalidResponse,
   providerErrorIn,
@@ -21,6 +22,11 @@ import {
 } from './errors';
 import { jsonInstruction, withSystemInstruction } from './json-instruction';
 import type { CacheControl } from './prompt-cache';
+import {
+  OPENAI_COMPATIBLE_PROFILES,
+  reasoningEffortFor,
+  type ResolvedOpenAICompatibleProfile,
+} from './openai-profiles';
 import {
   finishRunsTools,
   normalizeTurn,
@@ -38,10 +44,11 @@ export abstract class OpenAICompatibleBackend extends BaseLLMBackend {
   protected abstract client: OpenAI;
 
   /**
-   * The official OpenAI API rejects `max_tokens` for reasoning models and expects
-   * `max_completion_tokens`; most OpenAI-compatible servers only understand `max_tokens`.
+   * The request fields the server understands: the field of the output token limit, whether
+   * streams ask for usage, which reasoning efforts it takes. Servers differ, and some reject a
+   * field they do not know, so a request carries only what the server takes.
    */
-  protected readonly maxTokensField: 'max_tokens' | 'max_completion_tokens' = 'max_tokens';
+  protected readonly profile: ResolvedOpenAICompatibleProfile = OPENAI_COMPATIBLE_PROFILES.generic;
 
   /**
    * Whether `model` is an OpenAI reasoning model (o-series, GPT-5 and later), which rejects
@@ -79,7 +86,8 @@ export abstract class OpenAICompatibleBackend extends BaseLLMBackend {
    */
   private requestParams(request: ChatRequest, model: string) {
     const reasoning = this.isReasoningModel(model);
-    const maxTokensField = reasoning ? 'max_completion_tokens' : this.maxTokensField;
+    const maxTokensField = reasoning ? 'max_completion_tokens' : this.profile.maxTokensField;
+    const effort = reasoningEffortFor(this.profile, request.reasoning?.effort);
     const { messages, response_format } = this.structuredOutput(request);
     return {
       model,
@@ -101,7 +109,7 @@ export abstract class OpenAICompatibleBackend extends BaseLLMBackend {
         ? { max_completion_tokens: request.maxTokens }
         : { max_tokens: request.maxTokens }),
       stop: request.stop,
-      ...(request.reasoning?.effort && { reasoning_effort: request.reasoning.effort }),
+      ...(effort && { reasoning_effort: effort }),
       ...this.promptCacheParams(request, model),
     };
   }
@@ -162,7 +170,7 @@ export abstract class OpenAICompatibleBackend extends BaseLLMBackend {
         ? await this.client.chat.completions.create(params, { signal: request.signal })
         : await this.client.chat.completions.create(params);
     } catch (e) {
-      throw this.wrapAPIError(e, ctx);
+      throw abortReason(request.signal) ?? this.wrapAPIError(e, ctx);
     }
 
     const failure = providerErrorIn(response, ctx);
@@ -209,21 +217,23 @@ export abstract class OpenAICompatibleBackend extends BaseLLMBackend {
       const params = {
         ...this.requestParams(request, model),
         stream: true as const,
-        stream_options: { include_usage: true },
+        ...(this.profile.streamUsage && { stream_options: { include_usage: true } }),
       };
 
       stream = request.signal
         ? await this.client.chat.completions.create(params, { signal: request.signal })
         : await this.client.chat.completions.create(params);
     } catch (e) {
-      throw this.wrapAPIError(e, ctx);
+      throw abortReason(request.signal) ?? this.wrapAPIError(e, ctx);
     }
 
     const toolCallsAccum = new Map<number, { id?: string; name?: string }>();
     const toolCallArgsAccum = new Map<number, string>();
     let refused = false;
 
-    for await (const chunk of this.readStream(stream, ctx)) {
+    for await (const chunk of this.guardStream(stream, request.signal, (error) =>
+      this.wrapAPIError(error, ctx)
+    )) {
       const failure = providerErrorIn(chunk, ctx);
       if (failure) throw failure;
       const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
@@ -295,23 +305,6 @@ export abstract class OpenAICompatibleBackend extends BaseLLMBackend {
         }))
       : [];
     return normalizeTurn({ finishReason: reason, toolCalls });
-  }
-
-  /**
-   * The chunks of a stream, with the provider error the SDK raises while reading one made an
-   * `LLMError`: the OpenAI SDK throws an `APIError` without a status when an event carries
-   * `{ error }`, before the chunk is handed out. Anything else, an abort included, goes on as is.
-   */
-  private async *readStream<T>(stream: AsyncIterable<T>, ctx: LLMErrorContext): AsyncGenerator<T> {
-    try {
-      for await (const chunk of stream) yield chunk;
-    } catch (error) {
-      if (error instanceof LLMError || !(error instanceof Error)) throw error;
-      const { status, error: payload } = error as Error & { status?: unknown; error?: unknown };
-      const failure =
-        status === undefined ? providerErrorIn({ error: payload }, ctx, error) : undefined;
-      throw failure ?? error;
-    }
   }
 
   /**

@@ -40,6 +40,11 @@ export const ModelInfoSchema = z.object({
   maxOutputTokens: z.number().optional(),
   capabilities: ModelCapabilitiesSchema.optional(),
   deprecated: z.boolean().optional(),
+  /**
+   * The catalogue lists the model without a price. `pricing` is zero only as a placeholder, and
+   * the registry's price lookups answer `null`, so a call to the model is not counted as free.
+   */
+  priceUnknown: z.boolean().optional(),
   aliases: z.array(z.string()).optional(),
   /**
    * What the model does: `chat` (the default) answers messages, `decision`
@@ -79,6 +84,10 @@ export interface RegistryOptions {
   cache?: CacheOptions;
   autoRefresh?: boolean;
   refreshInterval?: number;
+  /**
+   * When the catalogue can be neither fetched nor read from the cache, use the offline one: the
+   * built-in models and the copy of the LiteLLM catalogue bundled with the package. On by default.
+   */
   fallbackToBuiltin?: boolean;
 }
 

@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { parse } from 'yaml';
 import {
   formatProject,
@@ -20,6 +20,7 @@ import {
   installArgs,
   mustExec,
   packWorkspace,
+  projectEnv,
   regenerateDockerfile,
   runArgs,
   useTarballs,
@@ -29,7 +30,11 @@ import {
  * Every preset with every package manager, installed from the workspace
  * tarballs the way npm would ship them: type-checked, tested on the mocked
  * model, linted and built; servers probed over HTTP against a scripted
- * Ollama; deploys planned; images built when Docker is there.
+ * Ollama; deploys planned; images built when Docker is there. pnpm installs
+ * without hidden hoisting, so a package that uses a dependency it does not
+ * declare fails here instead of working by accident. Yarn runs at the
+ * version package.json pins, through corepack, once as Yarn 1 and once as
+ * Yarn 4.
  *
  * MATRIX_PRESETS and MATRIX_PMS (comma-separated) narrow it down.
  */
@@ -38,9 +43,31 @@ const only = (name: string) =>
     ?.split(',')
     .map((item) => item.trim())
     .filter(Boolean);
+
+/** A package manager of the matrix, and the version package.json pins when it is not whatever is on PATH. */
+interface MatrixPm {
+  id: string;
+  pm: PackageManager;
+  packageManagerSpec?: string;
+}
+
+const MATRIX_PMS: readonly MatrixPm[] = [
+  { id: 'pnpm', pm: 'pnpm' },
+  { id: 'npm', pm: 'npm' },
+  { id: 'bun', pm: 'bun' },
+  { id: 'yarn1', pm: 'yarn', packageManagerSpec: 'yarn@1.22.22' },
+  { id: 'yarn4', pm: 'yarn', packageManagerSpec: 'yarn@4.18.1' },
+];
+
 const PRESET_IDS = only('MATRIX_PRESETS') ?? PRESETS.map((preset) => preset.id);
-const PMS = (only('MATRIX_PMS') ?? ['pnpm', 'npm', 'bun']) as PackageManager[];
+const PMS = (only('MATRIX_PMS') ?? MATRIX_PMS.map((entry) => entry.id)).map((id) => {
+  const entry = MATRIX_PMS.find((candidate) => candidate.id === id);
+  if (!entry) throw new Error(`MATRIX_PMS: no ${id}, pick from ${MATRIX_PMS.map((e) => e.id)}`);
+  return entry;
+});
 const TOKEN = 'matrix-token';
+/** The first install writes the lockfile, which Yarn 4 refuses to do under CI unless told. */
+const INSTALL_ENV = { YARN_ENABLE_IMMUTABLE_INSTALLS: 'false' };
 
 const root = mkdtempSync(join(tmpdir(), 'cca-matrix-'));
 let model: FakeOllama;
@@ -56,7 +83,33 @@ beforeAll(async () => {
   });
   for (const binary of ['pnpm', 'npm', 'bun', 'docker'])
     available.set(binary, await hasBinary(binary));
-}, 60_000);
+  available.set(
+    'yarn',
+    PMS.some((entry) => entry.pm === 'yarn') &&
+      (await useCorepackYarn()) &&
+      (await hasBinary('yarn'))
+  );
+}, 120_000);
+
+/**
+ * Puts corepack's `yarn` first on PATH, so every Yarn the matrix starts,
+ * also the one a package.json script calls, is the version the project's
+ * `packageManager` pins. Without corepack the Yarn rows are skipped, and
+ * fail in CI, where they must run.
+ */
+async function useCorepackYarn(): Promise<boolean> {
+  if (!(await hasBinary('corepack'))) {
+    if (process.env.CI) throw new Error('The Yarn rows of the matrix need corepack');
+    return false;
+  }
+  const bin = join(root, 'corepack-bin');
+  mkdirSync(bin);
+  await mustExec('corepack', ['enable', '--install-directory', bin, 'yarn'], { cwd: root });
+  process.env.PATH = `${bin}${delimiter}${process.env.PATH ?? ''}`;
+  process.env.COREPACK_ENABLE_DOWNLOAD_PROMPT = '0';
+  process.env.COREPACK_ENABLE_AUTO_PIN = '0';
+  return true;
+}
 
 afterAll(async () => {
   await model?.close();
@@ -152,7 +205,7 @@ function startProject(
 ) {
   const child = spawn(command, args, {
     cwd: dir,
-    env: { ...process.env, ...env },
+    env: projectEnv(env),
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
   });
@@ -194,11 +247,14 @@ function waitForWebChat(port: number): Promise<void> {
 }
 
 const combos = PRESET_IDS.flatMap((presetId) =>
-  PMS.filter((pm) => presetId !== 'tetsu' || pm === 'bun').map((pm) => ({ presetId, pm }))
+  PMS.filter(({ pm }) => presetId !== 'tetsu' || pm === 'bun').map((entry) => ({
+    presetId,
+    ...entry,
+  }))
 );
 
-describe.each(combos)('$presetId with $pm', ({ presetId, pm }) => {
-  const name = `m-${presetId}-${pm}`;
+describe.each(combos)('$presetId with $id', ({ presetId, id, pm, packageManagerSpec }) => {
+  const name = `m-${presetId}-${id}`;
   const dir = join(root, name);
   const spec = specFor(presetId, pm, name);
   let skipped: string | undefined;
@@ -206,12 +262,21 @@ describe.each(combos)('$presetId with $pm', ({ presetId, pm }) => {
 
   beforeAll(async () => {
     if (!available.get(pm)) {
-      skipped = `${pm} is not installed`;
+      skipped =
+        pm === 'yarn' ? 'corepack and its Yarn are not available' : `${pm} is not installed`;
       return;
     }
-    await scaffold(spec, { directory: dir, install: false, git: false });
-    useTarballs(dir, pm, await packed(dir));
-    await mustExec(pm, installArgs(pm), { cwd: dir, timeoutMs: 900_000, env: { CI: '1' } });
+    await scaffold(spec, { directory: dir, install: false, git: false, packageManagerSpec });
+    if (packageManagerSpec) {
+      const version = await mustExec(pm, ['--version'], { cwd: dir });
+      expect(`${pm}@${version.trim().split('\n').at(-1)}`).toBe(packageManagerSpec);
+    }
+    useTarballs(dir, pm, await packed(dir), { strict: true });
+    await mustExec(pm, installArgs(pm), {
+      cwd: dir,
+      timeoutMs: 900_000,
+      env: { CI: '1', ...INSTALL_ENV },
+    });
     const formatted = await formatProject(dir);
     if (formatted.status === 'failed') throw formatted.error;
     scripts = (
@@ -320,6 +385,35 @@ describe.each(combos)('$presetId with $pm', ({ presetId, pm }) => {
     }
   }, 120_000);
 
+  it('bundles src/gateway.ts with cogitator build and runs the bundle', async (context) => {
+    if (skipped) return context.skip(skipped);
+    if (spec.app !== 'channels') return context.skip('the preset has no gateway');
+    const cli = join(dir, 'node_modules', '.bin', 'cogitator');
+    const outfile = join('dist', 'gateway-bundle.mjs');
+    const built = await exec(cli, ['build', '--quiet', '--outfile', outfile], {
+      cwd: dir,
+      timeoutMs: 120_000,
+    });
+    expect(built.code, built.output.split('\n').slice(-40).join('\n')).toBe(0);
+    expect(existsSync(join(dir, outfile))).toBe(true);
+
+    const port = await freePort();
+    const app = startProject(dir, pm, { WEBCHAT_PORT: String(port), OLLAMA_BASE_URL: model.url }, [
+      process.execPath,
+      [outfile],
+    ]);
+    try {
+      await waitForWebChat(port);
+    } catch (error) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}\n${app.output().slice(-3000)}`,
+        { cause: error }
+      );
+    } finally {
+      await app.stop();
+    }
+  }, 180_000);
+
   it('plans a deploy with its secrets, services and warnings', async (context) => {
     if (skipped) return context.skip(skipped);
     const config = parse(readFileSync(join(dir, 'cogitator.yml'), 'utf-8')) as {
@@ -367,15 +461,20 @@ describe.each(combos)('$presetId with $pm', ({ presetId, pm }) => {
 
 describe.each(
   PMS.filter(() => !only('MATRIX_PRESETS') || only('MATRIX_PRESETS')?.includes('hono'))
-)('the Docker image of hono with %s', (pm) => {
+)('the Docker image of hono with $id', ({ id, pm, packageManagerSpec }) => {
   it('builds and serves its health check', async (context) => {
     if (!available.get('docker')) return context.skip('Docker is not available on this machine');
     if (!available.get(pm)) return context.skip(`${pm} is not installed`);
-    const name = `img-hono-${pm}`;
+    const name = `img-hono-${id}`;
     const dir = join(root, name);
-    await scaffold(specFor('hono', pm, name), { directory: dir, install: false, git: false });
+    await scaffold(specFor('hono', pm, name), {
+      directory: dir,
+      install: false,
+      git: false,
+      packageManagerSpec,
+    });
     useTarballs(dir, pm, await packed(dir), { vendor: true });
-    await mustExec(pm, installArgs(pm), { cwd: dir, timeoutMs: 900_000 });
+    await mustExec(pm, installArgs(pm), { cwd: dir, timeoutMs: 900_000, env: INSTALL_ENV });
     await regenerateDockerfile(dir);
     expect(existsSync(join(dir, 'Dockerfile'))).toBe(true);
     const tag = `cogitator-matrix-${name}:latest`;

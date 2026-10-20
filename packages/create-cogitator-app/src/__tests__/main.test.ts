@@ -1,9 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
-import { run } from '../cli/main.js';
+import { run, type RunDeps } from '../cli/main.js';
 
 interface Captured {
   code: number;
@@ -13,7 +13,8 @@ interface Captured {
 
 async function cli(
   argv: string[],
-  fetcher: typeof fetch = async () => new Response('{}')
+  fetcher: typeof fetch = async () => new Response('{}'),
+  terminal: Pick<RunDeps, 'env' | 'stdin'> = {}
 ): Promise<Captured> {
   let stdout = '';
   let stderr = '';
@@ -23,7 +24,7 @@ async function cli(
       stdout: (text) => (stdout += stripVTControlCharacters(text)),
       stderr: (text) => (stderr += stripVTControlCharacters(text)),
     },
-    { fetch: fetcher }
+    { fetch: fetcher, ...terminal }
   );
   return { code, stdout, stderr };
 }
@@ -145,5 +146,60 @@ describe('create-cogitator-app CLI', () => {
     expect(result.stderr).toContain('pnpm dev:studio');
     expect(result.stderr).not.toContain('cp .env.example .env');
     expect(result.stderr).not.toContain('sk-test');
+  });
+
+  it('offers the compose services only to a person at a terminal', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cca-cli-'));
+    roots.push(root);
+    const calls = join(root, 'docker-calls.log');
+    const docker = join(root, 'docker');
+    writeFileSync(
+      docker,
+      `#!/bin/sh\necho "$*" >> "${calls}"\ncase "$1" in info) exit 1 ;; esac\nexit 0\n`
+    );
+    chmodSync(docker, 0o755);
+    const path = process.env.PATH;
+    process.env.PATH = `${root}:${path ?? ''}`;
+    try {
+      const base = [
+        '--memory',
+        'redis',
+        '-p',
+        'openai',
+        '--pm',
+        'pnpm',
+        '--no-install',
+        '--no-git',
+        '--agent',
+        'none',
+      ];
+      const fetcher = async () => new Response('{}');
+      const tty = { stdin: { isTTY: true }, env: { ...process.env, CI: undefined } };
+      const ci = { stdin: { isTTY: true }, env: { ...process.env, CI: 'true' } };
+      const created = await cli([join(root, 'yes'), '-y', ...base], fetcher, tty);
+      expect(created.code).toBe(0);
+      expect(created.stderr).toContain('docker compose up -d');
+      expect((await cli([join(root, 'json'), '--json', ...base], fetcher, tty)).code).toBe(0);
+      expect((await cli([join(root, 'ci'), '-t', 'basic', ...base], fetcher, ci)).code).toBe(0);
+      expect((await cli([join(root, 'pipe'), '-t', 'basic', ...base])).code).toBe(0);
+      expect((await cli([join(root, 'dry'), '--dry-run', '-y', ...base], fetcher, tty)).code).toBe(
+        0
+      );
+      const logged = () => (existsSync(calls) ? readFileSync(calls, 'utf-8') : '');
+      expect(logged()).toBe('');
+
+      const asked = await cli(
+        [join(root, 'tty'), '-t', 'basic', ...base, '-m', 'gpt-test', '--api-key', 'sk-test'],
+        fetcher,
+        tty
+      );
+      expect(asked.code).toBe(0);
+      expect(logged().trim().split('\n')).toEqual([
+        'compose version',
+        'info --format {{.ServerVersion}}',
+      ]);
+    } finally {
+      process.env.PATH = path;
+    }
   });
 });

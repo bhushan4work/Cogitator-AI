@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/core",
-  "version": "0.39.0",
+  "version": "0.40.0",
   "description": "Core runtime for Cogitator AI agents",
   "keywords": [
     "cogitator",
@@ -26,6 +26,7 @@
       "default": "./dist/index.js"
     }
   },
+  "sideEffects": false,
   "files": [
     "dist",
     "docs"
@@ -53,6 +54,7 @@
   "devDependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1145.0",
     "@cogitator-ai/sandbox": "workspace:*",
+    "@cogitator-ai/test-utils": "workspace:*",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.20.4",
     "@types/nodemailer": "^8.0.2",
@@ -64,7 +66,7 @@
   },
   "peerDependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.0.0",
-    "@cogitator-ai/sandbox": "workspace:>=0.5.14",
+    "@cogitator-ai/sandbox": "workspace:>=0.5.16",
     "better-sqlite3": "^11.0.0 || ^12.0.0 || ^13.0.0",
     "langfuse": "^3.0.0",
     "nodemailer": "^6.0.0 || ^7.0.0 || ^8.0.0 || ^9.0.0 || ^10.0.0",
@@ -92,7 +94,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/cogitator-ai/Cogitator-AI.git",
+    "url": "git+https://github.com/cogitator-ai/Cogitator-AI.git",
     "directory": "packages/core"
   },
   "publishConfig": {

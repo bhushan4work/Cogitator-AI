@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/test-utils",
-  "version": "0.2.19",
+  "version": "0.3.0",
   "description": "Shared testing utilities for Cogitator packages",
   "keywords": [
     "cogitator",
@@ -20,6 +20,7 @@
       "default": "./dist/index.js"
     }
   },
+  "sideEffects": false,
   "files": [
     "dist"
   ],
@@ -44,7 +45,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/cogitator-ai/Cogitator-AI.git",
+    "url": "git+https://github.com/cogitator-ai/Cogitator-AI.git",
     "directory": "packages/test-utils"
   },
   "publishConfig": {

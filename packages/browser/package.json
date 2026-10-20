@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/browser",
-  "version": "0.4.15",
+  "version": "0.4.17",
   "description": "Browser automation tools for Cogitator AI agents",
   "keywords": [
     "cogitator",
@@ -23,6 +23,7 @@
       "default": "./dist/index.js"
     }
   },
+  "sideEffects": false,
   "files": [
     "dist"
   ],
@@ -49,7 +50,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/cogitator-ai/Cogitator-AI.git",
+    "url": "git+https://github.com/cogitator-ai/Cogitator-AI.git",
     "directory": "packages/browser"
   },
   "publishConfig": {

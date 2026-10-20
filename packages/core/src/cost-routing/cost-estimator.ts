@@ -7,7 +7,7 @@ import type {
   ToolSchema,
 } from '@cogitator-ai/types';
 import { CogitatorError, ErrorCode } from '@cogitator-ai/types';
-import { getModelRegistry } from '@cogitator-ai/models';
+import { getModelRegistry, type ModelPricing } from '@cogitator-ai/models';
 import type { Agent } from '../agent';
 import { TaskAnalyzer } from './task-analyzer';
 import { TokenEstimator } from './token-estimator';
@@ -15,15 +15,26 @@ import { parseModel } from '../llm/index';
 
 const DEFAULT_PRICING = { input: 0.15, output: 0.6 };
 
-const LOCAL_PROVIDER_PREFIXES = ['ollama/'];
+const LOCAL_PROVIDER_PREFIXES = ['ollama/', 'vllm/'];
+
+export interface CostEstimatorOptions {
+  /** Prices of your own by model (a runtime passes `llm.pricing`), over the model registry and a local model being free */
+  ownPricing?: (model: string) => ModelPricing | undefined;
+  /** The price of a model, `null` when unknown (a runtime passes its pricer), the model registry's by default */
+  pricing?: (model: string) => ModelPricing | null;
+}
 
 export class CostEstimator {
   private taskAnalyzer: TaskAnalyzer;
   private tokenEstimator: TokenEstimator;
+  private readonly ownPricing?: (model: string) => ModelPricing | undefined;
+  private readonly pricing?: (model: string) => ModelPricing | null;
 
-  constructor() {
+  constructor(options: CostEstimatorOptions = {}) {
     this.taskAnalyzer = new TaskAnalyzer();
     this.tokenEstimator = new TokenEstimator();
+    this.ownPricing = options.ownPricing;
+    this.pricing = options.pricing;
   }
 
   async estimate(params: {
@@ -46,17 +57,17 @@ export class CostEstimator {
     const parsed = parseModel(modelString);
     const modelId = parsed.model;
     const provider = parsed.provider ?? 'unknown';
+    const own = this.ownPricing?.(modelString);
     const isLocal = this.isLocalModel(modelString);
 
-    if (isLocal) {
+    if (isLocal && !own) {
       return this.createLocalModelEstimate(modelId, provider, warnings);
     }
 
     const registry = getModelRegistry();
     await registry.initialize();
-
-    const modelInfo = registry.getModel(modelString);
-    const pricing = modelInfo?.pricing ?? null;
+    const pricing: ModelPricing | null =
+      own ?? (this.pricing ? this.pricing(modelString) : registry.getPricing(modelString));
 
     if (!pricing) {
       warnings.push('Model pricing not available, using estimates');

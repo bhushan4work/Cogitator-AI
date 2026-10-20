@@ -31,8 +31,17 @@ export {
   llmNotImplemented,
   providerErrorIn,
   retryAfterFromHeaders,
+  abortReason,
   type LLMErrorContext,
+  type LLMErrorOptions,
 } from './errors';
+export { classifyProviderError } from './error-tables';
+export {
+  OPENAI_COMPATIBLE_PROFILES,
+  resolveOpenAICompatibleProfile,
+  reasoningEffortFor,
+  type ResolvedOpenAICompatibleProfile,
+} from './openai-profiles';
 export { LLMDebugWrapper, withDebug, type LLMDebugOptions, type LLMDebugLogger } from './debug';
 export {
   llmPluginRegistry,
@@ -96,6 +105,8 @@ export function createLLMBackend(
         apiKey: providers.openai.apiKey,
         baseUrl: providers.openai.baseUrl,
         api: providers.openai.api,
+        profile: providers.openai.profile,
+        headers: providers.openai.headers,
         maxRetries: 0,
       });
 
@@ -105,6 +116,8 @@ export function createLLMBackend(
       }
       return new AnthropicBackend({
         apiKey: providers.anthropic.apiKey,
+        baseUrl: providers.anthropic.baseUrl,
+        headers: providers.anthropic.headers,
         maxRetries: 0,
       });
 
@@ -114,6 +127,8 @@ export function createLLMBackend(
       }
       return new GoogleBackend({
         apiKey: providers.google.apiKey,
+        baseUrl: providers.google.baseUrl,
+        headers: providers.google.headers,
       });
 
     case 'azure':
@@ -136,6 +151,7 @@ export function createLLMBackend(
         secretAccessKey: providers.bedrock?.secretAccessKey,
         sessionToken: providers.bedrock?.sessionToken,
         profile: providers.bedrock?.profile,
+        endpoint: providers.bedrock?.endpoint,
         maxRetries: 0,
       });
 
@@ -190,6 +206,7 @@ export function createLLMBackend(
       return new OpenAIBackend({
         apiKey: providers.openrouter.apiKey,
         baseUrl: providers.openrouter.baseUrl ?? OPENROUTER_API,
+        headers: providers.openrouter.headers,
         provider,
         api: 'chat-completions',
         maxRetries: 0,
@@ -202,6 +219,8 @@ export function createLLMBackend(
       return new OpenAIBackend({
         apiKey: 'vllm',
         baseUrl: providers.vllm.baseUrl,
+        profile: providers.vllm.profile,
+        headers: providers.vllm.headers,
         provider,
         maxRetries: 0,
       });

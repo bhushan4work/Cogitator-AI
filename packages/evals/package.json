@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/evals",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Evaluation framework for Cogitator AI agents",
   "keywords": [
     "cogitator",
@@ -23,6 +23,7 @@
       "default": "./dist/index.js"
     }
   },
+  "sideEffects": false,
   "files": [
     "dist"
   ],
@@ -41,7 +42,7 @@
     "zod": "^4.6.5"
   },
   "peerDependencies": {
-    "@cogitator-ai/core": "workspace:>=0.39.0"
+    "@cogitator-ai/core": "workspace:>=0.40.0"
   },
   "peerDependenciesMeta": {
     "@cogitator-ai/core": {
@@ -59,7 +60,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/cogitator-ai/Cogitator-AI.git",
+    "url": "git+https://github.com/cogitator-ai/Cogitator-AI.git",
     "directory": "packages/evals"
   },
   "publishConfig": {

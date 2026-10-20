@@ -232,6 +232,21 @@ export interface LLMRetryEvent {
 }
 
 /**
+ * The price of a model in USD per million tokens, for `llm.pricing`. Cache prices default to
+ * the input price.
+ */
+export interface ModelPriceConfig {
+  input: number;
+  output: number;
+  /** Input served from the provider's prompt cache */
+  inputCached?: number;
+  /** Input written to the prompt cache, with the default 5-minute TTL */
+  inputCacheWrite?: number;
+  /** Input written to the prompt cache with the 1-hour TTL */
+  inputCacheWrite1h?: number;
+}
+
+/**
  * Type-safe provider configuration interfaces
  */
 
@@ -248,16 +263,71 @@ export interface OpenAIProviderConfig {
    * and to `'chat-completions'` when `baseUrl` points at another OpenAI-compatible server.
    */
   api?: OpenAIWireApi;
+  /**
+   * What the server at `baseUrl` understands, by name or field by field: see
+   * {@link OpenAICompatibleProfile}. Defaults to `'openai'` for api.openai.com and `'generic'`
+   * for any other server.
+   */
+  profile?: OpenAICompatibleServer | OpenAICompatibleProfile;
+  /** Headers sent with every request, for a gateway that needs its own (auth, routing, tracing). */
+  headers?: Record<string, string>;
 }
 
 export type OpenAIWireApi = 'responses' | 'chat-completions';
 
+/**
+ * OpenAI-compatible servers with a known profile. `generic` is any other server: it gets
+ * `max_tokens`, `stream_options` and `reasoning_effort` as they are.
+ */
+export type OpenAICompatibleServer =
+  | 'openai'
+  | 'generic'
+  | 'vllm'
+  | 'ollama'
+  | 'lmstudio'
+  | 'llamacpp'
+  | 'groq'
+  | 'together'
+  | 'deepseek'
+  | 'mistral'
+  | 'openrouter';
+
+/**
+ * The Chat Completions request fields an OpenAI-compatible server understands, so a request
+ * carries only what it takes: some servers reject fields they do not know (Mistral answers 422).
+ * Each field left out keeps the value of the server's preset.
+ */
+export interface OpenAICompatibleProfile {
+  /** Starts from this preset (default: the provider's own) */
+  server?: OpenAICompatibleServer;
+  /** The field the output token limit goes in */
+  maxTokensField?: 'max_tokens' | 'max_completion_tokens';
+  /** Whether streams ask for usage with `stream_options: { include_usage: true }` */
+  streamUsage?: boolean;
+  /**
+   * Whether `reasoning.effort` is sent as `reasoning_effort`: `true` as it is, `false` never, or
+   * the values the server takes, an effort it does not take sent as the nearest one it does.
+   */
+  reasoningEffort?: boolean | readonly ReasoningEffort[];
+}
+
 export interface AnthropicProviderConfig {
   apiKey: string;
+  /** The API base (default `https://api.anthropic.com`): a proxy or gateway in front of Anthropic. */
+  baseUrl?: string;
+  /** Headers sent with every request, for a gateway that needs its own (auth, routing, tracing). */
+  headers?: Record<string, string>;
 }
 
 export interface GoogleProviderConfig {
   apiKey: string;
+  /**
+   * The Gemini API base with its version (default `https://generativelanguage.googleapis.com/v1beta`):
+   * a proxy or gateway in front of the Gemini API.
+   */
+  baseUrl?: string;
+  /** Headers sent with every request, for a gateway that needs its own (auth, routing, tracing). */
+  headers?: Record<string, string>;
 }
 
 export interface AzureProviderConfig {
@@ -287,10 +357,16 @@ export interface BedrockProviderConfig {
   sessionToken?: string;
   /** Named profile from the shared AWS config files, used when no static keys are set */
   profile?: string;
+  /** The Bedrock Runtime endpoint, such as a VPC endpoint or a proxy (default: the region's) */
+  endpoint?: string;
 }
 
 export interface VLLMProviderConfig {
   baseUrl: string;
+  /** What the server understands, see {@link OpenAICompatibleProfile} (default `'vllm'`) */
+  profile?: OpenAICompatibleServer | OpenAICompatibleProfile;
+  /** Headers sent with every request */
+  headers?: Record<string, string>;
 }
 
 export interface MistralProviderConfig {
@@ -314,6 +390,8 @@ export interface OpenRouterProviderConfig {
   apiKey: string;
   /** The API base (default `https://openrouter.ai/api/v1`). */
   baseUrl?: string;
+  /** Headers sent with every request, such as OpenRouter's `HTTP-Referer` and `X-Title` app attribution */
+  headers?: Record<string, string>;
 }
 
 /**

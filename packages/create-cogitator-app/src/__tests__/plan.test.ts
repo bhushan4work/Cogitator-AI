@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import ts from 'typescript';
+import { parse } from 'yaml';
 import { compatibilityIssues } from '../kit/compat.js';
 import { planProject, type ProjectPlan } from '../kit/plan.js';
 import { PRESETS } from '../kit/presets.js';
@@ -119,6 +121,25 @@ describe('generated configuration', () => {
     expect(postgres).toContain('healthcheck:');
   });
 
+  it('pulls a model with an unusual name as one shell word, never as a command', () => {
+    const model = "x; echo $HOME injected #'";
+    const compose = parse(
+      file(planProject(specFor('basic', 'ollama', { model })), 'docker-compose.yml')
+    ) as { services: Record<string, { entrypoint?: string[] }> };
+    const [shell, flag, command] = compose.services['ollama-pull']?.entrypoint ?? [];
+    expect([shell, flag]).toEqual(['/bin/sh', '-c']);
+    expect(command).toContain('$$HOME');
+    const interpolated = command?.replaceAll('$$', '$');
+    const args = execFileSync(
+      '/bin/sh',
+      ['-c', `ollama() { printf '%s\\n' "$@"; }; ${interpolated}`],
+      {
+        encoding: 'utf-8',
+      }
+    );
+    expect(args).toBe(`pull\n${model}\n`);
+  });
+
   it('writes no compose file with --no-docker', () => {
     const plan = planProject(specFor('basic', 'ollama', { compose: false }));
     expect(plan.files.some((f) => f.path === 'docker-compose.yml')).toBe(false);
@@ -193,6 +214,70 @@ describe('CI workflow', () => {
     expect(file(planProject(specFor('basic', 'openai')), '.github/workflows/ci.yml')).not.toContain(
       'corepack'
     );
+  });
+});
+
+describe('next steps around the compose services', () => {
+  const commands = (
+    overrides: Partial<ProjectSpecInput>,
+    state: { servicesStarted?: boolean; modelPulling?: boolean; modelReady?: boolean } = {}
+  ) =>
+    planProject(specFor('basic', 'ollama', overrides))
+      .nextSteps({ installed: true, keyWritten: true, modelReady: false, ...state })
+      .map((step) => step.command);
+
+  it('starts the services with docker compose until they are started', () => {
+    expect(commands({ memory: 'redis' })).toContain('docker compose up -d');
+    expect(commands({ memory: 'redis' }, { servicesStarted: true })).not.toContain(
+      'docker compose up -d'
+    );
+  });
+
+  it('follows the pull in the Ollama container while it runs, and pulls by hand otherwise', () => {
+    const model = defaultModel('ollama');
+    const pulling = commands({}, { servicesStarted: true, modelPulling: true });
+    expect(pulling).toContain('docker compose logs -f ollama-pull');
+    expect(pulling).not.toContain(`ollama pull ${model}`);
+    const native = commands({}, { servicesStarted: true });
+    expect(native).toContain(`ollama pull ${model}`);
+    expect(native).not.toContain('docker compose logs -f ollama-pull');
+    expect(
+      commands({}, { servicesStarted: true, modelPulling: true, modelReady: true })
+    ).not.toContain('docker compose logs -f ollama-pull');
+  });
+
+  it('marks the model pull of compose as one-shot', () => {
+    const plan = planProject(specFor('basic', 'ollama', { memory: 'redis' }));
+    expect(plan.services).toEqual(expect.arrayContaining(['ollama', 'ollama-pull', 'redis']));
+    expect(plan.oneShotServices).toEqual(['ollama-pull']);
+    expect(planProject(specFor('basic', 'ollama', { compose: false })).oneShotServices).toEqual([]);
+  });
+});
+
+describe('Yarn', () => {
+  const plan = (packageManagerSpec?: string) =>
+    planProject(specFor('basic', 'openai', { packageManager: 'yarn' }), { packageManagerSpec });
+  const paths = (p: ProjectPlan) => p.files.map((f) => f.path);
+
+  it.each([
+    ['Yarn 4', 'yarn@4.18.1'],
+    ['Yarn 3', 'yarn@3.8.7'],
+    ['a Yarn of unknown version', undefined],
+  ])('asks %s for node_modules instead of Plug and Play', (_name, packageManagerSpec) => {
+    const project = plan(packageManagerSpec);
+    expect(file(project, '.yarnrc.yml')).toBe('nodeLinker: node-modules\n');
+    const gitignore = file(project, '.gitignore').split('\n');
+    expect(gitignore).toEqual(expect.arrayContaining(['.yarn/*', '!.yarn/releases', '.pnp.*']));
+  });
+
+  it('writes no .yarnrc.yml for Yarn 1, which never reads it', () => {
+    const project = plan('yarn@1.22.22');
+    expect(paths(project)).not.toContain('.yarnrc.yml');
+    expect(file(project, '.gitignore')).not.toContain('.yarn/');
+  });
+
+  it('writes no .yarnrc.yml for other package managers', () => {
+    expect(paths(planProject(specFor('basic', 'openai')))).not.toContain('.yarnrc.yml');
   });
 });
 
