@@ -32,6 +32,70 @@ export function exactMatch(opts?: MatchOptions): MetricFn {
   }) as MetricFn);
 }
 
+function levenshteinDistance(s1: string, s2: string): number {
+  const m = s1.length;
+  const n = s2.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+
+  let prev = new Array<number>(n + 1);
+  let curr = new Array<number>(n + 1);
+
+  for (let j = 0; j <= n; j++) {
+    prev[j] = j;
+  }
+
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    const codeA = s1.charCodeAt(i - 1);
+    for (let j = 1; j <= n; j++) {
+      const cost = codeA === s2.charCodeAt(j - 1) ? 0 : 1;
+      curr[j] = Math.min(
+        prev[j] + 1,       // deletion
+        curr[j - 1] + 1,   // insertion
+        prev[j - 1] + cost // substitution
+      );
+    }
+    const temp = prev;
+    prev = curr;
+    curr = temp;
+  }
+
+  return prev[n];
+}
+
+export function similarity(opts?: MatchOptions): MetricFn {
+  const caseSensitive = opts?.caseSensitive ?? false;
+  const name = opts?.name ?? 'similarity';
+
+  return createMetricFn(name, (async (result) => {
+    const expected = result.case.expected;
+    if (expected === undefined) {
+      return { name, score: 0, details: 'no expected value provided' };
+    }
+
+    const output = result.output.trim();
+    const target = expected.trim();
+
+    const s1 = caseSensitive ? output : output.toLowerCase();
+    const s2 = caseSensitive ? target : target.toLowerCase();
+
+    const maxLen = Math.max(s1.length, s2.length);
+    if (maxLen === 0) {
+      return { name, score: 1 };
+    }
+
+    const distance = levenshteinDistance(s1, s2);
+    const score = 1 - distance / maxLen;
+
+    return {
+      name,
+      score,
+      details: score < 1 ? `expected "${target}", got "${output}" (distance: ${distance})` : undefined,
+    };
+  }) as MetricFn);
+}
+
 export function contains(opts?: MatchOptions): MetricFn {
   const caseSensitive = opts?.caseSensitive ?? false;
   const name = opts?.name ?? 'contains';
