@@ -1,6 +1,6 @@
 # @cogitator-ai/test-utils
 
-Shared testing utilities for Cogitator packages with mock LLM backends, recording memory adapters, fixtures, async/stream test helpers, and a provider backend conformance suite.
+Testing utilities for Cogitator to test your own agents, tools, workflows, and backends without calling real LLMs or databases.
 
 ## Installation
 
@@ -8,7 +8,7 @@ Shared testing utilities for Cogitator packages with mock LLM backends, recordin
 pnpm add -D @cogitator-ai/test-utils
 ```
 
-Used across Cogitator packages to write fast, deterministic unit tests without network calls, real API tokens, or external databases. See [Test Utilities](https://cogitator.app/docs/testing/test-utils) on the website.
+`@cogitator-ai/test-utils` gives you deterministic stand-ins and helpers to test your own agents and applications without network calls, paid API keys, or external databases. See [Test Utilities](https://cogitator.app/docs/testing/test-utils) on the website.
 
 ## Features
 
@@ -130,15 +130,10 @@ const backend = createMockLLMBackend();
 backend.setResponse({ content: 'Hello, world!' });
 
 // Set multiple responses returned in sequence (the last response repeats)
-backend.setResponses([
-  { content: 'First response' },
-  { content: 'Second response' },
-]);
+backend.setResponses([{ content: 'First response' }, { content: 'Second response' }]);
 
 // Shortcut for scripted tool call responses
-backend.setToolCallResponse([
-  createToolCall('calculator', { expression: '2 + 2' }),
-]);
+backend.setToolCallResponse([createToolCall('calculator', { expression: '2 + 2' })]);
 
 // Set default delay (in ms) before answering
 backend.setDefaultDelay(50);
@@ -152,17 +147,10 @@ import { MockLLMBackend, collectStreamContent } from '@cogitator-ai/test-utils';
 const backend = new MockLLMBackend();
 
 // Script a stream for chatStream()
-backend.setStreamChunks([
-  { content: 'Hello' },
-  { content: ' world' },
-  { content: '!' },
-]);
+backend.setStreamChunks([{ content: 'Hello' }, { content: ' world' }, { content: '!' }]);
 
 // Or script multiple distinct streams in sequence
-backend.setMultipleStreamChunks([
-  [{ content: 'First stream' }],
-  [{ content: 'Second stream' }],
-]);
+backend.setMultipleStreamChunks([[{ content: 'First stream' }], [{ content: 'Second stream' }]]);
 
 const stream = backend.chatStream({
   model: 'test-model',
@@ -395,17 +383,24 @@ A complete kit for verifying that custom or third-party `LLMBackend` implementat
 Run the full suite of conformance test cases against an `LLMBackend`:
 
 ```typescript
-import { describe } from 'vitest';
-import { backendConformanceCases, type BackendConformanceTarget } from '@cogitator-ai/test-utils';
+import { describe, it } from 'vitest';
+import {
+  backendConformanceCases,
+  openAIChatWire,
+  type BackendConformanceTarget,
+} from '@cogitator-ai/test-utils';
 
 const target: BackendConformanceTarget = {
   name: 'MyCustomBackend',
+  model: 'gpt-4o',
+  wire: openAIChatWire,
   createBackend: (url) => new MyCustomBackend({ baseUrl: url }),
-  wire: 'openai', // Wire protocol to emulate: 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'bedrock'
 };
 
 describe('MyCustomBackend conformance', () => {
-  backendConformanceCases(target);
+  for (const c of backendConformanceCases(target)) {
+    (c.skip ? it.skip : it)(c.name, () => c.run());
+  }
 });
 ```
 
@@ -448,98 +443,12 @@ Wire specifications and formatting helpers for popular LLM provider protocols:
 
 Public exports are grouped in `src/index.ts` as:
 
-| Group | Module | Description |
-| ----- | ------ | ----------- |
-| **Mocks** | `@cogitator-ai/test-utils` (`./mocks`) | `MockLLMBackend`, `createMockLLMBackend`, `MockMemoryAdapter`, `createMockMemoryAdapter`, `MockChatResponse`, `MockStreamChunk` |
-| **Fixtures** | `@cogitator-ai/test-utils` (`./fixtures`) | `createTestAgent`, `createTestAgentConfig`, `TestAgentConfig`, `createUserMessage`, `createAssistantMessage`, `createSystemMessage`, `createToolMessage`, `createMultimodalMessage`, `createImageUrlMessage`, `createToolCall`, `createToolResult`, `createConversation`, `createTestTool`, `createCalculatorTool`, `createWeatherTool`, `createFailingTool`, `createSlowTool`, `createToolSchema`, `TestToolOptions`, `SimpleTool`, `createMockRunResult`, `createRunResultWithToolCalls`, `createRunResultWithMessages`, `TestRunResultOptions` |
-| **Helpers** | `@cogitator-ai/test-utils` (`./helpers`) | `collectStreamContent`, `collectStreamChunks`, `collectStreamToolCalls`, `createMockReadableStream`, `waitFor`, `eventually`, `delay`, `withTimeout` |
-| **Conformance** | `@cogitator-ai/test-utils` (`./conformance`) | `startFakeProvider`, `FakeProvider`, `FakeProviderHandler`, `FakeProviderOptions`, `FakeProviderReply`, `FakeProviderRequest`, `backendConformanceCases`, `conformanceRequest`, `CONFORMANCE_FIXTURE`, `BackendConformanceCase`, `BackendConformanceTarget`, `ConformanceMode`, `ConformanceScenario`, `ProviderWire`, `openAIChatWire`, `openAIResponsesWire`, `anthropicWire`, `geminiWire`, `ollamaWire`, `bedrockConverseWire`, `sse`, `ndjson`, `awsEventStreamMessage` |
-
----
-
-## Type Reference
-
-```typescript
-import type {
-  MockChatResponse,
-  MockStreamChunk,
-  TestAgentConfig,
-  TestToolOptions,
-  SimpleTool,
-  TestRunResultOptions,
-  FakeProvider,
-  FakeProviderHandler,
-  FakeProviderOptions,
-  FakeProviderReply,
-  FakeProviderRequest,
-  BackendConformanceCase,
-  BackendConformanceTarget,
-  ConformanceMode,
-  ConformanceScenario,
-  ProviderWire,
-} from '@cogitator-ai/test-utils';
-
-import {
-  // Mocks
-  MockLLMBackend,
-  createMockLLMBackend,
-  MockMemoryAdapter,
-  createMockMemoryAdapter,
-
-  // Fixtures - Agents
-  createTestAgent,
-  createTestAgentConfig,
-
-  // Fixtures - Messages & Tools
-  createUserMessage,
-  createAssistantMessage,
-  createSystemMessage,
-  createToolMessage,
-  createMultimodalMessage,
-  createImageUrlMessage,
-  createToolCall,
-  createToolResult,
-  createConversation,
-  createTestTool,
-  createCalculatorTool,
-  createWeatherTool,
-  createFailingTool,
-  createSlowTool,
-  createToolSchema,
-
-  // Fixtures - Run Results
-  createMockRunResult,
-  createRunResultWithToolCalls,
-  createRunResultWithMessages,
-
-  // Helpers - Streams
-  collectStreamContent,
-  collectStreamChunks,
-  collectStreamToolCalls,
-  createMockReadableStream,
-
-  // Helpers - Async
-  waitFor,
-  eventually,
-  delay,
-  withTimeout,
-
-  // Conformance
-  startFakeProvider,
-  backendConformanceCases,
-  conformanceRequest,
-  CONFORMANCE_FIXTURE,
-  openAIChatWire,
-  openAIResponsesWire,
-  anthropicWire,
-  geminiWire,
-  ollamaWire,
-  bedrockConverseWire,
-  sse,
-  ndjson,
-  awsEventStreamMessage,
-} from '@cogitator-ai/test-utils';
-```
+| Group           | Module                                       | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| --------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Mocks**       | `@cogitator-ai/test-utils` (`./mocks`)       | `MockLLMBackend`, `createMockLLMBackend`, `MockMemoryAdapter`, `createMockMemoryAdapter`, `MockChatResponse`, `MockStreamChunk`                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| **Fixtures**    | `@cogitator-ai/test-utils` (`./fixtures`)    | `createTestAgent`, `createTestAgentConfig`, `TestAgentConfig`, `createUserMessage`, `createAssistantMessage`, `createSystemMessage`, `createToolMessage`, `createMultimodalMessage`, `createImageUrlMessage`, `createToolCall`, `createToolResult`, `createConversation`, `createTestTool`, `createCalculatorTool`, `createWeatherTool`, `createFailingTool`, `createSlowTool`, `createToolSchema`, `TestToolOptions`, `SimpleTool`, `createMockRunResult`, `createRunResultWithToolCalls`, `createRunResultWithMessages`, `TestRunResultOptions` |
+| **Helpers**     | `@cogitator-ai/test-utils` (`./helpers`)     | `collectStreamContent`, `collectStreamChunks`, `collectStreamToolCalls`, `createMockReadableStream`, `waitFor`, `eventually`, `delay`, `withTimeout`                                                                                                                                                                                                                                                                                                                                                                                              |
+| **Conformance** | `@cogitator-ai/test-utils` (`./conformance`) | `startFakeProvider`, `FakeProvider`, `FakeProviderHandler`, `FakeProviderOptions`, `FakeProviderReply`, `FakeProviderRequest`, `backendConformanceCases`, `conformanceRequest`, `CONFORMANCE_FIXTURE`, `BackendConformanceCase`, `BackendConformanceTarget`, `ConformanceMode`, `ConformanceScenario`, `ProviderWire`, `openAIChatWire`, `openAIResponsesWire`, `anthropicWire`, `geminiWire`, `ollamaWire`, `bedrockConverseWire`, `sse`, `ndjson`, `awsEventStreamMessage`                                                                      |
 
 ---
 
