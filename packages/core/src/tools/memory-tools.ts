@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { normalizeName, verifyEvidence, type MemoryItems } from '@cogitator-ai/memory';
+import {
+  isMemoryItemAdapter,
+  MemoryRetriever,
+  normalizeName,
+  verifyEvidence,
+  type MemoryItems,
+} from '@cogitator-ai/memory';
 import { tool, toolset } from '../tool';
 import type {
   BaseToolContext,
@@ -34,10 +40,15 @@ export interface MemoryToolsConfig {
    * The conversations `remember` checks its `quote` against. With it, a fact counts as the
    * user's (graph `source: 'user'`, an `active` memory item, a core fact) only when the quote is
    * found word for word in a user message of the run's thread, so a model cannot plant what the
-   * user never said. Without it nothing can be checked and every fact is kept as before.
+   * user never said. Without it nothing can be checked and every fact is kept as before. When it
+   * keeps memory items too, it must be the store `items` is over: `recall` then ranks items with
+   * the memory retriever, by their words, the entities they name and the graph around them.
    */
   memory?: Pick<MemoryAdapter, 'getEntries' | 'getPath'>;
 }
+
+/** Memory items `recall` returns at most */
+const RECALLED_ITEMS = 10;
 
 /** Entries of a thread, the newest, among which `remember` looks for its quote */
 const QUOTE_LOOKBACK = 200;
@@ -130,6 +141,31 @@ export function createMemoryTools(config: MemoryToolsConfig) {
       ? item.scope.userId === context.userId
       : item.scope.threadId !== undefined && item.scope.threadId === context.threadId;
 
+  const retriever = new MemoryRetriever();
+
+  /**
+   * The memory items `recall` finds for `query`: ranked by the retriever over their words, the
+   * entities they name and the graph around them when the store keeps entities, else by words
+   */
+  const itemsFor = async (query: string, context: BaseToolContext): Promise<MemoryItem[]> => {
+    if (!items) return [];
+    if (!memory || !isMemoryItemAdapter(memory)) {
+      return items.query({ scope: seenFrom(context), text: query, limit: RECALLED_ITEMS });
+    }
+    const retrieval = await retriever.retrieve({
+      input: query,
+      anchor: new Date(),
+      history: [],
+      items,
+      itemAdapter: memory,
+      scope: seenFrom(context),
+      agentIds: [context.agentId],
+    });
+    return retrieval.hits
+      .flatMap((hit) => (hit.kind === 'item' ? [hit.hit.item] : []))
+      .slice(0, RECALLED_ITEMS);
+  };
+
   const remember = tool({
     name: 'remember',
     description:
@@ -209,11 +245,7 @@ export function createMemoryTools(config: MemoryToolsConfig) {
       const results: ResultItem[] = [];
 
       if (items) {
-        for (const item of await items.query({
-          scope: seenFrom(context),
-          text: query,
-          limit: 10,
-        })) {
+        for (const item of await itemsFor(query, context)) {
           results.push({ fact: item.content, type: 'memory', confidence: item.confidence });
         }
       }

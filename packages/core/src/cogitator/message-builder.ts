@@ -126,7 +126,11 @@ export async function buildInitialMessages(
   memoryAdapter: MemoryAdapter | undefined,
   contextBuilder: ContextBuilder | undefined,
   contextBudget?: number,
-  onContext?: (built: BuiltContext) => void
+  onContext?: (built: BuiltContext) => void,
+  memoryIndex?: (thread: {
+    threadId: string;
+    leafId?: string | null;
+  }) => Promise<string | undefined>
 ): Promise<Message[]> {
   const userContent = buildUserContent(options.input, options.images);
   const turnInput = withMemoryContext(
@@ -181,7 +185,10 @@ export async function buildInitialMessages(
     }
   }
 
+  const index = await indexOf(memoryIndex, threadId, options);
+
   if (contextBuilder && options.loadHistory !== false) {
+    const brief = briefWith(index, options);
     const ctx = await contextBuilder.build({
       threadId,
       agentId: agent.id,
@@ -190,7 +197,7 @@ export async function buildInitialMessages(
       userId: options.userId,
       systemPrompt: agent.instructions,
       currentInput: options.input,
-      ...(options.brief !== undefined && { brief: options.brief }),
+      ...(brief !== undefined && { brief }),
       ...(options.asOf !== undefined && { asOf: options.asOf }),
       ...(typeof timeZone === 'string' && { timeZone }),
       ...(contextBudget !== undefined && { maxTokens: contextBudget, reserveTokens: 0 }),
@@ -241,14 +248,58 @@ export async function buildInitialMessages(
         options.onMemoryError
       );
     }
-    messages.push({ role: 'user', content: turnInput });
+    messages.push({ role: 'user', content: withIndex(turnInput, userContent, index, options) });
     return messages;
   }
 
   return [
     { role: 'system', content: agent.instructions },
-    { role: 'user', content: turnInput },
+    { role: 'user', content: withIndex(turnInput, userContent, index, options) },
   ];
+}
+
+/** What memory holds for the run, such as its memory files, or nothing when it fails to load */
+async function indexOf(
+  memoryIndex:
+    | ((thread: { threadId: string; leafId?: string | null }) => Promise<string | undefined>)
+    | undefined,
+  threadId: string,
+  options: RunOptions
+): Promise<string | undefined> {
+  if (!memoryIndex) return undefined;
+  try {
+    return await memoryIndex({
+      threadId,
+      ...(options.branch && { leafId: options.branch.fromEntryId }),
+    });
+  } catch (err) {
+    reportMemoryError(err, 'load', options.onMemoryError);
+    return undefined;
+  }
+}
+
+/**
+ * The turn's notes with what memory holds for the run, such as the list of its memory files, in
+ * front: both change from turn to turn, so they go with the turn and never into the system
+ * message the prompt cache keeps
+ */
+function briefWith(index: string | undefined, options: RunOptions): string | undefined {
+  const parts = [index, options.brief].filter((part): part is string => part !== undefined);
+  return parts.length === 0 ? undefined : parts.join('\n\n');
+}
+
+/** The turn's input with what memory holds in its turn context, for a run without a context builder */
+function withIndex(
+  turnInput: string | ContentPart[],
+  userContent: string | ContentPart[],
+  index: string | undefined,
+  options: RunOptions
+): string | ContentPart[] {
+  if (index === undefined) return turnInput;
+  return withMemoryContext(
+    userContent,
+    formatTurnContext([index, ...(options.brief === undefined ? [] : [options.brief])])
+  );
 }
 
 /**

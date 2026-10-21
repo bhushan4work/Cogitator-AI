@@ -102,6 +102,7 @@ export function tool<TParams, TResult, TDeps = unknown>(
     timeout: config.timeout,
     sandbox: config.sandbox,
     maxResultLength: config.maxResultLength,
+    ...(config.providerTypes && { providerTypes: config.providerTypes }),
     toJSON(): ToolSchema {
       return toolToSchema(this);
     },
@@ -132,6 +133,7 @@ export function withParsedArguments<TParams, TResult>(
     ...(tool.timeout !== undefined && { timeout: tool.timeout }),
     ...(tool.sandbox !== undefined && { sandbox: tool.sandbox }),
     ...(tool.maxResultLength !== undefined && { maxResultLength: tool.maxResultLength }),
+    ...(tool.providerTypes && { providerTypes: tool.providerTypes }),
     toJSON: () => tool.toJSON(),
   };
 }
@@ -175,6 +177,7 @@ export function toolToSchema<TParams, TResult>(t: Tool<TParams, TResult>): ToolS
     name: t.name,
     description: t.description,
     parameters: toToolParameters(jsonSchema),
+    ...(t.providerTypes && { providerTypes: t.providerTypes }),
   };
 }
 

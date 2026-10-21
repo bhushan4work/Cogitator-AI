@@ -23,6 +23,7 @@ import type {
   CostEstimate,
   EstimateOptions,
   MemoryAdapter,
+  MemoryFilesConfig,
   HandoffEvent,
   ResumeOptions,
   RunCheckpoint,
@@ -57,6 +58,8 @@ import {
   indexedText,
   type IndexedText,
   type SummarizeFn,
+  isMemoryFileAdapter,
+  MemoryFiles,
 } from '@cogitator-ai/memory';
 
 /** Entries of a thread {@link Cogitator.indexMemory} reads at once */
@@ -138,6 +141,13 @@ import { telemetryObservers } from './observability/telemetry';
 import { RunLimiter } from './cogitator/run-limiter';
 import { findHandoffAgent, handoffTools } from './cogitator/handoffs';
 import { PromptRegistry } from './cogitator/prompts';
+import { createMemorySearchTools } from './tools/memory-search-tools';
+import {
+  memoryFilePlace,
+  memoryFileScope,
+  memoryFileTool,
+  memoryFileVisibility,
+} from './tools/memory-file-tool';
 import { InMemoryRunCheckpointStore, ThreadRunCheckpointStore } from './cogitator/run-checkpoints';
 import {
   parseStructuredOutput,
@@ -269,6 +279,9 @@ export class Cogitator implements ToolInvoker {
     { inputTokens: number; outputTokens: number; cost: number }
   >();
   private recallTool?: Tool;
+  private readonly memoryFileTools = new Map<string, Tool>();
+  private memoryFilesService?: { adapter: MemoryAdapter; service: MemoryFiles };
+  private warnedNoMemoryFiles = false;
   /** The memory of each run going on, for `recall_tool_output` to read the run's branch */
   private readonly runMemories = new Map<string, RunMemory>();
   private modelChain?: ModelFallbackChain;
@@ -617,16 +630,89 @@ export class Cogitator implements ToolInvoker {
   }
 
   /**
-   * The tools the runtime's own features give every agent: `recall_tool_output` while
-   * `context.clearToolOutputs` is on.
+   * The tools the runtime's own features give `owner`: `recall_tool_output` while
+   * `context.clearToolOutputs` is on, and the memory tool (`memory`) with `memory.files`. A tool
+   * of the agent's own with one of these names takes its place.
    */
-  private builtinTools(): Tool[] {
-    if (!this.config.context?.clearToolOutputs) return [];
-    this.recallTool ??= recallToolOutputTool(
-      () => this.state.memoryAdapter,
-      (runId) => this.runMemories.get(runId)?.conversation
-    );
-    return [this.recallTool];
+  private builtinTools(owner: Agent): Tool[] {
+    const tools: Tool[] = [];
+    if (this.config.context?.clearToolOutputs) {
+      this.recallTool ??= recallToolOutputTool(
+        () => this.state.memoryAdapter,
+        (runId) => this.runMemories.get(runId)?.conversation
+      );
+      tools.push(this.recallTool);
+    }
+    const files = this.memoryFiles();
+    if (files) {
+      const agentId = memoryAgentId(owner);
+      let fileTool = this.memoryFileTools.get(agentId);
+      if (!fileTool) {
+        fileTool = memoryFileTool({
+          memory: files.adapter,
+          files: files.service,
+          agentId,
+          ...(files.config.scope !== undefined && { scope: files.config.scope }),
+          ...(files.config.readOnly && { readOnly: true }),
+          placeOf: (runId) => this.runMemories.get(runId)?.conversation,
+        });
+        this.memoryFileTools.set(agentId, fileTool);
+      }
+      tools.push(fileTool);
+    }
+    return tools;
+  }
+
+  /**
+   * The memory files of `memory.files`, when it is set and the memory adapter keeps them; a
+   * memory adapter that keeps none is warned about once
+   */
+  private memoryFiles():
+    { config: MemoryFilesConfig; adapter: MemoryAdapter; service: MemoryFiles } | undefined {
+    const config = this.config.memory?.files;
+    const adapter = this.state.memoryAdapter;
+    if (!config || !adapter) return undefined;
+    if (!isMemoryFileAdapter(adapter)) {
+      if (!this.warnedNoMemoryFiles) {
+        this.warnedNoMemoryFiles = true;
+        getLogger().warn(
+          `memory.files is set, but the ${adapter.provider} memory adapter keeps no memory files: the memory tool is left out`
+        );
+      }
+      return undefined;
+    }
+    if (this.memoryFilesService?.adapter !== adapter) {
+      this.memoryFilesService = { adapter, service: new MemoryFiles({ adapter }) };
+      this.memoryFileTools.clear();
+    }
+    return { config, adapter, service: this.memoryFilesService.service };
+  }
+
+  /** The list of the memory files a run of `agent` sees, for its context */
+  private memoryFilesIndex(
+    agent: Agent,
+    options: RunOptions
+  ):
+    | ((thread: { threadId: string; leafId?: string | null }) => Promise<string | undefined>)
+    | undefined {
+    const files = this.memoryFiles();
+    if (!files) return undefined;
+    return async (thread) => {
+      const agentId = memoryAgentId(agent);
+      const run = {
+        ...(options.userId !== undefined && { userId: options.userId }),
+        threadId: thread.threadId,
+      };
+      const place = await memoryFilePlace(files.adapter, thread);
+      return files.service.index(
+        {
+          scope: memoryFileScope(agentId, files.config.scope, run),
+          visibleTo: memoryFileVisibility(agentId, run),
+          ...(place && { place }),
+        },
+        files.config.indexChars
+      );
+    };
   }
 
   /**
@@ -900,9 +986,9 @@ export class Cogitator implements ToolInvoker {
 
       const buildRegistry = (owner: Agent) => {
         const ownerRegistry = new ToolRegistry();
-        ownerRegistry.registerMany(this.builtinTools());
         const handoff = handoffTools(owner);
         const own = new Set([...owner.tools, ...handoff.tools].map((t) => t.name));
+        ownerRegistry.registerMany(this.builtinTools(owner).filter((t) => !own.has(t.name)));
         ownerRegistry.registerMany(this.tools.getAll().filter((t) => !own.has(t.name)));
         ownerRegistry.registerMany(owner.tools);
         ownerRegistry.registerMany(handoff.tools);
@@ -1985,7 +2071,8 @@ export class Cogitator implements ToolInvoker {
       this.state.memoryAdapter,
       this.state.contextBuilder,
       historyBudget,
-      onContext
+      onContext,
+      this.memoryFilesIndex(agent, options)
     );
     runMemory.open();
 
@@ -2682,12 +2769,44 @@ export class Cogitator implements ToolInvoker {
   }
 
   /**
+   * The memory search tools (`search_memory`, `open_turns`, `list_entities`) over this runtime's
+   * memory, for the agent whose memory id is `memoryAgentId` (its configured `id`, else its
+   * name): they read the same thread store, memory items, embeddings and message index the
+   * runs do. Pair them with the `memoryCitations()` middleware to keep answers to what a run
+   * opened.
+   *
+   * @throws CogitatorError when no memory is configured
+   */
+  async memorySearchTools(memoryAgentId: string): Promise<Tool[]> {
+    const memory = await this.getMemory();
+    if (!memory) {
+      throw new CogitatorError({
+        message: 'memorySearchTools needs memory: set memory.adapter in the Cogitator config',
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+    }
+    return createMemorySearchTools({
+      memory,
+      agentId: memoryAgentId,
+      ...(this.state.memoryItems && { items: this.state.memoryItems }),
+      ...(this.state.embeddingService && { embedding: this.state.embeddingService }),
+      ...(this.state.messageIndex && { messageIndex: this.state.messageIndex }),
+      ...((this.config.memory?.contextBuilder?.timeZone ??
+        this.config.memory?.extraction?.timeZone) !== undefined && {
+        timeZone:
+          this.config.memory?.contextBuilder?.timeZone ?? this.config.memory?.extraction?.timeZone,
+      }),
+      placeOf: (runId) => this.runMemories.get(runId)?.conversation,
+    });
+  }
+
+  /**
    * Embeds every entry of `threadId` the memory index has not embedded yet and waits until their
    * vectors are stored, such as after a conversation was imported, so the first search of the
    * thread already sees all of it. With an adapter that reads a thread in pages (`getPath`) the
    * thread is read and embedded a page at a time, so a long one is never held whole, else it is
-   * read at once and embedded a page at a time. Does nothing when memory keeps no index (the `recent` strategy or no
-   * embedding service). Fails when the embedding store refuses a vector.
+   * read at once and embedded a page at a time. Does nothing when memory keeps no index (the
+   * `recent` strategy or no embedding service). Fails when the embedding store refuses a vector.
    */
   async indexMemory(threadId: string): Promise<void> {
     const memory = await this.getMemory();
@@ -2773,6 +2892,8 @@ export class Cogitator implements ToolInvoker {
    */
   async close(): Promise<void> {
     await this.closeObservers();
+    this.memoryFileTools.clear();
+    this.memoryFilesService = undefined;
     await cleanupState(this.state);
     this.backends.clear();
     this.turnBackends.clear();

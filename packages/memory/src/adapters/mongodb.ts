@@ -20,8 +20,15 @@ import type {
   NewMemoryEntry,
   MemoryEntryType,
   PathQueryOptions,
+  MemoryFileAdapter,
+  MemoryFileFilter,
+  MemoryFileVersion,
 } from '@cogitator-ai/types';
-import { CONVERSATION_ENTRY_TYPES, MEMORY_ENTRY_FORMAT } from '@cogitator-ai/types';
+import {
+  CONVERSATION_ENTRY_TYPES,
+  MEMORY_ENTRY_FORMAT,
+  MEMORY_FILE_CONFLICT,
+} from '@cogitator-ai/types';
 import type {
   Collection,
   Document,
@@ -36,6 +43,7 @@ import type {
 import { BranchingMemoryAdapter, entryTypeWanted } from './base';
 import { threadListing, threadPage, type ThreadListing } from './thread-listing';
 import { entityNames } from '../memory-items';
+import { byFileVersion, fileKeyOf, matchesFileFilter } from '../memory-files';
 
 /** A cursor over `find()` results, as far as the adapter reads it. */
 type MongoCursor<T extends Document> = Pick<
@@ -59,6 +67,7 @@ interface MongoCollection<T extends Document> extends Pick<
   | 'deleteMany'
   | 'bulkWrite'
   | 'replaceOne'
+  | 'countDocuments'
 > {
   findOne(filter: Filter<T>): Promise<WithId<T> | null>;
   find(filter: Filter<T>, options?: FindOptions): MongoCursor<T>;
@@ -206,6 +215,41 @@ function itemDoc(item: MemoryItem): Omit<ItemDoc, '_id'> {
     ...(item.expiredAt !== undefined && { expiredAt: item.expiredAt }),
     item,
   };
+}
+
+/**
+ * The versions one change added, kept in one document so a reader sees all of them or none,
+ * beside the fields its filters read
+ */
+interface FileBatchDoc {
+  _id: string;
+  agentIds: string[];
+  ids: string[];
+  paths: string[];
+  versions: MemoryFileVersion[];
+}
+
+/**
+ * A place a file version took: its scope and path, and its sequence, with the batch that took it
+ * and when, so a place a writer took and never published is let go again
+ */
+interface FilePlaceDoc {
+  _id: string;
+  batchId: string;
+  versionId: string;
+  at: Date;
+}
+
+/** How long a place may wait for its batch before it is taken as left behind */
+const ORPHAN_PLACE_MS = 60_000;
+
+/** The id of the place `version` takes: its scope, path and sequence */
+function filePlaceOf(version: MemoryFileVersion): string {
+  return `${fileKeyOf(version.scope, version.path)}#${version.sequence}`;
+}
+
+function isDuplicateKey(err: unknown): boolean {
+  return (err as { code?: number }).code === 11000;
 }
 
 /** First seen first, then by id, the order entities are found in */
@@ -370,7 +414,10 @@ function afterCursor({ cursor, order }: ThreadListing): Filter<ThreadDoc> | unde
  * Threads and entries in MongoDB, and memory items with their entities in `<prefix>items` and
  * `<prefix>entities`
  */
-export class MongoDBAdapter extends BranchingMemoryAdapter implements MemoryItemAdapter {
+export class MongoDBAdapter
+  extends BranchingMemoryAdapter
+  implements MemoryItemAdapter, MemoryFileAdapter
+{
   readonly provider: MemoryProvider = 'mongodb';
 
   private client: MongoClient | null = null;
@@ -402,6 +449,16 @@ export class MongoDBAdapter extends BranchingMemoryAdapter implements MemoryItem
   private get items(): MongoCollection<ItemDoc> {
     if (!this.db) throw new Error('Not connected');
     return this.db.collection<ItemDoc>(`${this.prefix}items`);
+  }
+
+  private get fileBatches(): MongoCollection<FileBatchDoc> {
+    if (!this.db) throw new Error('Not connected');
+    return this.db.collection<FileBatchDoc>(`${this.prefix}file_batches`);
+  }
+
+  private get filePlaces(): MongoCollection<FilePlaceDoc> {
+    if (!this.db) throw new Error('Not connected');
+    return this.db.collection<FilePlaceDoc>(`${this.prefix}file_places`);
   }
 
   private get entities(): MongoCollection<EntityDoc> {
@@ -447,6 +504,10 @@ export class MongoDBAdapter extends BranchingMemoryAdapter implements MemoryItem
       await items.createIndex({ agentId: 1, userId: 1 });
       const entities = db.collection<EntityDoc>(`${this.prefix}entities`);
       await entities.createIndex({ agentId: 1, names: 1 });
+      const fileBatches = db.collection<FileBatchDoc>(`${this.prefix}file_batches`);
+      await fileBatches.createIndex({ agentIds: 1 });
+      await fileBatches.createIndex({ paths: 1 });
+      await fileBatches.createIndex({ ids: 1 });
 
       this.client = client;
       this.db = db;
@@ -1286,6 +1347,160 @@ export class MongoDBAdapter extends BranchingMemoryAdapter implements MemoryItem
       return this.success(undefined);
     } catch (err) {
       return this.failure((err as Error).message);
+    }
+  }
+
+  /**
+   * Takes the place of each version (a document whose id is its scope, path and sequence, which
+   * a second writer cannot insert again), then adds the versions in one document, so a reader
+   * sees all of them or none. When a place is taken already, the places this call took are let
+   * go again and nothing is added.
+   */
+  async putFileVersions(versions: MemoryFileVersion[]): Promise<MemoryResult<MemoryFileVersion[]>> {
+    if (!this.db) return this.failure('Not connected');
+    if (versions.length === 0) return this.success([]);
+    const places = versions.map((version) => filePlaceOf(version));
+    if (new Set(places).size !== places.length) return this.failure(MEMORY_FILE_CONFLICT);
+    const batchId = `batch_${versions[0]!.id}`;
+    let taken = 0;
+    try {
+      for (const [at, place] of places.entries()) {
+        await this.takePlace(place, batchId, versions[at]!.id);
+        taken++;
+      }
+      const held = await this.filePlaces.countDocuments({ _id: { $in: places }, batchId });
+      if (held !== places.length) {
+        await this.filePlaces.deleteMany({ _id: { $in: places }, batchId });
+        return this.failure(MEMORY_FILE_CONFLICT);
+      }
+      await this.fileBatches.insertOne({
+        _id: batchId,
+        agentIds: [...new Set(versions.map((version) => version.scope.agentId))],
+        ids: versions.map((version) => version.id),
+        paths: [...new Set(versions.map((version) => version.path))],
+        versions,
+      });
+      const kept = await this.filePlaces.countDocuments({ _id: { $in: places }, batchId });
+      if (kept !== places.length) {
+        await this.fileBatches.deleteOne({ _id: batchId });
+        await this.filePlaces.deleteMany({ _id: { $in: places }, batchId });
+        return this.failure(MEMORY_FILE_CONFLICT);
+      }
+      return this.success(versions.map((version) => structuredClone(version)));
+    } catch (err) {
+      await this.filePlaces
+        .deleteMany({ _id: { $in: places.slice(0, taken) } })
+        .catch(() => undefined);
+      return isDuplicateKey(err)
+        ? this.failure(MEMORY_FILE_CONFLICT)
+        : this.failure((err as Error).message);
+    }
+  }
+
+  async findFileVersions(filter: MemoryFileFilter): Promise<MemoryResult<MemoryFileVersion[]>> {
+    if (!this.db) return this.failure('Not connected');
+    try {
+      const query: Filter<FileBatchDoc> = {
+        agentIds: filter.agentId,
+        ...(filter.ids && { ids: { $in: filter.ids } }),
+        ...(filter.paths && { paths: { $in: filter.paths } }),
+        ...(filter.prefix !== undefined &&
+          !filter.paths && {
+            paths: { $regex: `^${filter.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` },
+          }),
+      };
+      const batches = await this.fileBatches.find(query).toArray();
+      return this.success(
+        batches
+          .flatMap((batch) => batch.versions)
+          .filter((version) => matchesFileFilter(version, filter))
+          .sort(byFileVersion)
+      );
+    } catch (err) {
+      return this.failure((err as Error).message);
+    }
+  }
+
+  async redactFileVersions(
+    ids: string[],
+    redaction: { content: string; sha256: string; at: Date; reason?: string }
+  ): Promise<MemoryResult<void>> {
+    if (!this.db) return this.failure('Not connected');
+    if (ids.length === 0) return this.success(undefined);
+    try {
+      await this.fileBatches.updateMany(
+        { ids: { $in: ids } },
+        {
+          $set: {
+            'versions.$[version].content': redaction.content,
+            'versions.$[version].sha256': redaction.sha256,
+            'versions.$[version].redacted': {
+              at: redaction.at,
+              ...(redaction.reason !== undefined && { reason: redaction.reason }),
+            },
+          },
+        },
+        { arrayFilters: [{ 'version.id': { $in: ids } }] }
+      );
+      return this.success(undefined);
+    } catch (err) {
+      return this.failure((err as Error).message);
+    }
+  }
+
+  /**
+   * Deletes the versions out of their batches in place (`$pull`), so a redaction or another
+   * deletion that lands meanwhile is never undone, then lets their places go
+   */
+  async deleteFileVersions(ids: string[]): Promise<MemoryResult<void>> {
+    if (!this.db) return this.failure('Not connected');
+    if (ids.length === 0) return this.success(undefined);
+    try {
+      const batches = await this.fileBatches.find({ ids: { $in: ids } }).toArray();
+      const gone = new Set(ids);
+      const dropped = batches.flatMap((batch) =>
+        batch.versions.filter((version) => gone.has(version.id))
+      );
+      await this.fileBatches.updateMany(
+        { ids: { $in: ids } },
+        { $pull: { versions: { id: { $in: ids } }, ids: { $in: ids } } }
+      );
+      await this.fileBatches.deleteMany({
+        _id: { $in: batches.map((batch) => batch._id) },
+        ids: { $size: 0 },
+      });
+      if (dropped.length > 0) {
+        await this.filePlaces.deleteMany({
+          _id: { $in: dropped.map((version) => filePlaceOf(version)) },
+        });
+      }
+      return this.success(undefined);
+    } catch (err) {
+      return this.failure((err as Error).message);
+    }
+  }
+
+  /**
+   * Takes `place` for version `versionId` of `batchId`. A place another batch took longer than
+   * {@link ORPHAN_PLACE_MS} ago and holds no version in, as a writer that died before it
+   * published or a deletion that died before it let its places go leave it, is let go and taken
+   * again. Any other taken place is a conflict.
+   */
+  private async takePlace(place: string, batchId: string, versionId: string): Promise<void> {
+    try {
+      await this.filePlaces.insertOne({ _id: place, batchId, versionId, at: new Date() });
+      return;
+    } catch (err) {
+      if (!isDuplicateKey(err)) throw err;
+      const held = await this.filePlaces.findOne({ _id: place });
+      if (!held || Date.now() - held.at.getTime() < ORPHAN_PLACE_MS) throw err;
+      const published = await this.fileBatches.findOne({
+        _id: held.batchId,
+        ids: held.versionId,
+      });
+      if (published) throw err;
+      await this.filePlaces.deleteOne({ _id: place, batchId: held.batchId });
+      await this.filePlaces.insertOne({ _id: place, batchId, versionId, at: new Date() });
     }
   }
 

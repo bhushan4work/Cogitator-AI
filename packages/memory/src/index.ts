@@ -260,6 +260,40 @@ export {
   type MemoryItemsConfig,
 } from './memory-items';
 export {
+  MemoryFiles,
+  MemoryFileError,
+  MEMORY_ROOT,
+  REDACTED_CONTENT,
+  MAX_FILE_BYTES,
+  MAX_CHANGE_BYTES,
+  memoryPath,
+  sha256Of,
+  isMemoryFileAdapter,
+  matchesFileFilter,
+  byFileVersion,
+  fileKeyOf,
+  type MemoryFile,
+  type MemoryFileAccess,
+  type MemoryFileCommand,
+  type MemoryFilePlace,
+  type MemoryFilesOptions,
+} from './memory-files';
+export {
+  MemoryRetriever,
+  MIN_COSINE,
+  RELATIVE_COSINE,
+  type Retrieval,
+  type RetrievalRequest,
+  type RetrievedEntry,
+  type RetrievedItem,
+} from './retrieval/retriever';
+export {
+  analyzeQuery,
+  timeExpressionOf,
+  type QueryAnalysis,
+  type QueryType,
+} from './retrieval/query';
+export {
   calendarDate,
   isTimeZone,
   resolveTime,

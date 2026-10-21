@@ -3,9 +3,18 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import pg from 'pg';
 import { Redis } from 'ioredis';
 import { MongoClient } from 'mongodb';
-import { MongoDBAdapter, PostgresAdapter, RedisAdapter } from '@cogitator-ai/memory';
-import { memoryItemAdapterConformanceCases } from '@cogitator-ai/test-utils';
-import type { Evidence, MemoryAdapter, MemoryItemAdapter, MemoryResult } from '@cogitator-ai/types';
+import { fileKeyOf, MongoDBAdapter, PostgresAdapter, RedisAdapter } from '@cogitator-ai/memory';
+import {
+  memoryFileAdapterConformanceCases,
+  memoryItemAdapterConformanceCases,
+} from '@cogitator-ai/test-utils';
+import type {
+  Evidence,
+  MemoryAdapter,
+  MemoryFileAdapter,
+  MemoryItemAdapter,
+  MemoryResult,
+} from '@cogitator-ai/types';
 
 const postgresUrl = process.env.TEST_POSTGRES_URL;
 const redisUrl =
@@ -16,7 +25,7 @@ const mongoUrl = process.env.TEST_MONGODB_URL;
 
 const tag = randomUUID().replace(/-/g, '').slice(0, 8);
 
-type ItemStore = MemoryAdapter & MemoryItemAdapter;
+type ItemStore = MemoryAdapter & MemoryItemAdapter & MemoryFileAdapter;
 
 function unwrap<T>(result: MemoryResult<T>): T {
   if (!result.success) throw new Error(result.error);
@@ -96,6 +105,17 @@ for (const target of targets) {
     afterAll(() => target.cleanUp());
 
     for (const c of memoryItemAdapterConformanceCases({
+      create: target.create,
+      release: async (adapter) => {
+        await adapter.disconnect();
+      },
+    })) {
+      (c.skip ? it.skip : it)(c.name, { timeout: 30_000 }, () => c.run());
+    }
+  });
+
+  (target.url ? describe : describe.skip)(`Memory: ${target.name} memory files conformance`, () => {
+    for (const c of memoryFileAdapterConformanceCases({
       create: target.create,
       release: async (adapter) => {
         await adapter.disconnect();
@@ -266,7 +286,7 @@ async function countOf(client: pg.Client, table: string): Promise<number> {
     const version = await client.query(
       `SELECT version FROM ${schema}.cogitator_schema_migrations WHERE component = 'memory'`
     );
-    expect(version.rows[0]?.version).toBe(3);
+    expect(version.rows[0]?.version).toBe(4);
 
     const tea = unwrap(await adapter.getItem('fact_tea'));
     expect(tea).toEqual({
@@ -551,5 +571,62 @@ async function countOf(client: pg.Client, table: string): Promise<number> {
     expect(missing.success).toBe(false);
     expect(missing.success || missing.error).toContain('not found');
     expect((await adapter.deleteFact('fact_missing')).success).toBe(true);
+  });
+});
+
+(mongoUrl ? describe : describe.skip)('Memory: MongoDBAdapter memory files left behind', () => {
+  const database = `files_orphan_${tag}`;
+
+  afterAll(async () => {
+    const client = new MongoClient(mongoUrl!);
+    await client.connect();
+    await client.db(database).dropDatabase();
+    await client.close();
+  });
+
+  it('takes again a place a writer took long ago and never published', async () => {
+    const adapter = new MongoDBAdapter({ provider: 'mongodb', uri: mongoUrl!, database });
+    const connectedNow = await adapter.connect();
+    if (!connectedNow.success) throw new Error(connectedNow.error);
+    const scope = { agentId: 'orphans', userId: 'u1' };
+    const path = '/memories/notes.md';
+    const client = new MongoClient(mongoUrl!);
+    await client.connect();
+    const places = client
+      .db(database)
+      .collection<{ _id: string; batchId: string; versionId: string; at: Date }>(
+        'memory_file_places'
+      );
+    await places.insertOne({
+      _id: `${fileKeyOf(scope, path)}#1`,
+      batchId: 'batch_of_a_dead_writer',
+      versionId: 'v_dead',
+      at: new Date(Date.now() - 120_000),
+    });
+    await places.insertOne({
+      _id: `${fileKeyOf(scope, '/memories/fresh.md')}#1`,
+      batchId: 'batch_still_writing',
+      versionId: 'v_writing',
+      at: new Date(),
+    });
+
+    const version = (filePath: string) => ({
+      id: `v_${randomUUID()}`,
+      scope,
+      path: filePath,
+      sequence: 1,
+      content: 'text',
+      sha256: 'a'.repeat(64),
+      previousId: null,
+      author: 'model' as const,
+      createdAt: new Date(),
+    });
+    const taken = await adapter.putFileVersions([version(path)]);
+    const fresh = await adapter.putFileVersions([version('/memories/fresh.md')]);
+
+    await client.close();
+    await adapter.disconnect();
+    expect(taken.success).toBe(true);
+    expect(!fresh.success && fresh.error).toBe('memory-file-conflict');
   });
 });

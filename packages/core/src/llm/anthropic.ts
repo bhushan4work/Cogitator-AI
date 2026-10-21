@@ -9,6 +9,7 @@ import type {
   ChatStreamChunk,
   ChatUsage,
   ToolCall,
+  ToolSchema,
   ToolChoice,
   Message,
   MessageContent,
@@ -37,6 +38,7 @@ import {
   resolveClaudeSampling,
   supportsForcedToolChoice,
   supportsNativeStructuredOutput,
+  supportsMemoryTool,
 } from './claude-models';
 import { toClaudeStrictJsonSchema } from './claude-json-schema';
 import {
@@ -266,12 +268,8 @@ export class AnthropicBackend extends BaseLLMBackend {
     );
     const { tools, toolChoice, systemSuffix, outputConfig } = this.prepareJsonMode(request, model);
 
-    const allTools = [
-      ...(request.tools?.map((t) => ({
-        name: t.name,
-        description: t.description,
-        input_schema: t.parameters as AnthropicToolInput,
-      })) ?? []),
+    const allTools: Anthropic.ToolUnion[] = [
+      ...(request.tools?.map((t) => anthropicTool(t, model)) ?? []),
       ...tools,
     ];
 
@@ -608,6 +606,26 @@ interface StreamedToolUse {
   name: string;
   inputJson: string;
   thinking: Record<string, unknown>[];
+}
+
+/** Anthropic's memory tool, which only some Claude models take */
+const MEMORY_TOOL_TYPE = 'memory_20250818';
+
+/**
+ * A tool as Anthropic takes it: its type in Anthropic's own catalog when it has one and the model
+ * takes it, such as the memory tool on Claude 4 and later, which the model knows from its
+ * training, else its name, description and schema
+ */
+function anthropicTool(t: ToolSchema, model: string): Anthropic.ToolUnion {
+  const type = t.providerTypes?.anthropic;
+  if (type !== undefined && (type !== MEMORY_TOOL_TYPE || supportsMemoryTool(model))) {
+    return { type, name: t.name } as Anthropic.ToolUnion;
+  }
+  return {
+    name: t.name,
+    description: t.description,
+    input_schema: t.parameters as AnthropicToolInput,
+  };
 }
 
 function toToolCall(use: StreamedToolUse, args: ToolCallArguments): ToolCall {
