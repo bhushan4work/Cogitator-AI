@@ -142,11 +142,11 @@ describe('RedisAdapter', () => {
       await adapter.createThread('agent1', {}, 't1');
 
       const [script] = mockRedisClient.eval.mock.calls.find(([s]) =>
-        String(s).includes("redis.call('SET', KEYS[1], ARGV[3]")
+        String(s).includes('put(KEYS[1], ARGV[3], ARGV[4])')
       ) ?? [''];
       expect(script).toContain("redis.call('ZSCAN', index");
       expect(script).toContain("redis.call('EXISTS', prefix .. 'thread:' .. id) == 0");
-      expect(script).toContain("redis.call('EXPIRE', KEYS[2], ARGV[4] * 7)");
+      expect(script).toContain('keep(KEYS[2], ARGV[4] * 7)');
       expect(script).toContain('sweep(KEYS[2], KEYS[3], ARGV[7], ARGV[4])');
     });
 
@@ -261,9 +261,11 @@ describe('RedisAdapter', () => {
 
       expect(result.success).toBe(true);
       expect(mockRedisClient.eval).toHaveBeenCalledWith(
-        expect.stringContaining("redis.call('ZREM', KEYS[3], ARGV[1])"),
-        3,
+        expect.stringContaining("redis.call('ZREM', KEYS[5], ARGV[1])"),
+        5,
         'cogitator:thread:entries:thread_123',
+        'cogitator:thread:leaf:thread_123',
+        'cogitator:thread:chained:thread_123',
         'cogitator:thread:thread_123',
         'cogitator:threads:index',
         'thread_123'
@@ -284,25 +286,140 @@ describe('RedisAdapter', () => {
       if (result.success) {
         expect(result.data.id).toMatch(/^entry_/);
         expect(result.data.message).toEqual(message);
-        expect(result.data).not.toHaveProperty('seq');
+        expect(result.data).toMatchObject({ seq: 1, parentId: null, type: 'message' });
       }
-      const [, numKeys, threadKey, setKey, entryKey, indexKey, sweepKey, json] =
-        mockRedisClient.eval.mock.calls[0] ?? [];
-      expect([numKeys, threadKey, setKey, entryKey, indexKey, sweepKey]).toEqual([
-        5,
+      const [
+        ,
+        numKeys,
+        threadKey,
+        setKey,
+        entryKey,
+        indexKey,
+        sweepKey,
+        leafKey,
+        chainedKey,
+        json,
+      ] = mockRedisClient.eval.mock.calls[0] ?? [];
+      expect([
+        numKeys,
+        threadKey,
+        setKey,
+        entryKey,
+        indexKey,
+        sweepKey,
+        leafKey,
+        chainedKey,
+      ]).toEqual([
+        7,
         'cogitator:thread:thread_123',
         'cogitator:thread:entries:thread_123',
         `cogitator:entry:${result.success && result.data.id}`,
         'cogitator:threads:index',
         'cogitator:threads:sweep',
+        'cogitator:thread:leaf:thread_123',
+        'cogitator:thread:chained:thread_123',
       ]);
       expect(JSON.parse(String(json))).toMatchObject({ seq: 1 });
+    });
+
+    it('tells the script apart a parent left out, a new root and a parent entry', async () => {
+      const add = (parentId?: string | null) =>
+        adapter.addEntry({
+          threadId: 't1',
+          message: { role: 'user', content: 'x' },
+          tokenCount: 1,
+          ...(parentId !== undefined && { parentId }),
+        });
+      mockRedisClient.eval.mockResolvedValue([1, '']);
+
+      await add();
+      await add(null);
+      await add('entry_parent');
+
+      const placements = scriptCalls('ARGV[5] ==').map((call) => [call[12], call[15]]);
+      expect(placements).toEqual([
+        ['leaf', ''],
+        ['root', ''],
+        ['entry', 'entry_parent'],
+      ]);
+      const [script] = mockRedisClient.eval.mock.calls[0] ?? [];
+      expect(script).toContain("if ARGV[5] == 'leaf' then");
+      resetEval();
+    });
+
+    it('names a key of the thread in every script, so a cluster routes it to its node', async () => {
+      const at = new Date(0).toISOString();
+      mockRedisClient.get.mockImplementation(async (key: string) =>
+        key === 'cogitator:thread:t1'
+          ? JSON.stringify({ id: 't1', agentId: 'a', createdAt: at, updatedAt: at })
+          : JSON.stringify({ id: 'e1', threadId: 't1', createdAt: at })
+      );
+      mockRedisClient.eval.mockImplementation(async (script: string) => {
+        if (script === READ_THREAD) {
+          return JSON.stringify({ id: 'e1', threadId: 't1', createdAt: new Date(0) });
+        }
+        if (script.includes("if ARGV[5] == 'leaf' then")) return [1, ''];
+        if (script.includes('local out = {')) return [''];
+        return sweeps(script) ? [1] : 1;
+      });
+
+      await adapter.addEntry({
+        threadId: 't1',
+        message: { role: 'user', content: 'x' },
+        tokenCount: 1,
+      });
+      await adapter.getThread('t1');
+      await adapter.getPath({ threadId: 't1', leafId: 'e1' });
+      await adapter.checkout('t1', 'e1');
+      await adapter.deleteEntry('e1');
+      await adapter.clearThread('t1');
+      await adapter.deleteThread('t1');
+
+      expect(scriptCalls('local out = {')[0]?.slice(0, 4)).toEqual([
+        3,
+        'cogitator:thread:entries:t1',
+        'cogitator:thread:leaf:t1',
+        'cogitator:thread:chained:t1',
+      ]);
+      const keyless = mockRedisClient.eval.mock.calls.filter(([, numKeys]) => Number(numKeys) < 1);
+      expect(keyless).toEqual([]);
+      mockRedisClient.get.mockReset();
+      mockRedisClient.get.mockResolvedValue(null);
+      resetEval();
+    });
+
+    it('moves the leaf only to an entry the script still finds in the thread', async () => {
+      mockRedisClient.get.mockResolvedValue(
+        JSON.stringify({ id: 'e1', threadId: 't1', createdAt: new Date(0) })
+      );
+      mockRedisClient.eval.mockImplementation(async (script: string) => {
+        if (script === READ_THREAD) {
+          return JSON.stringify({ id: 'e1', threadId: 't1', createdAt: new Date(0) });
+        }
+        if (script.includes("redis.call('ZSCORE', KEYS[3], KEYS[5])")) return -1;
+        return sweeps(script) ? [1] : 1;
+      });
+
+      const result = await adapter.checkout('t1', 'e1');
+
+      expect(result).toEqual({ success: false, error: 'Entry e1 is not in thread t1' });
+      const [setLeaf] = scriptCalls("redis.call('ZSCORE', KEYS[3], KEYS[5])");
+      expect(setLeaf?.slice(0, 6)).toEqual([
+        5,
+        'cogitator:thread:t1',
+        'cogitator:thread:leaf:t1',
+        'cogitator:thread:entries:t1',
+        'cogitator:thread:chained:t1',
+        'cogitator:entry:e1',
+      ]);
+      mockRedisClient.get.mockResolvedValue(null);
+      resetEval();
     });
 
     it('reports threads its sweep found expired as deleted', async () => {
       const changes: unknown[] = [];
       adapter.onChange((change) => changes.push(change));
-      mockRedisClient.eval.mockResolvedValueOnce([1, 'gone-1', 'gone-2']);
+      mockRedisClient.eval.mockResolvedValueOnce([1, '', 'gone-1', 'gone-2']);
 
       const result = await adapter.addEntry({
         threadId: 't1',
@@ -401,21 +518,44 @@ describe('RedisAdapter', () => {
       }
     });
 
-    it('deletes entry', async () => {
-      const entry = {
-        id: 'entry_123',
-        threadId: 'thread_123',
-        message: { role: 'user', content: 'Hello' },
-        tokenCount: 10,
-        createdAt: new Date().toISOString(),
-      };
-      mockRedisClient.get.mockResolvedValueOnce(JSON.stringify(entry));
+    it('deletes entry, naming the keys of its thread', async () => {
+      mockRedisClient.eval.mockImplementation(async (script: string) =>
+        script === READ_THREAD
+          ? JSON.stringify({ id: 'entry_123', threadId: 'thread_123', createdAt: new Date(0) })
+          : 1
+      );
 
       const result = await adapter.deleteEntry('entry_123');
 
       expect(result.success).toBe(true);
-      expect(mockRedisClient.zrem).toHaveBeenCalled();
-      expect(mockRedisClient.del).toHaveBeenCalled();
+      expect(mockRedisClient.eval).toHaveBeenCalledWith(
+        READ_THREAD,
+        1,
+        'cogitator:entry:entry_123'
+      );
+      expect(mockRedisClient.eval).toHaveBeenCalledWith(
+        expect.stringContaining("redis.call('ZREM', KEYS[2], KEYS[1])"),
+        4,
+        'cogitator:entry:entry_123',
+        'cogitator:thread:entries:thread_123',
+        'cogitator:thread:leaf:thread_123',
+        'cogitator:thread:chained:thread_123',
+        'cogitator:',
+        0,
+        'entry_123',
+        'thread_123'
+      );
+      resetEval();
+    });
+
+    it('deletes nothing when the entry is gone', async () => {
+      mockRedisClient.eval.mockImplementation(async () => null);
+
+      const result = await adapter.deleteEntry('entry_123');
+
+      expect(result.success).toBe(true);
+      expect(mockRedisClient.eval).toHaveBeenCalledTimes(1);
+      resetEval();
     });
 
     it('clears thread entries and keeps the thread', async () => {
@@ -424,8 +564,9 @@ describe('RedisAdapter', () => {
       expect(result.success).toBe(true);
       expect(mockRedisClient.eval).toHaveBeenCalledWith(
         expect.stringContaining("redis.call('ZRANGE', KEYS[1], 0, -1)"),
-        1,
-        'cogitator:thread:entries:thread_123'
+        2,
+        'cogitator:thread:entries:thread_123',
+        'cogitator:thread:leaf:thread_123'
       );
     });
 
@@ -466,7 +607,7 @@ describe('RedisAdapter', () => {
         0
       );
       expect(result.success && result.data.map((e) => e.id)).toEqual(['third', 'fourth']);
-      expect(result.success && result.data[0]).not.toHaveProperty('seq');
+      expect(result.success && result.data[0]).toMatchObject({ seq: 3 });
       mockRedisClient.mget.mockReset();
       mockRedisClient.mget.mockResolvedValue([]);
     });
@@ -568,9 +709,9 @@ describe('RedisAdapter hardening', () => {
       tokenCount: 1,
     });
 
-    const [script, , threadKey, , , , , , , ttl] = mockRedisClient.eval.mock.calls[0] ?? [];
-    expect(script).toContain("redis.call('EXPIRE', KEYS[1], ARGV[3])");
-    expect(script).toContain("if redis.call('EXPIRE', KEYS[4], ARGV[3] * 7) == 1 then");
+    const [script, , threadKey, , , , , , , , , ttl] = mockRedisClient.eval.mock.calls[0] ?? [];
+    expect(script).toContain('keep(KEYS[1], ARGV[3])');
+    expect(script).toContain('keep(KEYS[4], ARGV[3] * 7)');
     expect(script).toContain('sweep(KEYS[4], KEYS[5], ARGV[4], ARGV[3])');
     expect([threadKey, ttl]).toEqual(['cogitator:thread:t1', 60]);
   });
@@ -652,6 +793,43 @@ describe('RedisAdapter hardening', () => {
     const result = await adapter.getEntries({ threadId: 't1', limit: 2 });
 
     expect(result.success && result.data.map((e) => e.id)).toEqual(['e2', 'e3']);
+    mockRedisClient.zrange.mockReset();
+    mockRedisClient.zrange.mockResolvedValue([]);
+    mockRedisClient.zrem.mockReset();
+    mockRedisClient.zrem.mockResolvedValue(1);
+    mockRedisClient.mget.mockReset();
+    mockRedisClient.mget.mockResolvedValue([]);
+  });
+
+  it('pages back past event entries for a limit instead of reading the whole thread', async () => {
+    const adapter = new RedisAdapter({ provider: 'redis', host: 'localhost' });
+    await adapter.connect();
+    const members = Array.from({ length: 10_000 }, (_, i) => `k${String(i).padStart(5, '0')}`);
+    const events = new Set(members.slice(-300));
+    const stored = (key: string) =>
+      JSON.stringify({
+        id: key.replace('k', 'e'),
+        threadId: 't1',
+        message: { role: 'user', content: key },
+        tokenCount: 1,
+        createdAt: new Date(Number(key.slice(1)) * 1000),
+        ...(events.has(key) && { type: 'model_change' }),
+      });
+    const at = (index: number) => (index < 0 ? Math.max(members.length + index, 0) : index);
+    mockRedisClient.zrange.mockImplementation(async (_key: string, start: number, stop) =>
+      members.slice(at(start), at(Number(stop)) + 1)
+    );
+    mockRedisClient.mget.mockImplementation(async (...keys: string[]) => keys.map(stored));
+    mockRedisClient.zrangebyscore.mockResolvedValue([]);
+
+    const result = await adapter.getEntries({ threadId: 't1', limit: 3 });
+
+    expect(result.success && result.data.map((e) => e.id)).toEqual(['e09697', 'e09698', 'e09699']);
+    expect(mockRedisClient.zrange).not.toHaveBeenCalledWith('cogitator:thread:entries:t1', 0, -1);
+    const fetched = mockRedisClient.mget.mock.calls.reduce((sum, call) => sum + call.length, 0);
+    expect(fetched).toBeLessThanOrEqual(403);
+    mockRedisClient.zrangebyscore.mockReset();
+    mockRedisClient.zrangebyscore.mockResolvedValue([]);
     mockRedisClient.zrange.mockReset();
     mockRedisClient.zrange.mockResolvedValue([]);
     mockRedisClient.zrem.mockReset();

@@ -86,10 +86,10 @@ import { CogitatorError, ErrorCode, resolveModelRoute } from '@cogitator-ai/type
 import {
   buildInitialMessages,
   buildInputWithAudio,
-  saveEntry,
   enrichMessagesWithInsights,
   addContextToMessages,
 } from './cogitator/message-builder';
+import { RunMemory } from './cogitator/run-memory';
 import { createSpan, getTextContent } from './cogitator/span-factory';
 import { runToolCall, createToolMessage, needsApproval } from './cogitator/tool-executor';
 import { DEFAULT_TOOL_RESULT_MAX_LENGTH, toolResultLengthError } from './tool-content';
@@ -641,6 +641,11 @@ export class Cogitator implements ToolInvoker {
     let prompt: RunPrompt | undefined;
     let runId = checkpoint?.runId ?? `run_${nanoid(12)}`;
     const threadId = options.threadId ?? `thread_${nanoid(12)}`;
+    const runMemory = new RunMemory(
+      () => this.state.memoryAdapter,
+      threadId,
+      () => options
+    );
     const explicitTrace = normalizeTraceParent(options.trace);
     const parentTrace = explicitTrace ?? currentTraceContext();
     let traceId = parentTrace?.traceId ?? newTraceId();
@@ -720,6 +725,7 @@ export class Cogitator implements ToolInvoker {
         }
         runId = checkpoint.runId;
         options = { ...options, userId: checkpoint.userId };
+        runMemory.open(checkpoint.branch);
         if (!explicitTrace && checkpoint.trace) {
           traceId = checkpoint.trace.traceId;
           parentSpanId = checkpoint.trace.rootSpanId;
@@ -842,11 +848,12 @@ export class Cogitator implements ToolInvoker {
           }
         }
 
-        await this.abandonPausedRun(agent, runOptions, threadId);
+        if (!runMemory.aside) await this.abandonPausedRun(agent, runOptions, threadId);
         messages = await this.prepareMessages(
           agent,
           runOptions,
           threadId,
+          runMemory,
           this.historyBudget(agent, effectiveModel, routeProvider, registry, input),
           (initial) =>
             waitForAbortable(
@@ -977,22 +984,7 @@ export class Cogitator implements ToolInvoker {
               options.onToolResult?.(errorResult);
               const duplicateMessage = createToolMessage(tc, errorResult);
               messages.push(duplicateMessage);
-              if (
-                this.state.memoryAdapter &&
-                options.saveHistory !== false &&
-                options.useMemory !== false
-              ) {
-                await saveEntry(
-                  threadId,
-                  active.id,
-                  duplicateMessage,
-                  this.state.memoryAdapter,
-                  undefined,
-                  [errorResult],
-                  options.onMemoryError,
-                  options.userId
-                );
-              }
+              await runMemory.save(active.id, duplicateMessage, undefined, [errorResult]);
             }
             lastToolCallSig = '';
             return undefined;
@@ -1035,7 +1027,7 @@ export class Cogitator implements ToolInvoker {
         if (pending.length > 0) {
           return { toolCalls, decisions: Object.fromEntries(decisions), pending };
         }
-        if (resumed) await this.runCheckpointStore().delete(threadId);
+        if (resumed && !runMemory.aside) await this.runCheckpointStore().delete(threadId);
 
         const executeToolCall = async (toolCall: ToolCall) => {
           const toolSpanStart = Date.now();
@@ -1147,22 +1139,7 @@ export class Cogitator implements ToolInvoker {
           );
           messages.push(toolMessage);
 
-          if (
-            this.state.memoryAdapter &&
-            options.saveHistory !== false &&
-            options.useMemory !== false
-          ) {
-            await saveEntry(
-              threadId,
-              active.id,
-              toolMessage,
-              this.state.memoryAdapter,
-              undefined,
-              [result],
-              options.onMemoryError,
-              options.userId
-            );
-          }
+          await runMemory.save(active.id, toolMessage, undefined, [result]);
 
           const action: ReflectionAction = {
             type: 'tool_call',
@@ -1472,6 +1449,13 @@ export class Cogitator implements ToolInvoker {
                   )
                 );
                 options.onModelFallback?.(event);
+                runMemory
+                  .event(
+                    active.id,
+                    { type: 'model_change', event: { from: event.from, to: event.to, reason } },
+                    `The turn moved from ${event.from} to ${event.to}`
+                  )
+                  .catch(() => undefined);
               },
             }
           ),
@@ -1544,22 +1528,11 @@ export class Cogitator implements ToolInvoker {
           model: answeredBy.name,
         });
 
-        if (
-          this.state.memoryAdapter &&
-          options.saveHistory !== false &&
-          options.useMemory !== false
-        ) {
-          await saveEntry(
-            threadId,
-            active.id,
-            assistantMessage,
-            this.state.memoryAdapter,
-            requestsTools ? response.toolCalls : undefined,
-            undefined,
-            options.onMemoryError,
-            options.userId
-          );
-        }
+        await runMemory.save(
+          active.id,
+          assistantMessage,
+          requestsTools ? response.toolCalls : undefined
+        );
 
         if (!requestsTools || !response.toolCalls) break;
         pausedTurn = await handleToolTurn(response.toolCalls);
@@ -1597,7 +1570,22 @@ export class Cogitator implements ToolInvoker {
           startedAt: checkpoint?.startedAt ?? startTime,
           trace: { traceId, rootSpanId },
         };
-        await this.runCheckpointStore().save(pausedCheckpoint);
+        await runMemory.event(
+          active.id,
+          {
+            type: 'approval',
+            event: {
+              pending: pausedTurn.pending.map((request) => ({
+                toolCallId: request.toolCallId,
+                toolName: request.toolName,
+              })),
+            },
+          },
+          `Paused for approval of ${pausedTurn.pending.map((request) => request.toolName).join(', ')}`
+        );
+        const placement = runMemory.placement;
+        if (placement) pausedCheckpoint.branch = placement;
+        if (!runMemory.aside) await this.runCheckpointStore().save(pausedCheckpoint);
         spans.unshift(
           createSpan(
             'agent.run',
@@ -1633,6 +1621,7 @@ export class Cogitator implements ToolInvoker {
           threadId,
           status: 'paused',
           pendingApprovals: pausedTurn.pending,
+          ...(runMemory.summary() && { memory: runMemory.summary() }),
           ...(handoffs.length > 0 && { handoffs, finalAgent: active.name }),
           checkpoint: pausedCheckpoint,
           usage: {
@@ -1749,6 +1738,7 @@ export class Cogitator implements ToolInvoker {
         reflectionSummary: this.state.reflectionEngine
           ? await this.state.reflectionEngine.getSummary(agent.id)
           : undefined,
+        ...(runMemory.summary() && { memory: runMemory.summary() }),
       };
 
       if (prompt) await this.recordPrompt(prompt, result, Date.now() - startTime);
@@ -1758,6 +1748,14 @@ export class Cogitator implements ToolInvoker {
       return result;
     } catch (error) {
       if (prompt) await this.recordPrompt(prompt, undefined, Date.now() - startTime);
+      if (abortController.signal.aborted) {
+        const reason = error instanceof Error ? error.message : String(error);
+        await runMemory.event(
+          agent.id,
+          { type: 'interrupt', event: { reason } },
+          `The run was interrupted: ${reason}`
+        );
+      }
       const endTime = Date.now();
 
       const errorSpan = createSpan(
@@ -1817,6 +1815,7 @@ export class Cogitator implements ToolInvoker {
     agent: Agent,
     options: RunOptions,
     threadId: string,
+    runMemory: RunMemory,
     historyBudget: number | undefined,
     checkInput: (messages: readonly Message[]) => Promise<void>
   ): Promise<Message[]> {
@@ -1828,6 +1827,7 @@ export class Cogitator implements ToolInvoker {
       this.state.contextBuilder,
       historyBudget
     );
+    runMemory.open();
 
     await checkInput(messages);
 
@@ -1835,19 +1835,8 @@ export class Cogitator implements ToolInvoker {
       addContextToMessages(messages, options.context);
     }
 
-    if (this.state.memoryAdapter && options.saveHistory !== false && options.useMemory !== false) {
-      const currentUserMessage = messages[messages.length - 1];
-      await saveEntry(
-        threadId,
-        agent.id,
-        currentUserMessage,
-        this.state.memoryAdapter,
-        undefined,
-        undefined,
-        options.onMemoryError,
-        options.userId
-      );
-    }
+    const currentUserMessage = messages[messages.length - 1];
+    if (currentUserMessage) await runMemory.save(agent.id, currentUserMessage);
 
     return messages;
   }
@@ -1910,25 +1899,23 @@ export class Cogitator implements ToolInvoker {
     });
     if (!paused) return;
     if (options.threadAccess !== 'shared' && paused.userId !== options.userId) return;
-    if (this.state.memoryAdapter && options.useMemory !== false && options.saveHistory !== false) {
-      for (const toolCall of paused.turn.toolCalls) {
-        const result: ToolResult = {
-          callId: toolCall.id,
-          name: toolCall.name,
-          result: null,
-          error: 'The user moved on without approving this tool call',
-        };
-        await saveEntry(
-          threadId,
-          agent.id,
-          createToolMessage(toolCall, result),
-          this.state.memoryAdapter,
-          undefined,
-          [result],
-          options.onMemoryError,
-          options.userId
-        );
-      }
+    const pausedMemory = new RunMemory(
+      () => this.state.memoryAdapter,
+      threadId,
+      () => ({
+        ...options,
+        branch: undefined,
+      })
+    );
+    pausedMemory.open(paused.branch);
+    for (const toolCall of paused.turn.toolCalls) {
+      const result: ToolResult = {
+        callId: toolCall.id,
+        name: toolCall.name,
+        result: null,
+        error: 'The user moved on without approving this tool call',
+      };
+      await pausedMemory.save(agent.id, createToolMessage(toolCall, result), undefined, [result]);
     }
     await store.delete(threadId);
   }

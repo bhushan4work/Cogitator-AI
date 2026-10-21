@@ -22,6 +22,7 @@ import type {
   MemoryResult,
 } from '@cogitator-ai/types';
 import type { GraphContextBuilder } from './knowledge-graph/graph-context-builder';
+import { readCompactedHistory } from './compaction';
 import { countEntryTokens, countMessageTokens, countTokens } from './token-counter';
 import { indexedText, type IndexedText, type MessageIndex } from './message-index';
 
@@ -93,6 +94,12 @@ export interface BuildContextOptions {
    * window of the model it is built for
    */
   maxTokens?: number;
+  /**
+   * The entry the history ends at: the thread's active branch by default, the branch ending at
+   * this entry when given, none for null. Needs an adapter with branches; without, the whole
+   * thread is read.
+   */
+  leafId?: string | null;
 }
 
 type ResolvedConfig = Required<Omit<ContextBuilderConfig, 'maxTokens' | 'reserveTokens'>> &
@@ -215,16 +222,7 @@ export class ContextBuilder {
     const injectedSystemMessages = messages.length;
 
     const scope: ScoringScope = { mark: this.deps.messageIndex?.mark(), threadSize: 0 };
-    const entries =
-      (await this.attempt('history', errors, async () =>
-        unwrap(
-          await this.deps.memoryAdapter.getEntries({
-            threadId: options.threadId,
-            includeToolCalls: true,
-          }),
-          'getEntries'
-        )
-      )) ?? [];
+    const entries = (await this.attempt('history', errors, () => this.readHistory(options))) ?? [];
 
     scope.threadSize = entries.length;
     const selectedEntries = await this.selectEntries(
@@ -388,6 +386,33 @@ export class ContextBuilder {
       droppedNodes: gc.nodes.filter((n) => !keptIds.has(n.id)),
       droppedTokens: gc.tokenCount - (context?.tokenCount ?? 0),
     };
+  }
+
+  /**
+   * The history a context draws on: the active branch (or the one `leafId` names) of an adapter
+   * with branches, else every entry of the thread
+   */
+  private async readHistory(options: BuildContextOptions): Promise<MemoryEntry[]> {
+    const memory = this.deps.memoryAdapter;
+    if (options.leafId === null) return [];
+    const getPath = memory.getPath?.bind(memory);
+    if (getPath) {
+      return unwrap(
+        await readCompactedHistory(
+          { getPath },
+          {
+            threadId: options.threadId,
+            ...(options.leafId !== undefined && { leafId: options.leafId }),
+            includeToolCalls: true,
+          }
+        ),
+        'getPath'
+      );
+    }
+    return unwrap(
+      await memory.getEntries({ threadId: options.threadId, includeToolCalls: true }),
+      'getEntries'
+    );
   }
 
   private selectEntries(

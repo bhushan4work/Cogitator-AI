@@ -1,4 +1,4 @@
-import type { MemoryResult } from './memory';
+import type { Evidence, MemoryResult } from './memory';
 
 export type EntityType =
   'person' | 'organization' | 'location' | 'concept' | 'event' | 'object' | 'custom';
@@ -34,6 +34,8 @@ export interface GraphNode {
   lastAccessedAt: Date;
   accessCount: number;
   metadata?: Record<string, unknown>;
+  /** Where it comes from, word for word: entries, tool results or files it stands on */
+  evidence?: Evidence[];
 }
 
 export interface GraphEdge {
@@ -53,6 +55,8 @@ export interface GraphEdge {
   validFrom?: Date;
   validUntil?: Date;
   metadata?: Record<string, unknown>;
+  /** Where it comes from, word for word: entries, tool results or files it stands on */
+  evidence?: Evidence[];
 }
 
 export interface ExtractedEntity {
@@ -202,7 +206,14 @@ export interface GraphAdapter {
     updates: Partial<
       Pick<
         GraphNode,
-        'name' | 'aliases' | 'description' | 'properties' | 'confidence' | 'metadata' | 'embedding'
+        | 'name'
+        | 'aliases'
+        | 'description'
+        | 'properties'
+        | 'confidence'
+        | 'metadata'
+        | 'embedding'
+        | 'evidence'
       >
     >
   ): Promise<MemoryResult<GraphNode>>;
@@ -222,7 +233,14 @@ export interface GraphAdapter {
     updates: Partial<
       Pick<
         GraphEdge,
-        'weight' | 'label' | 'properties' | 'confidence' | 'validFrom' | 'validUntil' | 'metadata'
+        | 'weight'
+        | 'label'
+        | 'properties'
+        | 'confidence'
+        | 'validFrom'
+        | 'validUntil'
+        | 'metadata'
+        | 'evidence'
       >
     >
   ): Promise<MemoryResult<GraphEdge>>;

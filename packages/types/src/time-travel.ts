@@ -8,6 +8,7 @@
  * - Comparing execution traces step by step
  */
 
+import type { RunMemoryPlace } from './runtime';
 import type { Message, ToolCall } from './message';
 import type { RunResult } from './runtime';
 import type { ExecutionStep, ExecutionTrace } from './learning';
@@ -29,6 +30,11 @@ export interface ExecutionCheckpoint {
   label?: string;
   createdAt: Date;
   metadata?: Record<string, unknown>;
+  /**
+   * Where the run wrote in its thread's memory: a replay goes on a branch of that thread from
+   * the point the run started at, instead of a thread of its own
+   */
+  memory?: RunMemoryPlace;
 }
 
 export interface CheckpointQuery {
@@ -78,6 +84,11 @@ export interface ReplayOptions {
   modifiedToolResults?: Record<string, unknown>;
   /** Tools removed from the replayed agent, so the model cannot call them */
   skipTools?: string[];
+  /**
+   * The user a live replay runs as. A replay goes on a branch of its run's thread only when the
+   * thread is theirs, and on a thread of its own otherwise.
+   */
+  userId?: string;
 }
 
 export interface ReplayResult extends RunResult {
@@ -97,6 +108,8 @@ export interface ForkOptions {
   additionalContext?: string;
   mockToolResults?: Record<string, unknown>;
   label?: string;
+  /** The user the fork runs as, see {@link ReplayOptions.userId} */
+  userId?: string;
 }
 
 export interface ForkResult {

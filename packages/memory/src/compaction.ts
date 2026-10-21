@@ -1,10 +1,14 @@
-import type {
-  MemoryAdapter,
-  MemoryEntry,
-  CompactionConfig,
-  CompactionResult,
-  CompactionStrategy,
-  Message,
+import {
+  CONVERSATION_ENTRY_TYPES,
+  type MemoryAdapter,
+  type MemoryEntry,
+  type MemoryEntryType,
+  type MemoryResult,
+  type CompactionConfig,
+  type CompactionEvent,
+  type CompactionResult,
+  type CompactionStrategy,
+  type Message,
 } from '@cogitator-ai/types';
 import { countEntryTokens, countMessagesTokens } from './token-counter';
 
@@ -27,6 +31,100 @@ export type SummarizeFn = (messages: Message[], options?: SummarizeOptions) => P
 export interface CompactionServiceConfig {
   adapter: MemoryAdapter;
   summarize: SummarizeFn;
+}
+
+/** The entry types to read for a conversation that may have been compacted */
+export const HISTORY_ENTRY_TYPES: readonly MemoryEntryType[] = [
+  ...CONVERSATION_ENTRY_TYPES,
+  'compaction',
+];
+
+function compactionOf(entry: MemoryEntry): CompactionEvent | undefined {
+  if (entry.type !== 'compaction') return undefined;
+  const event = entry.event as Partial<CompactionEvent> | undefined;
+  return {
+    firstKeptEntryId: typeof event?.firstKeptEntryId === 'string' ? event.firstKeptEntryId : null,
+    ...(typeof event?.lastCompactedEntryId === 'string' && {
+      lastCompactedEntryId: event.lastCompactedEntryId,
+    }),
+    compacted: typeof event?.compacted === 'number' ? event.compacted : 0,
+    summarized: event?.summarized !== false,
+  };
+}
+
+/**
+ * The conversation a branch holds, read with {@link HISTORY_ENTRY_TYPES}: from its latest
+ * compaction on, the summary followed by the entries that compaction kept and every entry after,
+ * and a branch with no compaction as it is. `path` may be only the newest entries of the branch:
+ * when it does not reach the first kept entry, every entry of it after the last left out one
+ * counts, all of it when that one is not there either.
+ */
+export function compactedHistory(path: readonly MemoryEntry[]): MemoryEntry[] {
+  let at = path.length - 1;
+  while (at >= 0 && path[at]?.type !== 'compaction') at--;
+  const conversation = (entries: readonly MemoryEntry[]) =>
+    entries.filter((entry) => entry.type !== 'compaction');
+  const latest = path[at];
+  const compaction = latest && compactionOf(latest);
+  if (!latest || !compaction) return conversation(path);
+  const indexOf = (id: string | undefined) =>
+    id === undefined ? -1 : path.findIndex((entry) => entry.id === id);
+  const kept = indexOf(compaction.firstKeptEntryId ?? undefined);
+  const lastLeftOut = indexOf(compaction.lastCompactedEntryId);
+  const anchored =
+    compaction.firstKeptEntryId !== null || compaction.lastCompactedEntryId !== undefined;
+  const from = kept !== -1 ? kept : lastLeftOut !== -1 ? lastLeftOut + 1 : anchored ? 0 : at + 1;
+  const rest = conversation(path.slice(from));
+  return compaction.summarized ? [latest, ...rest] : rest;
+}
+
+/** Entries a {@link readCompactedHistory} page reads */
+const HISTORY_PAGE = 200;
+
+/**
+ * Whether `path`, the newest entries of a branch read with {@link HISTORY_ENTRY_TYPES}, reaches
+ * where its latest compaction goes on from, so entries before it do not count
+ */
+function reachesCompaction(path: readonly MemoryEntry[]): boolean {
+  for (let at = path.length - 1; at >= 0; at--) {
+    const entry = path[at];
+    const compaction = entry && compactionOf(entry);
+    if (!compaction) continue;
+    const anchor = compaction.firstKeptEntryId ?? compaction.lastCompactedEntryId;
+    return anchor === undefined || path.some((candidate) => candidate.id === anchor);
+  }
+  return false;
+}
+
+/**
+ * The conversation of a branch as {@link compactedHistory} builds it, read in pages from its leaf
+ * back to where its latest compaction goes on from, so a compacted thread costs what its
+ * conversation holds, not everything it ever held. A branch with no compaction is read to its
+ * root. `leafId` picks the branch, the active one by default.
+ */
+export async function readCompactedHistory(
+  memory: Required<Pick<MemoryAdapter, 'getPath'>>,
+  options: { threadId: string; leafId?: string; includeToolCalls?: boolean }
+): Promise<MemoryResult<MemoryEntry[]>> {
+  const pages: MemoryEntry[][] = [];
+  let before: string | undefined;
+  for (;;) {
+    const page = await memory.getPath({
+      threadId: options.threadId,
+      ...(options.leafId !== undefined && { leafId: options.leafId }),
+      ...(before !== undefined && { before }),
+      limit: HISTORY_PAGE,
+      types: HISTORY_ENTRY_TYPES,
+      includeToolCalls: options.includeToolCalls ?? false,
+    });
+    if (!page.success) return page;
+    pages.unshift(page.data);
+    const first = page.data[0];
+    if (!first || page.data.length < HISTORY_PAGE) break;
+    if (reachesCompaction(pages.flat())) break;
+    before = first.id;
+  }
+  return { success: true, data: compactedHistory(pages.flat()) };
 }
 
 /**
@@ -72,10 +170,10 @@ export class CompactionService {
   }
 
   private async compactNow(sessionId: string, config: CompactionConfig): Promise<CompactionResult> {
-    const entriesResult = await this.adapter.getEntries({
-      threadId: sessionId,
-      includeToolCalls: true,
-    });
+    const getPath = this.adapter.getPath?.bind(this.adapter);
+    const entriesResult = getPath
+      ? await readCompactedHistory({ getPath }, { threadId: sessionId, includeToolCalls: true })
+      : await this.adapter.getEntries({ threadId: sessionId, includeToolCalls: true });
     if (!entriesResult.success) {
       throw new Error(`Failed to load entries: ${entriesResult.error}`);
     }
@@ -92,19 +190,22 @@ export class CompactionService {
       return unchanged;
     }
 
-    const sorted = [...entries].sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-    );
+    const sorted = this.adapter.getPath
+      ? entries
+      : [...entries].sort(
+          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
 
     const strategy = strategies[config.strategy];
     return strategy(this, sessionId, sorted, config);
   }
 
   /**
-   * Replaces `entriesToRemove` with a summary entry dated just before the first of
-   * `entriesToKeep`, so the thread reads summary, kept entries, then whatever was saved while the
-   * summary was written. Kept entries are left untouched. An adapter that ignores the requested
-   * `createdAt` gets the kept entries re-added after the summary instead.
+   * Puts `summary` in place of `entriesToRemove`. On an adapter with branches it adds a
+   * `compaction` entry to the active branch that leaves them out of the conversation from the
+   * first of `entriesToKeep` on (see {@link compactedHistory}) and deletes nothing. On any other
+   * adapter it adds the summary dated just before the first kept entry and deletes the summarized
+   * ones, re-adding the kept entries after the summary when the adapter ignores `createdAt`.
    */
   async applySummary(
     sessionId: string,
@@ -118,6 +219,15 @@ export class CompactionService {
     };
 
     const summaryTokens = countMessagesTokens([summaryMessage]);
+    if (this.adapter.getPath) {
+      await this.addCompaction(sessionId, summaryMessage, summaryTokens, {
+        firstKeptEntryId: entriesToKeep[0]?.id ?? null,
+        ...lastOf(entriesToRemove),
+        compacted: entriesToRemove.length,
+        summarized: true,
+      });
+      return summaryTokens;
+    }
     const placeAt = summaryTimestamp(entriesToRemove, entriesToKeep);
 
     const added = await this.adapter.addEntry({
@@ -156,6 +266,82 @@ export class CompactionService {
     return summaryTokens;
   }
 
+  /**
+   * Leaves `entriesToDrop` out of the conversation without a summary: a `compaction` entry on an
+   * adapter with branches, deleting them on any other
+   */
+  async dropEntries(
+    sessionId: string,
+    entriesToDrop: MemoryEntry[],
+    entriesToKeep: MemoryEntry[]
+  ): Promise<void> {
+    if (this.adapter.getPath) {
+      await this.addCompaction(
+        sessionId,
+        { role: 'system', content: `[${entriesToDrop.length} earlier entries left out]` },
+        0,
+        {
+          firstKeptEntryId: entriesToKeep[0]?.id ?? null,
+          ...lastOf(entriesToDrop),
+          compacted: entriesToDrop.length,
+          summarized: false,
+        }
+      );
+      return;
+    }
+    for (const entry of entriesToDrop) {
+      await this.adapter.deleteEntry(entry.id);
+    }
+  }
+
+  /**
+   * Adds the `compaction` entry after the active leaf while the entry it goes on from (the first
+   * kept, else the last left out) is on the active branch, checked before the write and on the
+   * written entry's own branch after it, which it is removed from when the leaf moved in
+   * between: a run on another branch would otherwise get a summary of a conversation it never
+   * had.
+   */
+  private async addCompaction(
+    sessionId: string,
+    message: Message,
+    tokenCount: number,
+    event: CompactionEvent
+  ): Promise<void> {
+    const anchor = event.firstKeptEntryId ?? event.lastCompactedEntryId;
+    if (!this.adapter.getPath) throw new Error('A compaction entry needs an adapter with branches');
+    const getPath = this.adapter.getPath.bind(this.adapter);
+    const moved = () =>
+      new Error(
+        `The active branch of ${sessionId} changed while it was compacted, compact it again`
+      );
+    const onBranch = async (leafId?: string) => {
+      if (anchor === undefined) return true;
+      const path = await getPath({
+        threadId: sessionId,
+        types: 'all',
+        ...(leafId !== undefined && { leafId }),
+      });
+      if (!path.success) throw new Error(`Failed to read the thread: ${path.error}`);
+      return path.data.some((entry) => entry.id === anchor);
+    };
+    if (!(await onBranch())) throw moved();
+    const added = await this.adapter.addEntry({
+      threadId: sessionId,
+      type: 'compaction',
+      message,
+      tokenCount,
+      event: { ...event },
+      metadata: { compactionSummary: event.summarized, compactedAt: new Date().toISOString() },
+    });
+    if (!added.success) {
+      throw new Error(`Failed to store compaction summary: ${added.error}`);
+    }
+    if (!(await onBranch(added.data.id))) {
+      await this.adapter.deleteEntry(added.data.id);
+      throw moved();
+    }
+  }
+
   getSummarizeFn(): SummarizeFn {
     return this.summarize;
   }
@@ -163,6 +349,11 @@ export class CompactionService {
   getAdapter(): MemoryAdapter {
     return this.adapter;
   }
+}
+
+function lastOf(entries: readonly MemoryEntry[]): { lastCompactedEntryId?: string } {
+  const last = entries.at(-1);
+  return last ? { lastCompactedEntryId: last.id } : {};
 }
 
 function timeOf(value: Date | string): number {
@@ -222,9 +413,7 @@ const slidingWindowStrategy: StrategyFn = async (service, sessionId, entries, co
   const splitAt = entries.length - config.keepRecent;
   const oldEntries = entries.slice(0, splitAt);
 
-  for (const entry of oldEntries) {
-    await service.getAdapter().deleteEntry(entry.id);
-  }
+  await service.dropEntries(sessionId, oldEntries, entries.slice(splitAt));
 
   return {
     sessionId,

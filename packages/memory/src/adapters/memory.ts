@@ -13,7 +13,8 @@ import type {
   MemoryProvider,
   NewMemoryEntry,
 } from '@cogitator-ai/types';
-import { ChangeReportingMemoryAdapter } from './base';
+import { BranchingMemoryAdapter, entryTypeWanted, withoutToolCalls } from './base';
+import { MEMORY_ENTRY_FORMAT } from '@cogitator-ai/types';
 import {
   compareForListing,
   isAfterCursor,
@@ -48,13 +49,14 @@ function copyEntry(entry: MemoryEntry): MemoryEntry {
   return { ...structuredClone(entry), createdAt: new Date(entry.createdAt) };
 }
 
-export class InMemoryAdapter extends ChangeReportingMemoryAdapter {
+export class InMemoryAdapter extends BranchingMemoryAdapter {
   readonly provider: MemoryProvider = 'memory';
 
   private threads = new Map<string, Thread>();
   private entries = new Map<string, MemoryEntry>();
   private threadEntries = new Map<string, string[]>();
   private maxEntries: number;
+  private seq = 0;
 
   constructor(config: InMemoryAdapterConfig = { provider: 'memory' }) {
     super();
@@ -95,6 +97,7 @@ export class InMemoryAdapter extends ChangeReportingMemoryAdapter {
       metadata: copied.data,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
+      ...(existing?.activeLeafId !== undefined && { activeLeafId: existing.activeLeafId }),
     };
     this.threads.set(id, thread);
     if (!this.threadEntries.has(id)) {
@@ -169,30 +172,78 @@ export class InMemoryAdapter extends ChangeReportingMemoryAdapter {
   }
 
   private async storeEntry(entry: NewMemoryEntry): Promise<MemoryResult<MemoryEntry>> {
-    if (!this.threads.has(entry.threadId)) {
-      return this.failure(`Thread not found: ${entry.threadId}`);
+    const thread = this.threads.get(entry.threadId);
+    if (!thread) return this.failure(`Thread not found: ${entry.threadId}`);
+    if (entry.parentId) {
+      const parent = this.entries.get(entry.parentId);
+      if (parent?.threadId !== entry.threadId) {
+        return this.failure(`Parent entry ${entry.parentId} is not in thread ${entry.threadId}`);
+      }
     }
     const copied = this.stored(entry, 'entry');
     if (!copied.success) return copied;
-    if (this.entries.size >= this.maxEntries) {
-      const oldestId = this.entries.keys().next().value;
-      if (oldestId) {
-        await this.deleteEntry(oldestId);
-      }
-    }
+    const evicted = this.makeRoom(entry.threadId, entry.parentId ?? thread.activeLeafId);
 
+    const { activate, parentId: askedParent, ...fields } = copied.data;
     const full: MemoryEntry = {
-      ...copied.data,
+      ...fields,
       id: this.generateId('entry'),
       createdAt: this.entryTimestamp(entry),
+      type: fields.type ?? (fields.message?.role === 'tool' ? 'tool_result' : 'message'),
+      parentId: askedParent === undefined ? (thread.activeLeafId ?? null) : askedParent,
+      seq: ++this.seq,
+      formatVersion: MEMORY_ENTRY_FORMAT,
     };
 
     this.entries.set(full.id, full);
     const threadList = this.threadEntries.get(entry.threadId) ?? [];
     threadList.push(full.id);
     this.threadEntries.set(entry.threadId, threadList);
+    if (activate !== false) thread.activeLeafId = full.id;
 
+    for (const entryId of evicted) this.report({ type: 'entry-deleted', entryId });
     return this.success(copyEntry(full));
+  }
+
+  /**
+   * Keeps a thread under `maxEntries`: the oldest entry of a branch that is not active goes
+   * first, then the oldest of the active branch, whose next entry becomes the first. `parentId`,
+   * the entry the next one goes after, and the active leaf stay. Synchronous, so the room made
+   * and the entry added go together: the ids it evicted, to report once the entry is in.
+   */
+  private makeRoom(threadId: string, parentId: string | undefined): string[] {
+    const ids = this.threadEntries.get(threadId) ?? [];
+    const evicted: string[] = [];
+    if (ids.length < this.maxEntries) return evicted;
+    const active = new Set<string>();
+    let current = this.threads.get(threadId)?.activeLeafId;
+    while (current && !active.has(current)) {
+      active.add(current);
+      current = this.entries.get(current)?.parentId ?? undefined;
+    }
+    const leaf = this.threads.get(threadId)?.activeLeafId;
+    while (ids.length >= this.maxEntries) {
+      const evictable = ids.filter((id) => id !== parentId && id !== leaf);
+      const victim = evictable.find((id) => !active.has(id)) ?? evictable[0];
+      if (!victim) break;
+      this.spliceOut(victim);
+      evicted.push(victim);
+    }
+    return evicted;
+  }
+
+  protected async setActiveLeaf(
+    threadId: string,
+    leafId: string | null
+  ): Promise<MemoryResult<Thread>> {
+    const thread = this.threads.get(threadId);
+    if (!thread) return this.failure(`Thread not found: ${threadId}`);
+    if (leafId !== null && this.entries.get(leafId)?.threadId !== threadId) {
+      return this.failure(`Entry ${leafId} is not in thread ${threadId}`);
+    }
+    if (leafId === null) delete thread.activeLeafId;
+    else thread.activeLeafId = leafId;
+    return this.success(copyThread(thread));
   }
 
   async getEntries(options: MemoryQueryOptions): Promise<MemoryResult<MemoryEntry[]>> {
@@ -210,9 +261,8 @@ export class InMemoryAdapter extends ChangeReportingMemoryAdapter {
     if (options.after) {
       entries = entries.filter((e) => e.createdAt > options.after!);
     }
-    if (!options.includeToolCalls) {
-      entries = entries.map(({ toolCalls: _calls, toolResults: _results, ...rest }) => rest);
-    }
+    entries = entries.filter((e) => entryTypeWanted(e.type, options.types));
+    if (!options.includeToolCalls) entries = entries.map(withoutToolCalls);
 
     entries.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
 
@@ -235,17 +285,31 @@ export class InMemoryAdapter extends ChangeReportingMemoryAdapter {
     }));
   }
 
+  /** Deletes an entry and splices it out of its branch: its children go after its parent */
   private async removeEntry(entryId: string): Promise<MemoryResult<void>> {
+    this.spliceOut(entryId);
+    return this.success(undefined);
+  }
+
+  private spliceOut(entryId: string): void {
     const entry = this.entries.get(entryId);
     if (entry) {
       const threadList = this.threadEntries.get(entry.threadId);
       if (threadList) {
         const idx = threadList.indexOf(entryId);
         if (idx !== -1) threadList.splice(idx, 1);
+        for (const id of threadList) {
+          const child = this.entries.get(id);
+          if (child?.parentId === entryId) child.parentId = entry.parentId ?? null;
+        }
+      }
+      const thread = this.threads.get(entry.threadId);
+      if (thread?.activeLeafId === entryId) {
+        if (entry.parentId) thread.activeLeafId = entry.parentId;
+        else delete thread.activeLeafId;
       }
       this.entries.delete(entryId);
     }
-    return this.success(undefined);
   }
 
   async clearThread(threadId: string): Promise<MemoryResult<void>> {
@@ -261,6 +325,8 @@ export class InMemoryAdapter extends ChangeReportingMemoryAdapter {
       this.entries.delete(id);
     }
     this.threadEntries.set(threadId, []);
+    const thread = this.threads.get(threadId);
+    if (thread) delete thread.activeLeafId;
     return this.success(undefined);
   }
 

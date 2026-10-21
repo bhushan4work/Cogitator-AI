@@ -1,5 +1,13 @@
 # @cogitator-ai/deploy
 
+## 0.6.15
+
+### Patch Changes
+
+- Updated dependencies [[`c46adb9`](https://github.com/cogitator-ai/Cogitator-AI/commit/c46adb9429ef9686697a020d4d97634c907117d0)]:
+  - @cogitator-ai/types@0.51.0
+  - @cogitator-ai/config@0.17.6
+
 ## 0.6.14
 
 ### Patch Changes

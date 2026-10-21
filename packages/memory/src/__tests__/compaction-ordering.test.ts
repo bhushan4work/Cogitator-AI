@@ -1,6 +1,13 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { MemoryAdapter, Message } from '@cogitator-ai/types';
-import { CompactionService, type SummarizeFn } from '../compaction';
+import type { MemoryEntry } from '@cogitator-ai/types';
+import {
+  CompactionService,
+  compactedHistory,
+  HISTORY_ENTRY_TYPES,
+  readCompactedHistory,
+  type SummarizeFn,
+} from '../compaction';
 import { InMemoryAdapter } from '../adapters/memory';
 import { SQLiteAdapter } from '../adapters/sqlite';
 import { countMessageTokens } from '../token-counter';
@@ -13,10 +20,17 @@ async function seed(adapter: MemoryAdapter, threadId: string, contents: string[]
   }
 }
 
+/** The conversation of a thread's active branch, as a context reads it */
+async function conversationOf(adapter: MemoryAdapter, threadId: string): Promise<MemoryEntry[]> {
+  const path = await adapter.getPath!({ threadId, types: HISTORY_ENTRY_TYPES });
+  if (!path.success) throw new Error(path.error);
+  return compactedHistory(path.data);
+}
+
 async function contentsOf(adapter: MemoryAdapter, threadId: string): Promise<string[]> {
-  const entries = await adapter.getEntries({ threadId });
-  if (!entries.success) throw new Error(entries.error);
-  return entries.data.map((e) => (typeof e.message.content === 'string' ? e.message.content : ''));
+  return (await conversationOf(adapter, threadId)).map((e) =>
+    typeof e.message.content === 'string' ? e.message.content : ''
+  );
 }
 
 const adapters: [string, () => Promise<MemoryAdapter>][] = [
@@ -67,9 +81,223 @@ describe.each(adapters)('compaction on %s', (_name, create) => {
 
     await service.compact('t1', { strategy: 'summary', threshold: 0, keepRecent: 2 });
 
-    const after = await adapter.getEntries({ threadId: 't1' });
-    if (!after.success) throw new Error(after.error);
-    expect(after.data.slice(1).map((e) => e.id)).toEqual(keptIds);
+    const after = await conversationOf(adapter, 't1');
+    expect(after.slice(1).map((e) => e.id)).toEqual(keptIds);
+  });
+
+  it('deletes nothing, so a branch off a summarized entry keeps its history', async () => {
+    const adapter = await create();
+    await seed(adapter, 't1', ['q1', 'a1', 'q2', 'a2', 'q3']);
+    const before = await adapter.getEntries({ threadId: 't1' });
+    if (!before.success) throw new Error(before.error);
+    const a1 = before.data[1]!;
+    const side = await adapter.addEntry({
+      threadId: 't1',
+      message: { role: 'user', content: 'side' },
+      tokenCount: 1,
+      parentId: a1.id,
+      activate: false,
+    });
+    if (!side.success) throw new Error(side.error);
+    const service = new CompactionService({ adapter, summarize: async () => 'sum' });
+
+    await service.compact('t1', { strategy: 'summary', threshold: 0, keepRecent: 2 });
+
+    const branch = await adapter.getPath!({ threadId: 't1', leafId: side.data.id });
+    expect(branch.success && branch.data.map((e) => e.message.content)).toEqual([
+      'q1',
+      'a1',
+      'side',
+    ]);
+    expect(await contentsOf(adapter, 't1')).toEqual(['[Conversation summary]\nsum', 'a2', 'q3']);
+  });
+
+  it('summarizes the summary and what followed it in the next compaction', async () => {
+    const adapter = await create();
+    await seed(adapter, 't1', ['q1', 'a1', 'q2', 'a2']);
+    const seen: string[][] = [];
+    const service = new CompactionService({
+      adapter,
+      summarize: async (messages) => {
+        seen.push(messages.map((m) => String(m.content)));
+        return `sum${seen.length}`;
+      },
+    });
+    await service.compact('t1', { strategy: 'summary', threshold: 0, keepRecent: 1 });
+    await adapter.addEntry({
+      threadId: 't1',
+      message: { role: 'assistant', content: 'a3' },
+      tokenCount: 1,
+    });
+
+    await service.compact('t1', { strategy: 'summary', threshold: 0, keepRecent: 1 });
+
+    expect(seen[1]).toEqual(['[Conversation summary]\nsum1', 'a2']);
+    expect(await contentsOf(adapter, 't1')).toEqual(['[Conversation summary]\nsum2', 'a3']);
+  });
+});
+
+describe('compacted history', () => {
+  it('reads only the newest entries of a branch that do not reach the first kept one', async () => {
+    const adapter = new InMemoryAdapter({ provider: 'memory' });
+    await seed(adapter, 't1', ['q1', 'a1', 'q2', 'a2', 'q3', 'a3']);
+    const service = new CompactionService({ adapter, summarize: async () => 'sum' });
+    await service.compact('t1', { strategy: 'summary', threshold: 0, keepRecent: 4 });
+    for (const content of ['n1', 'n2', 'n3']) {
+      await adapter.addEntry({ threadId: 't1', message: { role: 'user', content }, tokenCount: 1 });
+    }
+
+    const window = await adapter.getPath({ threadId: 't1', types: HISTORY_ENTRY_TYPES, limit: 6 });
+    if (!window.success) throw new Error(window.error);
+
+    expect(compactedHistory(window.data).map((e) => e.message.content)).toEqual([
+      '[Conversation summary]\nsum',
+      'q3',
+      'a3',
+      'n1',
+      'n2',
+      'n3',
+    ]);
+  });
+
+  it('refuses to compact when the active branch moved while the summary was written', async () => {
+    const adapter = new InMemoryAdapter({ provider: 'memory' });
+    await seed(adapter, 't1', ['q1', 'a1', 'q2', 'a2']);
+    const first = await adapter.getEntries({ threadId: 't1' });
+    if (!first.success) throw new Error(first.error);
+    const service = new CompactionService({
+      adapter,
+      summarize: async () => {
+        await adapter.addEntry({
+          threadId: 't1',
+          message: { role: 'user', content: 'elsewhere' },
+          tokenCount: 1,
+          parentId: first.data[0]!.id,
+        });
+        return 'sum';
+      },
+    });
+
+    await expect(
+      service.compact('t1', { strategy: 'summary', threshold: 0, keepRecent: 1 })
+    ).rejects.toThrow(/changed while it was compacted/);
+    const all = await adapter.getEntries({ threadId: 't1', types: 'all' });
+    expect(all.success && all.data.some((e) => e.type === 'compaction')).toBe(false);
+  });
+});
+
+describe('compacted threads', () => {
+  it('keeps what was said while a summary was written, read in a window that misses its start', async () => {
+    const adapter = new InMemoryAdapter({ provider: 'memory' });
+    await seed(adapter, 't1', ['q1', 'a1']);
+    const service = new CompactionService({
+      adapter,
+      summarize: async () => {
+        for (const content of ['c1', 'c2', 'c3']) {
+          await adapter.addEntry({
+            threadId: 't1',
+            message: { role: 'user', content },
+            tokenCount: 1,
+          });
+        }
+        return 'sum';
+      },
+    });
+    await service.compact('t1', { strategy: 'summary', threshold: 0, keepRecent: 0 });
+
+    const window = await adapter.getPath({ threadId: 't1', types: HISTORY_ENTRY_TYPES, limit: 4 });
+    if (!window.success) throw new Error(window.error);
+
+    expect(compactedHistory(window.data).map((e) => e.message.content)).toEqual([
+      '[Conversation summary]\nsum',
+      'c1',
+      'c2',
+      'c3',
+    ]);
+  });
+
+  it('keeps what was said while the summary was written when it keeps nothing else', async () => {
+    const adapter = new InMemoryAdapter({ provider: 'memory' });
+    await seed(adapter, 't1', ['q1', 'a1']);
+    const service = new CompactionService({
+      adapter,
+      summarize: async () => {
+        await adapter.addEntry({
+          threadId: 't1',
+          message: { role: 'user', content: 'meanwhile' },
+          tokenCount: 1,
+        });
+        return 'sum';
+      },
+    });
+
+    await service.compact('t1', { strategy: 'summary', threshold: 0, keepRecent: 0 });
+
+    expect(await contentsOf(adapter, 't1')).toEqual(['[Conversation summary]\nsum', 'meanwhile']);
+  });
+
+  it('takes back a compaction that landed on another branch the leaf moved to', async () => {
+    const adapter = new InMemoryAdapter({ provider: 'memory' });
+    await seed(adapter, 't1', ['q1', 'a1', 'q2', 'a2']);
+    const add = adapter.addEntry.bind(adapter);
+    adapter.addEntry = async (entry) => {
+      if (entry.type === 'compaction') {
+        await add({
+          threadId: 't1',
+          message: { role: 'user', content: 'x' },
+          tokenCount: 1,
+          parentId: null,
+        });
+      }
+      return add(entry);
+    };
+    const service = new CompactionService({ adapter, summarize: async () => 'sum' });
+
+    await expect(
+      service.compact('t1', { strategy: 'summary', threshold: 0, keepRecent: 2 })
+    ).rejects.toThrow(/changed while it was compacted/);
+    const all = await adapter.getEntries({ threadId: 't1', types: 'all' });
+    expect(all.success && all.data.some((e) => e.type === 'compaction')).toBe(false);
+  });
+
+  it('reads a long compacted thread back only to where its compaction goes on from', async () => {
+    const adapter = new InMemoryAdapter({ provider: 'memory' });
+    await seed(
+      adapter,
+      't1',
+      Array.from({ length: 600 }, (_, i) => `m${i}`)
+    );
+    const service = new CompactionService({ adapter, summarize: async () => 'sum' });
+    await service.compact('t1', { strategy: 'summary', threshold: 0, keepRecent: 2 });
+    for (const content of ['n1', 'n2']) {
+      await adapter.addEntry({ threadId: 't1', message: { role: 'user', content }, tokenCount: 1 });
+    }
+    const getPath = vi.spyOn(adapter, 'getPath');
+
+    const read = await readCompactedHistory(adapter, { threadId: 't1' });
+
+    expect(read.success && read.data.map((e) => e.message.content)).toEqual([
+      '[Conversation summary]\nsum',
+      'm598',
+      'm599',
+      'n1',
+      'n2',
+    ]);
+    expect(getPath).toHaveBeenCalledTimes(1);
+  });
+
+  it('forks a compacted thread into a copy that reads the same conversation', async () => {
+    const adapter = new InMemoryAdapter({ provider: 'memory' });
+    await seed(adapter, 't1', ['q1', 'a1', 'q2', 'a2']);
+    const service = new CompactionService({ adapter, summarize: async () => 'sum' });
+    await service.compact('t1', { strategy: 'summary', threshold: 0, keepRecent: 2 });
+    const thread = await adapter.getThread('t1');
+    if (!thread.success || !thread.data?.activeLeafId) throw new Error('no leaf');
+
+    const fork = await adapter.forkThread('t1', thread.data.activeLeafId, 't2');
+
+    expect(fork.success).toBe(true);
+    expect(await contentsOf(adapter, 't2')).toEqual(await contentsOf(adapter, 't1'));
   });
 });
 

@@ -301,6 +301,67 @@ describe('InMemoryAdapter', () => {
 
       await limitedAdapter.disconnect();
     });
+
+    it('stays at maxEntries under appends made at once', async () => {
+      const limited = new InMemoryAdapter({ provider: 'memory', maxEntries: 3 });
+      await limited.connect();
+      await limited.createThread('agent', {}, 't');
+
+      await Promise.all(
+        Array.from({ length: 8 }, (_, i) =>
+          limited.addEntry({
+            threadId: 't',
+            message: { role: 'user', content: `m${i}` },
+            tokenCount: 1,
+          })
+        )
+      );
+
+      const left = await limited.getEntries({ threadId: 't' });
+      expect(left.success && left.data.length).toBe(3);
+      const path = await limited.getPath!({ threadId: 't' });
+      expect(path.success && path.data.map((entry) => entry.message.content)).toEqual([
+        'm5',
+        'm6',
+        'm7',
+      ]);
+    });
+
+    it('keeps the entry a new one goes after, evicting another branch', async () => {
+      const limited = new InMemoryAdapter({ provider: 'memory', maxEntries: 3 });
+      await limited.connect();
+      await limited.createThread('agent', {}, 't');
+      const add = async (content: string, parentId?: string) => {
+        const added = await limited.addEntry({
+          threadId: 't',
+          message: { role: 'user', content },
+          tokenCount: 1,
+          ...(parentId !== undefined && { parentId }),
+        });
+        if (!added.success) throw new Error(added.error);
+        return added.data;
+      };
+      const a = await add('a');
+      const b = await add('b');
+      await add('c');
+      await limited.checkout!('t', a.id);
+
+      const d = await add('d', b.id);
+
+      expect(d.parentId).toBe(b.id);
+      const path = await limited.getPath!({ threadId: 't', leafId: d.id });
+      expect(path.success && path.data.map((entry) => entry.message.content)).toEqual([
+        'a',
+        'b',
+        'd',
+      ]);
+      const left = await limited.getEntries({ threadId: 't' });
+      expect(left.success && left.data.map((entry) => entry.message.content)).toEqual([
+        'a',
+        'b',
+        'd',
+      ]);
+    });
   });
 
   describe('provider property', () => {

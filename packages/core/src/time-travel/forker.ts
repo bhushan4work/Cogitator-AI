@@ -45,6 +45,7 @@ export class ExecutionForker {
       mode: 'live',
       modifiedMessages,
       modifiedToolResults: options.mockToolResults,
+      ...(options.userId !== undefined && { userId: options.userId }),
     });
 
     return {
@@ -128,6 +129,7 @@ export class ExecutionForker {
       messages: [...original.messages],
       toolResults: { ...original.toolResults },
       pendingToolCalls: [...original.pendingToolCalls],
+      ...(original.memory && { memory: original.memory }),
       label: options.label ?? `fork_of_${original.id}`,
       createdAt: new Date(),
       metadata: {

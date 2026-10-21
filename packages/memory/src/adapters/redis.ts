@@ -18,9 +18,11 @@ import type {
   NewMemoryEntry,
   ToolCall,
   ToolResult,
+  PathQueryOptions,
 } from '@cogitator-ai/types';
 import { createRedisClient, type RedisClient } from '@cogitator-ai/redis';
-import { ChangeReportingMemoryAdapter } from './base';
+import { BranchingMemoryAdapter, entryTypeWanted } from './base';
+import { CONVERSATION_ENTRY_TYPES, MEMORY_ENTRY_FORMAT } from '@cogitator-ai/types';
 import { matchesListing, threadListing, threadPage, type ThreadCursor } from './thread-listing';
 
 /**
@@ -43,7 +45,28 @@ const INDEX_LIFETIMES = 7;
  * index stays as big as the live threads even when nobody lists them. Returns the ids it removed,
  * which the adapter reports as deleted threads.
  */
-const SWEEP_INDEX = `
+/**
+ * Lua `keep(key, ttl)` and `put(key, value, ttl)`: give a key the adapter's TTL, or no expiry
+ * when the TTL is 0
+ */
+const LIFETIME = `
+local function keep(key, ttl)
+  if tonumber(ttl) > 0 then
+    redis.call('EXPIRE', key, ttl)
+  else
+    redis.call('PERSIST', key)
+  end
+end
+local function put(key, value, ttl)
+  if tonumber(ttl) > 0 then
+    redis.call('SET', key, value, 'EX', ttl)
+  else
+    redis.call('SET', key, value)
+  end
+end
+`;
+
+const SWEEP_INDEX = `${LIFETIME}
 local function sweep(index, cursorKey, prefix, ttl)
   local scanned = redis.call('ZSCAN', index, redis.call('GET', cursorKey) or '0', 'COUNT', ${SWEEP_BATCH})
   local members = scanned[2]
@@ -58,7 +81,7 @@ local function sweep(index, cursorKey, prefix, ttl)
   if scanned[1] == '0' then
     redis.call('DEL', cursorKey)
   else
-    redis.call('SET', cursorKey, scanned[1], 'EX', ttl)
+    put(cursorKey, scanned[1], ttl)
   end
   return removed
 end
@@ -71,8 +94,8 @@ function writeReply(reply: unknown): { written: boolean; expired: string[] } {
   return { written: Number(written) === 1, expired: expired.map(String) };
 }
 
-/** The stored thread, read on the primary like every write, never on a lagging replica. */
-const READ_THREAD = `return redis.call('GET', KEYS[1])`;
+/** A stored thread or entry, read on the primary like every write, never on a lagging replica. */
+const READ_KEY = `return redis.call('GET', KEYS[1])`;
 
 /**
  * Writes a thread and its place in the thread index if the thread is still what the caller read:
@@ -87,42 +110,205 @@ if ARGV[1] == '1' then
 elseif current then
   return {0}
 end
-redis.call('SET', KEYS[1], ARGV[3], 'EX', ARGV[4])
+put(KEYS[1], ARGV[3], ARGV[4])
 redis.call('ZADD', KEYS[2], ARGV[5], ARGV[6])
-redis.call('EXPIRE', KEYS[2], ARGV[4] * ${INDEX_LIFETIMES})
+keep(KEYS[2], ARGV[4] * ${INDEX_LIFETIMES})
 local expired = sweep(KEYS[2], KEYS[3], ARGV[7], ARGV[4])
 return {1, unpack(expired)}
 `;
 
 /**
- * Adds an entry to a thread that exists, refreshing the TTL of the thread, its entries and the
- * index. Replies `{1, expired ids...}` when added, `{0}` otherwise.
+ * Lua helpers for trees of entries. An entry's JSON ends with its `parentId`, which
+ * `withParent` sets without decoding the rest. With `legacy` set it gives an entry written before
+ * trees, which has no `parentId` of its own, its first one and marks it format 1, appending both
+ * whatever its last field holds. `chain` links the entries of a thread written before trees once
+ * per thread, recorded by the thread's chained marker: those without a top-level `formatVersion`,
+ * in the order `getEntries` read them before trees (creation time, then `seq`, then key), each
+ * marked so a second chaining skips it, and makes the last one the active leaf when the thread
+ * has none.
  */
-const ADD_ENTRY = `${SWEEP_INDEX}
-if redis.call('EXISTS', KEYS[1]) == 0 then return {0} end
-redis.call('SET', KEYS[3], ARGV[1], 'EX', ARGV[3])
-redis.call('ZADD', KEYS[2], ARGV[2], KEYS[3])
-redis.call('EXPIRE', KEYS[2], ARGV[3])
-redis.call('EXPIRE', KEYS[1], ARGV[3])
-if redis.call('EXPIRE', KEYS[4], ARGV[3] * ${INDEX_LIFETIMES}) == 1 then
-  return {1, unpack(sweep(KEYS[4], KEYS[5], ARGV[4], ARGV[3]))}
+const TREE = `
+local function withParent(json, parent, legacy)
+  local value = 'null'
+  if parent then value = cjson.encode(parent) end
+  local tail = ',"parentId":' .. value .. '}'
+  if legacy then return string.sub(json, 1, -2) .. ',"formatVersion":1' .. tail end
+  local head = string.match(json, '^(.*),"parentId":[^,]*}$')
+  if head then return head .. tail end
+  return string.sub(json, 1, -2) .. tail
 end
-return {1}
+local function chain(entriesKey, leafKey, chainedKey, prefix, ttl)
+  if redis.call('EXISTS', chainedKey) == 1 then return end
+  local scored = redis.call('ZRANGE', entriesKey, 0, -1, 'WITHSCORES')
+  local legacy = {}
+  for i = 1, #scored, 2 do
+    local json = redis.call('GET', scored[i])
+    local entry = json and cjson.decode(json)
+    if entry and (entry.formatVersion == nil or entry.formatVersion == cjson.null) then
+      local seq = entry.seq
+      if type(seq) ~= 'number' then seq = 0 end
+      legacy[#legacy + 1] = { key = scored[i], json = json, at = tonumber(scored[i + 1]), seq = seq }
+    end
+  end
+  table.sort(legacy, function(a, b)
+    if a.at ~= b.at then return a.at < b.at end
+    if a.seq ~= b.seq then return a.seq < b.seq end
+    return a.key < b.key
+  end)
+  local previous = nil
+  local skip = #prefix + #'entry:'
+  for i = 1, #legacy do
+    redis.call('SET', legacy[i].key, withParent(legacy[i].json, previous, true), 'KEEPTTL')
+    previous = string.sub(legacy[i].key, skip + 1)
+  end
+  if previous and redis.call('EXISTS', leafKey) == 0 then put(leafKey, previous, ttl) end
+  put(chainedKey, '1', ttl)
+end
 `;
 
 /**
- * Deletes the entries of a thread and their sorted set, and with three keys the thread itself
- * and its place in the thread index too.
+ * Adds an entry to a thread that exists and makes it the active leaf unless `ARGV[6]` is `'0'`.
+ * `ARGV[5]` says where it goes: `'leaf'` after the active leaf, `'root'` as a new root, `'entry'`
+ * after the entry `ARGV[8]` of the thread. It refreshes the TTL of the thread, its entries, its
+ * leaf, its chained marker and the index. Replies `{1, parent id or '', expired ids...}` when
+ * added, `{0}` without the thread, `{-1}` when the parent is not in the thread.
+ */
+const ADD_ENTRY = `${SWEEP_INDEX}${TREE}
+if redis.call('EXISTS', KEYS[1]) == 0 then return {0} end
+chain(KEYS[2], KEYS[6], KEYS[7], ARGV[4], ARGV[3])
+local parent = nil
+if ARGV[5] == 'leaf' then
+  parent = redis.call('GET', KEYS[6]) or nil
+elseif ARGV[5] == 'entry' then
+  if not redis.call('ZSCORE', KEYS[2], ARGV[4] .. 'entry:' .. ARGV[8]) then return {-1} end
+  parent = ARGV[8]
+end
+put(KEYS[3], withParent(ARGV[1], parent), ARGV[3])
+redis.call('ZADD', KEYS[2], ARGV[2], KEYS[3])
+keep(KEYS[2], ARGV[3])
+keep(KEYS[1], ARGV[3])
+keep(KEYS[7], ARGV[3])
+if ARGV[6] == '1' then
+  put(KEYS[6], ARGV[7], ARGV[3])
+elseif redis.call('EXISTS', KEYS[6]) == 1 then
+  keep(KEYS[6], ARGV[3])
+end
+local expired = {}
+if redis.call('EXISTS', KEYS[4]) == 1 then
+  keep(KEYS[4], ARGV[3] * ${INDEX_LIFETIMES})
+  expired = sweep(KEYS[4], KEYS[5], ARGV[4], ARGV[3])
+end
+return {1, parent or '', unpack(expired)}
+`;
+
+/** Chains a thread's entries from before trees, then replies with its active leaf or false */
+const READ_LEAF = `${LIFETIME}${TREE}
+chain(KEYS[1], KEYS[2], KEYS[3], ARGV[1], ARGV[2])
+return redis.call('GET', KEYS[2])
+`;
+
+/**
+ * Sets the active leaf of a thread that exists to the entry `KEYS[5]` when `ARGV[3]` is `'1'`,
+ * clears it otherwise. The entry must still be one of the thread's when the script runs, so a
+ * checkout racing a delete never leaves the leaf on a deleted entry. Replies 1 when set, 0
+ * without the thread, -1 when the entry is not in the thread.
+ */
+const SET_LEAF = `${LIFETIME}${TREE}
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+chain(KEYS[3], KEYS[2], KEYS[4], ARGV[1], ARGV[2])
+if ARGV[3] ~= '1' then
+  redis.call('DEL', KEYS[2])
+  return 1
+end
+if not redis.call('ZSCORE', KEYS[3], KEYS[5]) or redis.call('EXISTS', KEYS[5]) == 0 then
+  return -1
+end
+put(KEYS[2], ARGV[4], ARGV[2])
+return 1
+`;
+
+/** Steps one path read walks before it hands the walk back, so a long path does not block Redis */
+const PATH_STEPS = 2000;
+
+/**
+ * Walks back from the entry `ARGV[2]` of the thread `ARGV[5]` (entries `KEYS[1]`, leaf `KEYS[2]`,
+ * chained marker `KEYS[3]`, which also route the script to the thread's node in a cluster),
+ * keeping entries of the types in `ARGV[4]` (comma separated, `*` for all) until `ARGV[3]` are
+ * kept (0 for all), for at most `ARGV[6]` steps. Replies `{next id or '', kept JSON...}`, newest
+ * first.
+ */
+const PATH = `${LIFETIME}${TREE}
+chain(KEYS[1], KEYS[2], KEYS[3], ARGV[1], ARGV[7])
+local all = ARGV[4] == '*'
+local wanted = {}
+for t in string.gmatch(ARGV[4], '[^,]+') do wanted[t] = true end
+local limit = tonumber(ARGV[3])
+local out = {''}
+local kept = 0
+local current = ARGV[2]
+for step = 1, tonumber(ARGV[6]) do
+  local json = redis.call('GET', ARGV[1] .. 'entry:' .. current)
+  if not json then return out end
+  local entry = cjson.decode(json)
+  if entry.threadId ~= ARGV[5] then return out end
+  local kind = entry.type
+  if kind == nil or kind == cjson.null then kind = 'message' end
+  if all or wanted[kind] then
+    out[#out + 1] = json
+    kept = kept + 1
+    if limit > 0 and kept >= limit then return out end
+  end
+  local parent = entry.parentId
+  if parent == nil or parent == cjson.null then return out end
+  current = parent
+end
+out[1] = current
+return out
+`;
+
+/**
+ * Deletes the entry `KEYS[1]` of the thread `ARGV[4]` (entries `KEYS[2]`, leaf `KEYS[3]`, chained
+ * marker `KEYS[4]`) and splices it out of its branch: its children go after its parent, and the
+ * active leaf moves to the parent when it was the entry. Replies 1, 0 without the entry, -1 when
+ * the entry is not the thread's.
+ */
+const REMOVE_ENTRY = `${LIFETIME}${TREE}
+local json = redis.call('GET', KEYS[1])
+if not json then return 0 end
+if cjson.decode(json).threadId ~= ARGV[4] then return -1 end
+chain(KEYS[2], KEYS[3], KEYS[4], ARGV[1], ARGV[2])
+local parent = cjson.decode(redis.call('GET', KEYS[1])).parentId
+if parent == cjson.null then parent = nil end
+local suffix = ',"parentId":' .. cjson.encode(ARGV[3]) .. '}'
+local members = redis.call('ZRANGE', KEYS[2], 0, -1)
+for i = 1, #members do
+  local child = redis.call('GET', members[i])
+  if child and string.sub(child, -#suffix) == suffix then
+    redis.call('SET', members[i], withParent(child, parent), 'KEEPTTL')
+  end
+end
+if redis.call('GET', KEYS[3]) == ARGV[3] then
+  if parent then put(KEYS[3], parent, ARGV[2]) else redis.call('DEL', KEYS[3]) end
+end
+redis.call('ZREM', KEYS[2], KEYS[1])
+redis.call('DEL', KEYS[1])
+return 1
+`;
+
+/**
+ * Deletes the entries of a thread, their sorted set and its active leaf (`KEYS[1]`, `KEYS[2]`),
+ * and with five keys its chained marker, the thread itself and its place in the thread index
+ * too (`KEYS[3]` to `KEYS[5]`).
  */
 const DROP_ENTRIES = `
 local members = redis.call('ZRANGE', KEYS[1], 0, -1)
 for i = 1, #members, 500 do
   redis.call('DEL', unpack(members, i, math.min(i + 499, #members)))
 end
-redis.call('DEL', KEYS[1])
-if #KEYS == 3 then
-  redis.call('DEL', KEYS[2])
-  redis.call('ZREM', KEYS[3], ARGV[1])
+redis.call('DEL', KEYS[1], KEYS[2])
+if #KEYS == 5 then
+  redis.call('DEL', KEYS[3], KEYS[4])
+  redis.call('ZREM', KEYS[5], ARGV[1])
 end
 return #members
 `;
@@ -182,9 +368,10 @@ const INDEX_STATE = `return redis.call('ZSCORE', KEYS[1], ARGV[1])`;
 const INDEX_MISSING = `return redis.call('ZADD', KEYS[1], 'NX', unpack(ARGV))`;
 
 /** Marks the index complete, living as long as the index after a write now. */
-const MARK_INDEXED = `
+const MARK_INDEXED = `${LIFETIME}
 redis.call('ZADD', KEYS[1], '-inf', ARGV[1])
-return redis.call('EXPIRE', KEYS[1], ARGV[2])
+keep(KEYS[1], ARGV[2])
+return 1
 `;
 
 const MAX_WRITE_ATTEMPTS = 100;
@@ -196,6 +383,9 @@ interface IndexRow extends ThreadCursor {
 }
 
 const SCAN_BATCH = 500;
+
+/** Members one page of a backwards read of a thread's entries takes, at least */
+const NEWEST_PAGE = 200;
 
 interface StoredThread {
   id: string;
@@ -209,10 +399,14 @@ interface StoredThread {
  * An entry as stored: `seq` orders entries created in the same millisecond by when they were
  * added. Entries written by earlier versions have no `seq`.
  */
-interface StoredEntry extends Omit<MemoryEntry, 'toolCalls' | 'toolResults' | 'metadata'> {
+interface StoredEntry extends Omit<
+  MemoryEntry,
+  'toolCalls' | 'toolResults' | 'metadata' | 'event'
+> {
   toolCalls?: ToolCall[] | null;
   toolResults?: ToolResult[] | null;
   metadata?: Record<string, unknown> | null;
+  event?: Record<string, unknown> | null;
   seq?: number;
 }
 
@@ -250,7 +444,7 @@ function parseEntry(data: string): StoredEntry {
 }
 
 function readEntry(
-  { seq: _seq, toolCalls, toolResults, metadata, ...entry }: StoredEntry,
+  { toolCalls, toolResults, metadata, event, ...entry }: StoredEntry,
   withToolCalls: boolean
 ): MemoryEntry {
   return {
@@ -258,6 +452,10 @@ function readEntry(
     ...(withToolCalls && toolCalls != null && { toolCalls }),
     ...(withToolCalls && toolResults != null && { toolResults }),
     ...(metadata != null && { metadata }),
+    ...(event != null && { event }),
+    type: entry.type ?? 'message',
+    parentId: entry.parentId ?? null,
+    formatVersion: entry.formatVersion ?? 1,
   };
 }
 
@@ -309,7 +507,7 @@ function indexPage(reply: unknown): {
   };
 }
 
-export class RedisAdapter extends ChangeReportingMemoryAdapter {
+export class RedisAdapter extends BranchingMemoryAdapter {
   readonly provider: MemoryProvider = 'redis';
 
   private client: RedisClient | null = null;
@@ -321,7 +519,7 @@ export class RedisAdapter extends ChangeReportingMemoryAdapter {
     super();
     this.config = config;
     this.prefix = RedisAdapter.resolvePrefix(config);
-    this.ttl = config.ttl ?? 86400;
+    this.ttl = config.ttl ?? 0;
   }
 
   /**
@@ -407,6 +605,15 @@ export class RedisAdapter extends ChangeReportingMemoryAdapter {
     return `${this.prefix}${type}:${id}`;
   }
 
+  /** The keys every tree script of a thread takes: its entries, its leaf, its chained marker */
+  private treeKeys(threadId: string): [string, string, string] {
+    return [
+      this.key('thread:entries', threadId),
+      this.key('thread:leaf', threadId),
+      this.key('thread:chained', threadId),
+    ];
+  }
+
   /** Thread ids scored by `updatedAt` in ms, kept with the threads by every thread write. */
   private get indexKey(): string {
     return `${this.prefix}threads:index`;
@@ -443,7 +650,7 @@ export class RedisAdapter extends ChangeReportingMemoryAdapter {
   ): Promise<Thread | null> {
     const threadKey = this.key('thread', threadId);
     for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
-      const read = await client.eval(READ_THREAD, 1, threadKey);
+      const read = await client.eval(READ_KEY, 1, threadKey);
       const current = typeof read === 'string' ? read : null;
       const thread = next(current === null ? null : (parseThread(current) ?? null));
       if (!thread) return null;
@@ -488,7 +695,10 @@ export class RedisAdapter extends ChangeReportingMemoryAdapter {
 
   private async readThread(client: RedisClient, threadId: string): Promise<Thread | null> {
     const data = await client.get(this.key('thread', threadId));
-    return data === null ? null : (parseThread(data) ?? null);
+    const thread = data === null ? undefined : parseThread(data);
+    if (!thread) return null;
+    const leaf = await client.eval(READ_LEAF, 3, ...this.treeKeys(threadId), this.prefix, this.ttl);
+    return typeof leaf === 'string' ? { ...thread, activeLeafId: leaf } : thread;
   }
 
   async getThread(threadId: string): Promise<MemoryResult<Thread | null>> {
@@ -521,8 +731,8 @@ export class RedisAdapter extends ChangeReportingMemoryAdapter {
     return this.run(async (client) => {
       await client.eval(
         DROP_ENTRIES,
-        3,
-        this.key('thread:entries', threadId),
+        5,
+        ...this.treeKeys(threadId),
         this.key('thread', threadId),
         this.indexKey,
         threadId
@@ -655,26 +865,113 @@ export class RedisAdapter extends ChangeReportingMemoryAdapter {
       const id = this.generateId('entry');
       const createdAt = this.entryTimestamp(entry);
       const seq = await client.incr(`${this.prefix}entries:seq`);
-      const json = JSON.stringify({ ...entry, id, createdAt, seq } satisfies StoredEntry);
+      const { activate, parentId: askedParent, ...fields } = entry;
+      const type = fields.type ?? (fields.message?.role === 'tool' ? 'tool_result' : 'message');
+      const stored = {
+        ...fields,
+        id,
+        createdAt,
+        seq,
+        type,
+        formatVersion: MEMORY_ENTRY_FORMAT,
+      } satisfies StoredEntry;
 
+      const [entriesKey, leafKey, chainedKey] = this.treeKeys(entry.threadId);
       const reply = await client.eval(
         ADD_ENTRY,
-        5,
+        7,
         this.key('thread', entry.threadId),
-        this.key('thread:entries', entry.threadId),
+        entriesKey,
         this.key('entry', id),
         this.indexKey,
         this.sweepKey,
-        json,
+        leafKey,
+        chainedKey,
+        JSON.stringify(stored),
         createdAt.getTime(),
         this.ttl,
-        this.prefix
+        this.prefix,
+        askedParent === undefined ? 'leaf' : askedParent === null ? 'root' : 'entry',
+        activate === false ? '0' : '1',
+        id,
+        askedParent ?? ''
       );
-      const { written, expired } = writeReply(reply);
-      this.reportExpired(expired);
-      if (!written) return this.failure(`Thread not found: ${entry.threadId}`);
+      if (!Array.isArray(reply)) throw new Error('Unexpected reply from Redis');
+      const [status, parent, ...expired] = reply;
+      if (Number(status) === -1) {
+        return this.failure(`Parent entry ${askedParent} is not in thread ${entry.threadId}`);
+      }
+      this.reportExpired(expired.map(String));
+      if (Number(status) !== 1) return this.failure(`Thread not found: ${entry.threadId}`);
 
-      return this.success(readEntry(parseEntry(json), true));
+      return this.success(readEntry({ ...stored, parentId: parent ? String(parent) : null }, true));
+    });
+  }
+
+  /** The path walked back from its start by a script, a bounded number of steps at a time */
+  override async getPath(options: PathQueryOptions): Promise<MemoryResult<MemoryEntry[]>> {
+    const limitProblem = this.entryLimitProblem(options.limit);
+    if (limitProblem) return this.failure(limitProblem);
+    const start = await this.pathStart(options);
+    if (!start.success) return start;
+    if (start.data === null) return this.success([]);
+    const types =
+      options.types === 'all' ? '*' : (options.types ?? CONVERSATION_ENTRY_TYPES).join(',');
+
+    return this.run(async (client) => {
+      const found: MemoryEntry[] = [];
+      let next: string = start.data!;
+      while (next) {
+        const left = options.limit ? options.limit - found.length : 0;
+        const reply = await client.eval(
+          PATH,
+          3,
+          ...this.treeKeys(options.threadId),
+          this.prefix,
+          next,
+          left,
+          types,
+          options.threadId,
+          PATH_STEPS,
+          this.ttl
+        );
+        if (!Array.isArray(reply)) throw new Error('Unexpected reply from Redis');
+        const [continuation, ...rows] = reply.map(String);
+        for (const row of rows) {
+          found.push(readEntry(parseEntry(row), options.includeToolCalls === true));
+        }
+        if (options.limit && found.length >= options.limit) break;
+        next = continuation ?? '';
+      }
+      return this.success(found.reverse());
+    });
+  }
+
+  protected async setActiveLeaf(
+    threadId: string,
+    leafId: string | null
+  ): Promise<MemoryResult<Thread>> {
+    return this.run(async (client) => {
+      const [entriesKey, leafKey, chainedKey] = this.treeKeys(threadId);
+      const set = Number(
+        await client.eval(
+          SET_LEAF,
+          5,
+          this.key('thread', threadId),
+          leafKey,
+          entriesKey,
+          chainedKey,
+          this.key('entry', leafId ?? ''),
+          this.prefix,
+          this.ttl,
+          leafId === null ? '0' : '1',
+          leafId ?? ''
+        )
+      );
+      if (set === -1) return this.failure(`Entry ${leafId} is not in thread ${threadId}`);
+      if (set !== 1) return this.failure(`Thread not found: ${threadId}`);
+      const thread = await this.readThread(client, threadId);
+      return thread ? this.success(thread) : this.failure(`Thread not found: ${threadId}`);
     });
   }
 
@@ -712,9 +1009,14 @@ export class RedisAdapter extends ChangeReportingMemoryAdapter {
       }
 
       let entries = values.map(parseEntry);
-      if (limit && !ranged && entries.length === limit) {
+      const wanted = (list: StoredEntry[]) =>
+        list.filter((entry) => entryTypeWanted(entry.type, options.types));
+      if (limit && !ranged && wanted(entries).length < limit && keys.length >= limit) {
+        entries = await this.newestWanted(client, setKey, limit, wanted, keys, entries);
+      } else if (limit && !ranged && entries.length === limit) {
         entries = await this.withEarlierTies(client, setKey, keys, entries);
       }
+      entries = wanted(entries);
       entries.sort(byCreation);
       if (limit && entries.length > limit) entries = entries.slice(-limit);
 
@@ -722,6 +1024,50 @@ export class RedisAdapter extends ChangeReportingMemoryAdapter {
         entries.map((entry) => readEntry(entry, options.includeToolCalls === true))
       );
     });
+  }
+
+  /**
+   * The newest `limit` entries `wanted` keeps, when the last members already read (`keys`, their
+   * `entries`) hold too few: reads on backwards a page of members at a time until it has enough or
+   * the thread ends, so entries of other types among the newest never make it read a long thread
+   * whole. Members whose entry expired are removed at the end, so pages keep their places.
+   */
+  private async newestWanted(
+    client: RedisClient,
+    setKey: string,
+    limit: number,
+    wanted: (list: StoredEntry[]) => StoredEntry[],
+    keys: string[],
+    entries: StoredEntry[]
+  ): Promise<StoredEntry[]> {
+    const read = [...keys];
+    const found = wanted(entries);
+    const expired: string[] = [];
+    const page = Math.max(limit, NEWEST_PAGE);
+    let offset = keys.length;
+    while (found.length < limit) {
+      const chunk = await client.zrange(setKey, -(offset + page), -(offset + 1));
+      if (chunk.length === 0) break;
+      const values = await client.mget(...chunk);
+      const live: StoredEntry[] = [];
+      for (const [index, key] of chunk.entries()) {
+        const value = values[index];
+        if (value == null) {
+          expired.push(key);
+        } else {
+          read.push(key);
+          live.push(parseEntry(value));
+        }
+      }
+      found.push(...wanted(live));
+      offset += chunk.length;
+      if (chunk.length < page) break;
+    }
+    if (expired.length > 0) {
+      await client.zrem(setKey, ...expired);
+      this.reportExpiredEntries(expired);
+    }
+    return found.length > 0 ? this.withEarlierTies(client, setKey, read, found) : [];
   }
 
   /**
@@ -759,16 +1105,29 @@ export class RedisAdapter extends ChangeReportingMemoryAdapter {
     }));
   }
 
+  /**
+   * Deletes an entry and splices it out of its branch: its children go after its parent. The
+   * entry is read first to learn its thread, whose keys the script then names.
+   */
   private async removeEntry(entryId: string): Promise<MemoryResult<void>> {
     return this.run(async (client) => {
-      const key = this.key('entry', entryId);
-      const data = await client.get(key);
-      if (data) {
-        const entry = parseEntry(data);
-        await client.zrem(this.key('thread:entries', entry.threadId), key);
-        await client.del(key);
-      }
-      return this.success(undefined);
+      const entryKey = this.key('entry', entryId);
+      const json = await client.eval(READ_KEY, 1, entryKey);
+      if (typeof json !== 'string') return this.success(undefined);
+      const { threadId } = parseEntry(json);
+      const removed = await client.eval(
+        REMOVE_ENTRY,
+        4,
+        entryKey,
+        ...this.treeKeys(threadId),
+        this.prefix,
+        this.ttl,
+        entryId,
+        threadId
+      );
+      return Number(removed) === -1
+        ? this.failure(`Entry ${entryId} is not in thread ${threadId}`)
+        : this.success(undefined);
     });
   }
 
@@ -781,7 +1140,12 @@ export class RedisAdapter extends ChangeReportingMemoryAdapter {
 
   private async emptyThread(threadId: string): Promise<MemoryResult<void>> {
     return this.run(async (client) => {
-      await client.eval(DROP_ENTRIES, 1, this.key('thread:entries', threadId));
+      await client.eval(
+        DROP_ENTRIES,
+        2,
+        this.key('thread:entries', threadId),
+        this.key('thread:leaf', threadId)
+      );
       return this.success(undefined);
     });
   }
