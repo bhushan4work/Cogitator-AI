@@ -34,6 +34,26 @@ describe('CogitatorConfigSchema', () => {
     expect(result).toEqual({});
   });
 
+  it('keeps tool output clearing in context, as true or with its options', () => {
+    expect(CogitatorConfigSchema.parse({ context: { clearToolOutputs: true } }).context).toEqual({
+      clearToolOutputs: true,
+    });
+    const options = {
+      trigger: 50_000,
+      keep: 2,
+      exclude: ['read_file'],
+      clearInputs: true,
+      clearAtLeast: 4_000,
+    };
+    expect(
+      CogitatorConfigSchema.parse({ context: { enabled: false, clearToolOutputs: options } })
+        .context
+    ).toEqual({ enabled: false, clearToolOutputs: options });
+    expect(() =>
+      CogitatorConfigSchema.parse({ context: { clearToolOutputs: { keep: -1 } } })
+    ).toThrow();
+  });
+
   it('accepts a base URL and headers for Anthropic and Google', () => {
     const result = CogitatorConfigSchema.parse({
       llm: {
@@ -344,6 +364,46 @@ describe('CogitatorConfigSchema', () => {
     ).toThrow();
   });
 
+  it('keeps every memory.compaction setting that YAML can hold', () => {
+    const compaction = {
+      at: 0.75,
+      keepRecent: 4,
+      keepRecentTokens: 12000,
+      chapterTokens: 3000,
+      chaptersPerArc: 5,
+      arcsPerSaga: 3,
+      summaryModel: 'openai/gpt-4o-mini',
+      summaryPrompt: 'Keep the deadlines.',
+    };
+
+    expect(CogitatorConfigSchema.parse({ memory: { compaction } }).memory?.compaction).toEqual(
+      compaction
+    );
+    expect(CogitatorConfigSchema.parse({ memory: { compaction: {} } }).memory?.compaction).toEqual(
+      {}
+    );
+  });
+
+  it('rejects memory.compaction settings the compaction cannot run with', () => {
+    const invalid = [
+      { at: 0 },
+      { at: 1.2 },
+      { keepRecent: -1 },
+      { keepRecentTokens: 10.5 },
+      { chapterTokens: 0 },
+      { chaptersPerArc: 0 },
+      { arcsPerSaga: -2 },
+      { summaryModel: '' },
+    ];
+
+    for (const compaction of invalid) {
+      expect(() => CogitatorConfigSchema.parse({ memory: { compaction } })).toThrow();
+    }
+    expect(CogitatorConfigSchema.parse({ memory: { compaction: { at: 1 } } }).memory).toEqual({
+      compaction: { at: 1 },
+    });
+  });
+
   it('keeps prompt injection patterns and fail mode, compiling patterns given as strings', () => {
     const promptInjection = CogitatorConfigSchema.parse({
       security: {
@@ -389,5 +449,22 @@ describe('CogitatorConfigSchema', () => {
       'my-provider': { endpoint: 'http://localhost:9000', retries: 2 },
     });
     expect(parsed.prompts).toEqual({ autoDeployWinner: true });
+  });
+});
+
+describe('ContextBuilderConfigSchema partitions', () => {
+  it('keeps the partition budgets and refuses a share outside 0 to 1', async () => {
+    const { ContextBuilderConfigSchema } = await import('../schema');
+
+    expect(
+      ContextBuilderConfigSchema.parse({
+        strategy: 'recent',
+        partitions: { facts: { share: 0 }, pinned: { required: false } },
+      }).partitions
+    ).toEqual({ facts: { share: 0 }, pinned: { required: false } });
+    expect(() =>
+      ContextBuilderConfigSchema.parse({ partitions: { recall: { share: 1.5 } } })
+    ).toThrow();
+    expect(() => ContextBuilderConfigSchema.parse({ partitions: { other: {} } })).toThrow();
   });
 });

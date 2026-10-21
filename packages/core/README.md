@@ -400,7 +400,7 @@ result.usage.reasoningTokens; // billed as output
 
 Reasoning that has to travel with tool calls (Claude thinking blocks, OpenAI reasoning items, Gemini thought signatures) is sent back while the agent works through a tool loop.
 
-Runs cache their prompt by default: Anthropic requests, and Claude through OpenRouter (`OpenAIBackend` with `provider: 'openrouter'`), mark the end of the agent's instructions, so runs with different input share them, and the end of the conversation when another turn is likely (tools or earlier turns, `promptCache.conversation` overrides it), Bedrock requests mark their stable prefix, OpenAI and Gemini cache on their own, and `usage.cachedInputTokens` / `cacheWriteTokens` are priced at the model's cache prices (1-hour writes, `cacheWrite1hTokens`, at their own price). `llm.promptCache: { ttl: '1h' }` or `false` changes it.
+Runs cache their prompt by default: Anthropic requests, and Claude through OpenRouter (`OpenAIBackend` with `provider: 'openrouter'`), mark the end of the agent's instructions, so runs with different input share them, the end of the history a memory context was built from and of the turn before it (`Message.cacheBreakpoint`), so the next turn on a thread reads the history from the cache, up to four marks in all, and the end of the conversation when another turn is likely (tools or earlier turns, `promptCache.conversation` overrides it), Bedrock requests mark their stable prefix, OpenAI and Gemini cache on their own, and `usage.cachedInputTokens` / `cacheWriteTokens` are priced at the model's cache prices (1-hour writes, `cacheWrite1hTokens`, at their own price). `llm.promptCache: { ttl: '1h' }` or `false` changes it.
 
 ---
 
@@ -892,7 +892,7 @@ const result = await cog.run(agent, {
   threadId: 'thread_123',
   userId: 'user_456', // owns the thread, scopes memory, reaches tools as context.userId
   threadAccess: 'owner', // default; 'shared' lets any user continue the thread
-  context: { task: 'analysis' }, // extra values for the system prompt
+  context: { task: 'analysis' }, // data for the model, sent with the input
   deps: { db }, // values for the tools (context.deps), never sent to the model
 
   timeout: 60000,
@@ -906,6 +906,7 @@ const result = await cog.run(agent, {
   loadHistory: true,
   saveHistory: true,
   branch: { fromEntryId: entryId, activate: false }, // run on a branch of the thread's memory
+  brief: `Current date and time: ${new Date().toISOString()}`, // notes for this turn, sent with the input, not saved
   parallelToolCalls: false, // default: tool calls of one turn run one after another
   toolChoice: 'required', // force a tool call until the model makes one, then 'auto'
 
@@ -1029,10 +1030,11 @@ await cog.run(agent, { input, middleware: [auditFor(userId)] });
 | `wrapModelCall` | Around each call, once per model a turn tries | Change the request or the stream sink, call `next` again, or answer without it  |
 | `afterModel`    | After each answer, before the run uses it     | Return `{ content }` or `{ toolCalls }` to replace them                         |
 | `wrapToolCall`  | Around each tool call that passed approval    | Change the arguments (checked against the schema again), or answer for the tool |
+| `afterRun`      | After a run finished and its writes settled   | Work for the next run, such as compaction. Not called for failed or paused runs |
 
-Every hook gets the run's context: `runId`, `threadId`, the agent, `userId`, the channel, `iteration`, `signal`, `deps` and a `state` map the run's middleware share. The Cogitator's middleware runs first, then the agent's, then the run's, then the built-in ones: PII masking (`security.pii`), prompt injection (`security.promptInjection`), guardrails (`guardrails`) and compaction (`context`), closest to the model. `before*` hooks run in that order, `wrap*` hooks nest with the first outermost, `afterModel` runs in reverse. After a handoff the agent the run went on as brings its own middleware. To see each turn as the run keeps it, after every layer, pass `onModelTurn` in the run options: it gets `{ content, toolCalls, model }` before the turn's tools run.
+Every hook gets the run's context: `runId`, `threadId`, the agent, `userId`, the channel, `iteration`, `signal`, `deps` and a `state` map the run's middleware share. The Cogitator's middleware runs first, then the agent's, then the run's, then the built-in ones: PII masking (`security.pii`), prompt injection (`security.promptInjection`), guardrails (`guardrails`), tool output clearing (`context.clearToolOutputs`), compaction (`context`) and compaction of the thread after the run (`memory.compaction`), closest to the model. `before*` and `afterRun` hooks run in that order, `wrap*` hooks nest with the first outermost, `afterModel` runs in reverse. After a handoff the agent the run went on as brings its own middleware. To see each turn as the run keeps it, after every layer, pass `onModelTurn` in the run options: it gets `{ content, toolCalls, model }` before the turn's tools run.
 
-`tripwire(reason, info?)` stops the run as a guard that tripped: it fails with `GUARDRAIL_TRIPPED` (HTTP 400), the middleware, the reason and `info` in `details`, and `isTripwire(error)` tells it apart. Any other error a hook throws fails the run as it is, and a hook still running when the run is cancelled or times out is no longer waited for. Arguments a `wrapToolCall` hook changes are checked against the tool's schema and `requiresApproval` again, and an approval never carries over to them. Every call a `wrapModelCall` hook sends counts toward usage and budgets, an answer it gives without the model counts nothing and still reaches `onToken` in a streamed run. A middleware with `holdsStream: true` makes a streamed run hold each turn's text until the turn is done, so text a hook retries, blocks or replaces never reaches `onToken`. A tripwire raised inside a tool, such as a nested `agentAsTool()` run, stops the outer run too. The Cogitator's `wrapToolCall` hooks also wrap `invokeTool()`, which throws an error they throw (a tripwire among them) while a failing tool still comes back in `error`. `toAgentWire()` does not carry middleware and warns when an agent has some. `piiMiddleware`, `promptInjectionMiddleware`, `guardrailsMiddleware` and `compactionMiddleware` build the built-in ones, to give a feature to one agent only.
+`tripwire(reason, info?)` stops the run as a guard that tripped: it fails with `GUARDRAIL_TRIPPED` (HTTP 400), the middleware, the reason and `info` in `details`, and `isTripwire(error)` tells it apart. Any other error a hook throws fails the run as it is, and a hook still running when the run is cancelled or times out is no longer waited for. Arguments a `wrapToolCall` hook changes are checked against the tool's schema and `requiresApproval` again, and an approval never carries over to them. Every call a `wrapModelCall` hook sends counts toward usage and budgets, an answer it gives without the model counts nothing and still reaches `onToken` in a streamed run. A middleware with `holdsStream: true` makes a streamed run hold each turn's text until the turn is done, so text a hook retries, blocks or replaces never reaches `onToken`. A tripwire raised inside a tool, such as a nested `agentAsTool()` run, stops the outer run too. The Cogitator's `wrapToolCall` hooks also wrap `invokeTool()`, which throws an error they throw (a tripwire among them) while a failing tool still comes back in `error`. `toAgentWire()` does not carry middleware and warns when an agent has some. `piiMiddleware`, `promptInjectionMiddleware`, `guardrailsMiddleware`, `clearToolOutputsMiddleware`, `compactionMiddleware` and `memoryCompactionMiddleware` build the built-in ones, to give a feature to one agent only. `afterRun({ result, model }, context)` runs after the run saved what it said and before `run()` returns, and an error it throws fails the run.
 
 ---
 
@@ -1077,6 +1079,27 @@ const cog = new Cogitator({
 ```
 
 `adapter` also accepts `'sqlite'` (`sqlite.path`), `'mongodb'` (`mongodb.uri`) and `'redis'` (`redis.url`, or `redis.host` + `redis.port`, or `redis.cluster`). Qdrant stores embeddings, not threads: configure it in `memory.qdrant` next to a thread adapter, together with `memory.embedding` and `memory.contextBuilder.includeSemanticContext`, and semantic context is retrieved from it. The Postgres adapter sizes its vector column to the `memory.embedding` model. Runs with a `threadId` load history from and save messages to the adapter. With `contextBuilder`, the agent's instructions are always sent and counted in the budget, and a part of the context that fails to load (history, facts, semantic search) is passed to `onMemoryError` as a `'load'` failure while the run goes on.
+
+The context is ordered for the prompt cache: the system message (the instructions), then the history with cache breakpoints on its last message and on the last message of the turn before, then one user message with a `<memory_context>` block in front of the input: what memory recalled for the turn (facts, semantic results), the run's `brief`, its `context` and the insights of reflection. Only the input is saved to the thread. Without `contextBuilder.maxTokens` the runtime gives the builder the model's window minus the answer and the tool schemas, once, with `reserveTokens: 0`, and the builder counts the input in it. The `agent.run` span reports the tokens of each partition as `context.tokens.<partition>`. See [Memory Context and Prompt Caching](https://cogitator.app/docs/core/cogitator#memory-context-and-prompt-caching).
+
+`memory.compaction` compacts a run's thread after the run, once the conversation of its branch passes `at` (default 0.8) of the window of the model the run ended on:
+
+```typescript
+const cog = new Cogitator({
+  memory: {
+    adapter: 'postgres',
+    postgres: { connectionString: process.env.DATABASE_URL! },
+    compaction: {
+      at: 0.8,
+      keepRecentTokens: 20_000, // default: the less of 20000 and a quarter of the window
+      beforeCompact: () => ({ instructions: 'Keep every price that was quoted.' }), // or false to skip
+      afterCompact: (result) => console.log(result),
+    },
+  },
+});
+```
+
+The thread is compacted hierarchically (see [Hierarchical Compaction](https://cogitator.app/docs/memory#hierarchical-compaction)): the newest turns stay verbatim and the rest becomes a handoff of grounded atoms, written by `summaryModel` or the model the run ended on, which the next run reads in their place. `run()` returns once it is done. A thread that outgrows its window again within two turns of its last compaction is not compacted again, with a warning to use `context.clearToolOutputs` instead, a run on another branch than the active one is left alone, and a compaction that fails is logged while the run keeps its result. `anthropicCompactionSummarizer({ model, client?, apiKey?, maxTokens? })` is a `SummarizeFn` for `CompactionService` that has Anthropic's compaction on request (`ANTHROPIC_COMPACTION_BETA`, `compact-2026-09-04`) write the answer, which is checked like any other, and the signed block is not kept.
 
 The adapter connects on the first run. To read threads before that (for example in an API route), use `getMemory()`, which connects it on first use; `cog.memory` stays `undefined` until something connected it:
 
@@ -2129,6 +2152,19 @@ const cog = new Cogitator({
 ```
 
 Setting `context` turns compression on; pass `enabled: false` to keep the config but switch it off. The strategies are also exported as classes (`TruncateStrategy`, `SlidingWindowStrategy`, `SummarizeStrategy`, `HybridStrategy`) and `ContextManager` can be used on its own. See [Context Management](https://cogitator.app/docs/advanced/context-management).
+
+Old tool outputs can be cleared on their own, before any compression, the way Anthropic's `clear_tool_uses` context edit does, for every provider:
+
+```typescript
+const cog = new Cogitator({
+  context: {
+    enabled: false, // no compression, only clearing
+    clearToolOutputs: { trigger: 100_000, keep: 3, exclude: ['read_plan'], clearAtLeast: 0 },
+  },
+});
+```
+
+Once a turn's conversation reaches `trigger` tokens, every tool result but the `keep` most recent ones gets a note in place of its output, which names the call and tells the model to get it back with the built-in tool `recall_tool_output({ toolCallId })` (from the run, or from the thread's memory). `clearInputs` clears the calls' arguments too, `clearAtLeast` waits until a clearing frees that many tokens so the prompt cache is not broken for little, and an awaited `onBeforeClear({ calls, tokens, tokensFreed, model }, context)` lets the application keep what matters first. It hears only of the calls the run made itself, since outputs loaded from memory are in memory already. The run goes on with the notes, while `RunResult.messages` and a paused run's checkpoint get the cleared outputs and arguments back. `recall_tool_output` reads memory only for a run that uses it, and only the branch the run is on. The `agent.run` span reports `context.cleared_tool_outputs`, `context.cleared_tool_output_tokens` and `context.clearings`.
 
 ---
 

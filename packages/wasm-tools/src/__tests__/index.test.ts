@@ -24,6 +24,7 @@ import {
   createDatetimeTool,
   createCompressionTool,
   createSigningTool,
+  createColorTool,
   calcToolSchema,
   jsonToolSchema,
   hashToolSchema,
@@ -40,6 +41,7 @@ import {
   datetimeToolSchema,
   compressionToolSchema,
   signingToolSchema,
+  colorToolSchema,
 } from '../index.js';
 import { z } from 'zod';
 
@@ -161,6 +163,7 @@ describe('defineWasmTool', () => {
       createDatetimeTool(),
       createCompressionTool(),
       createSigningTool(),
+      createColorTool(),
     ];
     for (const tool of tools) {
       expect(tool.sandbox?.wasi).toBe(true);
@@ -303,6 +306,7 @@ describe('tool factory functions', () => {
     { fn: createDatetimeTool, name: 'datetime', func: 'datetime' },
     { fn: createCompressionTool, name: 'compression', func: 'compression' },
     { fn: createSigningTool, name: 'signing', func: 'signing' },
+    { fn: createColorTool, name: 'color', func: 'color' },
   ];
 
   for (const { fn, name, func } of factories) {
@@ -472,5 +476,35 @@ describe('schema validation', () => {
     expect(unitsToolSchema.safeParse({ value: 100, from: 'C', to: 'F' }).success).toBe(true);
     expect(unitsToolSchema.safeParse({ value: '100', from: 'C', to: 'F' }).success).toBe(false);
     expect(unitsToolSchema.safeParse({ value: 100, from: 'C' }).success).toBe(false);
+  });
+
+  it('colorToolSchema validates convert and contrast inputs with color and color2', () => {
+    expect(colorToolSchema.safeParse({ operation: 'convert', color: '#ff0000' }).success).toBe(
+      true
+    );
+    expect(
+      colorToolSchema.safeParse({
+        operation: 'contrast',
+        color: '#000000',
+        color2: '#ffffff',
+      }).success
+    ).toBe(true);
+    const parsed = colorToolSchema.parse({
+      operation: 'contrast',
+      color: '#000000',
+      color2: '#ffffff',
+      color1: '#000000',
+      foreground: '#000000',
+      background: '#ffffff',
+    });
+    expect(parsed).toEqual({
+      operation: 'contrast',
+      color: '#000000',
+      color2: '#ffffff',
+    });
+    expect('color1' in parsed).toBe(false);
+    expect('foreground' in parsed).toBe(false);
+    expect('background' in parsed).toBe(false);
+    expect(colorToolSchema.safeParse({ operation: 'invalid' }).success).toBe(false);
   });
 });

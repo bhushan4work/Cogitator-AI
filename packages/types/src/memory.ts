@@ -4,6 +4,7 @@
 
 import type { Message, ToolCall, ToolResult } from './message';
 import type { GraphContext, GraphContextOptions, GraphNode } from './knowledge-graph';
+import type { MemoryCompactionConfig } from './session';
 
 export type MemoryType = 'conversation' | 'fact' | 'embedding';
 
@@ -61,6 +62,43 @@ export interface CompactionEvent {
   compacted: number;
   /** Whether its message summarizes them, or they were dropped without a summary */
   summarized: boolean;
+  /**
+   * The summary as a tree of what the conversation established, when a `hierarchical`
+   * compaction wrote it: the newest chapters, the arcs older chapters were folded into, and the
+   * saga older arcs were folded into. The entry's message is the handoff rendered from it.
+   */
+  levels?: CompactionLevels;
+}
+
+/** What a piece of summary records */
+export type CompactionAtomKind =
+  'fact' | 'task' | 'decision' | 'constraint' | 'error' | 'file' | 'thread';
+
+/** One thing a summary keeps from the conversation, with what it stands on */
+export interface CompactionAtom {
+  kind: CompactionAtomKind;
+  /** Whether it is still open, such as a task not done or an error not fixed */
+  status: 'open' | 'closed';
+  text: string;
+  /** Quotes of the entries it stands on */
+  evidence?: Evidence[];
+  /** Whether every quote was found in its entry: an atom that is not is a suggestion */
+  verified: boolean;
+}
+
+/** A part of the conversation a summary covers, and what it kept of it */
+export interface CompactionNode {
+  /** The first and the last entry the node covers */
+  from: string;
+  to: string;
+  atoms: CompactionAtom[];
+}
+
+/** The levels of a hierarchical summary, oldest first in each */
+export interface CompactionLevels {
+  saga?: CompactionNode;
+  arcs: CompactionNode[];
+  chapters: CompactionNode[];
 }
 
 /** The entry types that hold conversation, the ones reads return unless asked for others */
@@ -446,6 +484,46 @@ export type EmbeddingServiceConfig =
 
 export type ContextStrategy = 'recent' | 'relevant' | 'hybrid';
 
+/**
+ * The parts a context is assembled from, in the order of how long they stay the same: `system`
+ * (the agent's instructions), `pinned` (what is always in context), `index` (what memory holds),
+ * `summaries` (the summary of compacted history), `recent` (the history itself), and the parts
+ * that change every turn, `facts`, `recall` (search results and the knowledge graph), `brief`
+ * (notes prepared for the turn) and `final` (the input of the turn).
+ */
+export type ContextPartition =
+  'system' | 'pinned' | 'index' | 'summaries' | 'facts' | 'recall' | 'brief' | 'recent' | 'final';
+
+/**
+ * The budget of a context partition: `share` of the context budget it may take, and whether it
+ * is `required` (never left out, cut down only when the budget cannot hold it). What a partition
+ * leaves unused goes to partitions that need more, `recent` last.
+ */
+export interface ContextPartitionBudget {
+  share?: number;
+  required?: boolean;
+}
+
+/** Why a block of a context was left out */
+export type DroppedReason =
+  /** No room left in the budget */
+  | 'budget'
+  /** It said what a block that stays says already */
+  | 'duplicate'
+  /** The strategy did not pick it, such as an entry scored too low */
+  | 'not-selected'
+  /** Larger than its partition could hold alone, left out in favour of what follows */
+  | 'oversized';
+
+/** A block of a context that was left out, and why */
+export interface DroppedBlock {
+  partition: ContextPartition;
+  reason: DroppedReason;
+  tokens: number;
+  /** The history entry, fact or search result it came from */
+  sourceId?: string;
+}
+
 export interface ContextBuilderConfig {
   /**
    * Token budget of a built context. Without it, `build()` takes `maxTokens` from its options:
@@ -460,6 +538,12 @@ export interface ContextBuilderConfig {
   includeSemanticContext?: boolean;
   includeGraphContext?: boolean;
   graphContextOptions?: GraphContextOptions;
+  /**
+   * Budgets of the partitions, merged over the defaults: `system`, `pinned`, `index`,
+   * `summaries`, `brief` and `final` required, `facts` 15%, `recall` 35%, `recent` the rest.
+   * The shares of the partitions that are not required add up to 1 at most.
+   */
+  partitions?: Partial<Record<ContextPartition, ContextPartitionBudget>>;
 }
 
 /**
@@ -489,10 +573,26 @@ export interface DroppedContext {
   graphNodes: GraphNode[];
   /** Tokens of everything left out */
   tokenCount: number;
+  /** Every block left out, with its partition and the reason */
+  blocks: DroppedBlock[];
 }
 
 export interface BuiltContext {
+  /**
+   * The context in the order of how long its parts stay the same: a system message (the system
+   * prompt, then what is pinned and the memory index), the history, its last message marked as a
+   * cache breakpoint, and, when there is any, a user message with what changes every turn (see
+   * `memoryContext`)
+   */
   messages: Message[];
+  /**
+   * What changes every turn (facts, recall, the brief), which `messages` end with as a user
+   * message. A caller that adds the input itself, as a Cogitator run does, sends it with the input
+   * instead, so it does not stand between the history and the prompt cache.
+   */
+  memoryContext?: string;
+  /** Tokens each partition took */
+  partitions: Partial<Record<ContextPartition, number>>;
   facts: Fact[];
   semanticResults: (Embedding & { score: number })[];
   graphContext?: GraphContext;
@@ -529,6 +629,8 @@ export interface MemoryConfig {
    */
   embedding?: EmbeddingServiceConfig | EmbeddingService;
   contextBuilder?: Partial<ContextBuilderConfig>;
+  /** Compaction of a run's thread after the run, off unless set */
+  compaction?: MemoryCompactionConfig;
 }
 
 export type SearchStrategy = 'vector' | 'keyword' | 'hybrid';

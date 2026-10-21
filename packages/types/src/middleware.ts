@@ -5,6 +5,7 @@
 import type { ChatRequest, ChatResponse } from './llm';
 import type { Message, ToolCall, ToolResult } from './message';
 import type { Tool } from './tool';
+import type { RunResult } from './runtime';
 
 /**
  * What a middleware hook knows about the run it works in. `iteration` and the agent are those of
@@ -128,7 +129,8 @@ export type ToolCallHandler = (call: ToolCallRequest) => Promise<ToolResult>;
  * the agent or the run.
  *
  * Order: the Cogitator's middleware, then the agent's, then the run's, then the built-in ones
- * (PII masking, prompt injection, guardrails, compaction) closest to the model. `before*` hooks
+ * (PII masking, prompt injection, guardrails, tool output clearing, compaction) closest to the
+ * model. `before*` hooks
  * run in that order, `wrap*` hooks nest with the first outermost, `afterModel` runs in reverse.
  *
  * A hook that throws fails the run with its error. `tripwire()` from `@cogitator-ai/core` stops
@@ -176,4 +178,17 @@ export interface RunMiddleware<TDeps = unknown> {
     next: ToolCallHandler,
     context: RunMiddlewareContext<TDeps>
   ): Promise<ToolResult>;
+  /**
+   * After a run finished and saved what it said, before `run()` returns its result: for work
+   * that keeps memory in shape for the next run, such as compaction. Not called for a run that
+   * failed or paused. An error it throws fails the run.
+   */
+  afterRun?(event: RunEndEvent, context: RunMiddlewareContext<TDeps>): void | Promise<void>;
+}
+
+/** A run that finished, for `afterRun` */
+export interface RunEndEvent {
+  readonly result: RunResult;
+  /** The model the run ended on, as `provider/model` with its provider resolved */
+  readonly model: string;
 }

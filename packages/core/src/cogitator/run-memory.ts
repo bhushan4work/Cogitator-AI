@@ -58,6 +58,16 @@ export class RunMemory {
     return this.place.activate === false;
   }
 
+  /**
+   * Where the run reads its conversation, once it may use memory, also when it saves none
+   * (`saveHistory: false`): its thread and newest entry
+   */
+  get conversation(): { threadId: string; leafId?: string | null } | undefined {
+    if (!this.opened || !this.memory() || this.options().useMemory === false) return undefined;
+    const leafId = this.leafId ?? this.place.parentId;
+    return { threadId: this.threadId, ...(leafId !== undefined && { leafId }) };
+  }
+
   /** Whether the run may write to its thread: {@link open} was called */
   get isOpen(): boolean {
     return this.opened;
@@ -79,6 +89,11 @@ export class RunMemory {
       activate: this.place.activate ?? true,
       ...(this.branchPoint !== undefined && { branchPoint: this.branchPoint }),
     };
+  }
+
+  /** Resolves once every write asked for so far is done, failed ones included */
+  settled(): Promise<void> {
+    return this.queue.then(() => undefined);
   }
 
   /** Saves a message of the run */

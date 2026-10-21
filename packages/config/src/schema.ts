@@ -209,6 +209,22 @@ export const ContextBuilderConfigSchema = z.object({
       entityTypes: z.array(EntityTypeSchema).optional(),
     })
     .optional(),
+  partitions: z
+    .partialRecord(
+      z.enum([
+        'system',
+        'pinned',
+        'index',
+        'summaries',
+        'facts',
+        'recall',
+        'brief',
+        'recent',
+        'final',
+      ]),
+      z.object({ share: z.number().min(0).max(1).optional(), required: z.boolean().optional() })
+    )
+    .optional(),
 });
 
 const EmbeddingDimensionsSchema = z.number().int().positive();
@@ -235,6 +251,22 @@ export const EmbeddingConfigSchema = z.discriminatedUnion('provider', [
     dimensions: EmbeddingDimensionsSchema.optional(),
   }),
 ]);
+
+/**
+ * `memory.compaction`: compaction of a run's thread after the run. The `beforeCompact` and
+ * `afterCompact` hooks are functions, so they are set in code, not in YAML.
+ */
+export const MemoryCompactionConfigSchema = z.object({
+  at: z.number().gt(0).max(1).optional(),
+  keepRecent: z.number().int().nonnegative().optional(),
+  keepRecentTokens: z.number().int().nonnegative().optional(),
+  chapterTokens: z.number().int().positive().optional(),
+  chapterConcurrency: z.number().int().positive().optional(),
+  chaptersPerArc: z.number().int().positive().optional(),
+  arcsPerSaga: z.number().int().positive().optional(),
+  summaryModel: z.string().min(1).optional(),
+  summaryPrompt: z.string().optional(),
+});
 
 export const MemoryConfigSchema = z.object({
   adapter: MemoryProviderSchema.optional(),
@@ -290,6 +322,7 @@ export const MemoryConfigSchema = z.object({
     .optional(),
   embedding: EmbeddingConfigSchema.optional(),
   contextBuilder: ContextBuilderConfigSchema.optional(),
+  compaction: MemoryCompactionConfigSchema.optional(),
 });
 
 export const SandboxTypeSchema = z.enum(['docker', 'native', 'wasm']);
@@ -571,6 +604,14 @@ export const CompressionStrategySchema = z.enum([
   'hybrid',
 ]);
 
+export const ClearToolOutputsConfigSchema = z.object({
+  trigger: z.number().int().nonnegative().optional(),
+  keep: z.number().int().nonnegative().optional(),
+  exclude: z.array(z.string()).optional(),
+  clearInputs: z.boolean().optional(),
+  clearAtLeast: z.number().int().nonnegative().optional(),
+});
+
 export const ContextManagerConfigSchema = z.object({
   enabled: z.boolean().optional(),
   strategy: CompressionStrategySchema.optional(),
@@ -578,6 +619,7 @@ export const ContextManagerConfigSchema = z.object({
   outputReserve: z.number().positive().optional(),
   summaryModel: z.string().optional(),
   windowSize: z.number().positive().optional(),
+  clearToolOutputs: z.union([z.boolean(), ClearToolOutputsConfigSchema]).optional(),
 });
 
 export const DeployTargetSchema = z.enum(['docker', 'fly']);

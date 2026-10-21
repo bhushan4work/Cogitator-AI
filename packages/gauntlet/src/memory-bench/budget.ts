@@ -1,20 +1,21 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { ModelPriceConfig } from '@cogitator-ai/types';
+import type { ChatUsage, ModelPriceConfig } from '@cogitator-ai/types';
 
 /** The model every stage of the stand runs on: answers and the judge, fixed so runs compare. */
 export const BENCH_MODEL = 'claude-haiku-5-5';
 
 /**
  * USD per million tokens of `claude-haiku-5-5` for prompts up to 100K tokens. Cache prices are
- * the usual 0.1x and 1.25x of input.
+ * the usual multiples of input: 0.1x for reads, 1.25x for 5-minute writes, 2x for 1-hour ones.
  */
 export const BENCH_PRICE: ModelPriceConfig = {
   input: 0.1,
   output: 0.5,
   inputCached: 0.01,
   inputCacheWrite: 0.125,
+  inputCacheWrite1h: 0.2,
 };
 
 /** Prompts above this many tokens cost more on `claude-haiku-5-5`, every token class of them. */
@@ -43,6 +44,26 @@ export function callCost(inputTokens: number, outputTokens: number, batch = fals
   const long = inputTokens > LONG_PROMPT_TOKENS ? LONG_PROMPT_MULTIPLIER : 1;
   const usd = ((inputTokens * BENCH_PRICE.input + outputTokens * BENCH_PRICE.output) * long) / 1e6;
   return batch ? usd * BATCH_DISCOUNT : usd;
+}
+
+/**
+ * USD of a call from the usage it reports, each token class at its bench price: cache reads,
+ * 5-minute and 1-hour cache writes, the rest of the input and the output, a long prompt scaled
+ * whole.
+ */
+export function usageCost(usage: ChatUsage): number {
+  const cached = usage.cachedInputTokens ?? 0;
+  const written = usage.cacheWriteTokens ?? 0;
+  const written1h = Math.min(usage.cacheWrite1hTokens ?? 0, written);
+  const plain = Math.max(usage.inputTokens - cached - written, 0);
+  const usd =
+    plain * BENCH_PRICE.input +
+    cached * (BENCH_PRICE.inputCached ?? BENCH_PRICE.input) +
+    (written - written1h) * (BENCH_PRICE.inputCacheWrite ?? BENCH_PRICE.input) +
+    written1h * (BENCH_PRICE.inputCacheWrite1h ?? BENCH_PRICE.input) +
+    usage.outputTokens * BENCH_PRICE.output;
+  const long = usage.inputTokens > LONG_PROMPT_TOKENS ? LONG_PROMPT_MULTIPLIER : 1;
+  return (usd * long) / 1e6;
 }
 
 interface LedgerEntry {

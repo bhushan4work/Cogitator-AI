@@ -6,3 +6,10 @@ export {
   guardrailsMiddleware,
   compactionMiddleware,
 } from './builtins';
+export {
+  clearToolOutputsMiddleware,
+  clearedToolOutputsAttributes,
+  restoreClearedOutputs,
+  clearedOutputNote,
+  isClearedArguments,
+} from './clear-tool-outputs';

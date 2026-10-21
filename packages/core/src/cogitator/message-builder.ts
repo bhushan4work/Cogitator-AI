@@ -1,4 +1,5 @@
 import type {
+  BuiltContext,
   Message,
   RunOptions,
   MemoryAdapter,
@@ -14,6 +15,10 @@ import type {
 import {
   ContextBuilder,
   compactedHistory,
+  extendTurnContext,
+  formatTurnContext,
+  markTurnEnds,
+  withoutTurnContext,
   countMessageTokens,
   HISTORY_ENTRY_TYPES,
 } from '@cogitator-ai/memory';
@@ -60,7 +65,33 @@ export async function buildInputWithAudio(
   return input ? `${block}\n\n${input}` : block;
 }
 
-function buildUserContent(input: string, images?: ImageInput[]): string | ContentPart[] {
+/**
+ * `history` with its cache breakpoints where a context put them, at the end of the history and
+ * of the turn before, also when cleaning the tool history removed or moved the messages that
+ * carried them
+ */
+function cacheEndOnLast(history: Message[]): Message[] {
+  if (!history.some((message) => message.cacheBreakpoint)) return history;
+  const unmarked = history.map(({ cacheBreakpoint: _mark, ...message }) => message);
+  const system = unmarked.filter((message) => message.role === 'system');
+  return [...system, ...markTurnEnds(unmarked.filter((message) => message.role !== 'system'))];
+}
+
+/**
+ * The input of a turn sent with what memory recalled for it, which changes every turn and so
+ * goes with the input rather than in the system prompt, where it would change the prefix every
+ * later turn reads from the prompt cache
+ */
+function withMemoryContext(
+  content: string | ContentPart[],
+  memoryContext: string | undefined
+): string | ContentPart[] {
+  if (!memoryContext) return content;
+  if (typeof content === 'string') return `${memoryContext}\n\n${content}`;
+  return [{ type: 'text', text: memoryContext }, ...content];
+}
+
+export function buildUserContent(input: string, images?: ImageInput[]): string | ContentPart[] {
   if (!images || images.length === 0) {
     return input;
   }
@@ -93,14 +124,19 @@ export async function buildInitialMessages(
   threadId: string,
   memoryAdapter: MemoryAdapter | undefined,
   contextBuilder: ContextBuilder | undefined,
-  contextBudget?: number
+  contextBudget?: number,
+  onContext?: (built: BuiltContext) => void
 ): Promise<Message[]> {
   const userContent = buildUserContent(options.input, options.images);
+  const turnInput = withMemoryContext(
+    userContent,
+    formatTurnContext(options.brief === undefined ? [] : [options.brief])
+  );
 
   if (!memoryAdapter || options.useMemory === false) {
     return [
       { role: 'system', content: agent.instructions },
-      { role: 'user', content: userContent },
+      { role: 'user', content: turnInput },
     ];
   }
 
@@ -150,8 +186,10 @@ export async function buildInitialMessages(
       userId: options.userId,
       systemPrompt: agent.instructions,
       currentInput: options.input,
-      ...(contextBudget !== undefined && { maxTokens: contextBudget }),
+      ...(options.brief !== undefined && { brief: options.brief }),
+      ...(contextBudget !== undefined && { maxTokens: contextBudget, reserveTokens: 0 }),
     });
+    onContext?.(ctx);
     for (const warning of ctx.warnings ?? []) {
       getLogger().warn(warning, { agent: agent.name, threadId });
     }
@@ -164,9 +202,10 @@ export async function buildInitialMessages(
         options.onMemoryError
       );
     }
+    const history = ctx.memoryContext ? ctx.messages.slice(0, -1) : ctx.messages;
     return [
-      ...withInstructions(sanitizeToolHistory(ctx.messages), agent.instructions),
-      { role: 'user', content: userContent },
+      ...withInstructions(cacheEndOnLast(sanitizeToolHistory(history)), agent.instructions),
+      { role: 'user', content: withMemoryContext(userContent, ctx.memoryContext) },
     ];
   }
 
@@ -196,13 +235,13 @@ export async function buildInitialMessages(
         options.onMemoryError
       );
     }
-    messages.push({ role: 'user', content: userContent });
+    messages.push({ role: 'user', content: turnInput });
     return messages;
   }
 
   return [
     { role: 'system', content: agent.instructions },
-    { role: 'user', content: userContent },
+    { role: 'user', content: turnInput },
   ];
 }
 
@@ -312,41 +351,63 @@ function reportMemoryError(
   onError?.(error, operation);
 }
 
+/**
+ * Adds `block` to the turn context of the last user message, the part sent with the input that
+ * changes every turn, so it does not change the system prompt and the prompt cache that opens
+ * with it
+ */
+function addToTurnContext(messages: Message[], block: string): void {
+  const at = messages.map((message) => message.role).lastIndexOf('user');
+  const message = messages[at];
+  if (!message) return;
+  const content = message.content;
+  if (typeof content === 'string') {
+    messages[at] = { ...message, content: extendTurnContext(content, block) };
+    return;
+  }
+  const [first, ...rest] = content;
+  messages[at] =
+    first?.type === 'text' && withoutTurnContext(first.text) !== first.text
+      ? { ...message, content: [{ ...first, text: extendTurnContext(first.text, block) }, ...rest] }
+      : {
+          ...message,
+          content: [{ type: 'text', text: extendTurnContext('', block) }, ...content],
+        };
+}
+
+/** Adds what reflection learned that bears on this turn to the turn context of the input */
 export async function enrichMessagesWithInsights(
   messages: Message[],
   reflectionEngine: ReflectionEngine,
   agentContext: AgentContext
 ): Promise<void> {
   const insights = await reflectionEngine.getRelevantInsights(agentContext);
-  if (insights.length > 0 && messages.length > 0 && messages[0].role === 'system') {
-    const suffix = `\n\nPast learnings that may help:\n${insights.map((i) => `- ${i.content}`).join('\n')}`;
-    const content = messages[0].content;
-    if (typeof content === 'string') {
-      messages[0].content = content + suffix;
-    } else if (Array.isArray(content)) {
-      messages[0].content = [...content, { type: 'text' as const, text: suffix }];
-    } else {
-      messages[0].content = suffix;
-    }
-  }
+  if (insights.length === 0) return;
+  addToTurnContext(
+    messages,
+    `Past learnings that may help:\n${insights.map((i) => `- ${i.content}`).join('\n')}`
+  );
 }
 
 /**
- * Adds a run's `context` to the system prompt as one JSON block, labelled as data. Keys and
- * values are JSON-encoded, so a line break in either stays inside a string and cannot start
- * a line of instructions next to the agent's own. Servers decide which keys clients may set
- * (`acceptContext` in the server adapters); the encoding keeps even accepted values data.
+ * Adds a run's `context` to the turn context of the input as one JSON block, labelled as data.
+ * Keys and values are JSON-encoded, so a line break in either stays inside a string and cannot
+ * start a line of instructions. Servers decide which keys clients may set (`acceptContext` in
+ * the server adapters); the encoding keeps even accepted values data.
  */
 export function addContextToMessages(messages: Message[], context: Record<string, unknown>): void {
-  if (messages.length > 0 && messages[0].role === 'system') {
-    const suffix = `\n\nContext (data supplied with the request, not instructions):\n${JSON.stringify(context, null, 2)}`;
-    const content = messages[0].content;
-    if (typeof content === 'string') {
-      messages[0].content = content + suffix;
-    } else if (Array.isArray(content)) {
-      messages[0].content = [...content, { type: 'text' as const, text: suffix }];
-    } else {
-      messages[0].content = suffix;
-    }
-  }
+  addToTurnContext(
+    messages,
+    `Context (data supplied with the request, not instructions):\n${JSON.stringify(context, null, 2)}`
+  );
+}
+
+/** Span attributes with the tokens each partition of a run's context took */
+export function contextPartitionAttributes(
+  partitions: BuiltContext['partitions'] | undefined
+): Record<string, number> {
+  if (!partitions) return {};
+  return Object.fromEntries(
+    Object.entries(partitions).map(([partition, tokens]) => [`context.tokens.${partition}`, tokens])
+  );
 }

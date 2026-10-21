@@ -4,7 +4,7 @@ WASM-based tools for Cogitator agents. Secure, sandboxed tool execution using We
 
 ## Features
 
-- **16 pre-built tools** - calculator, JSON, hash, Base64, slug, textcase, units, validation, diff, regex, CSV, Markdown, XML, datetime, compression, Ed25519 signing
+- **17 pre-built tools** - calculator, JSON, hash, Base64, slug, textcase, units, validation, diff, regex, CSV, Markdown, XML, datetime, compression, Ed25519 signing, color
 - **Isolated execution** - every call runs in an Extism sandbox in a worker thread, without filesystem or network access
 - **Fast startup** - no container to start; compiled modules are cached per file
 - **Custom tool framework** - `defineWasmTool()` for your own WASM modules
@@ -59,6 +59,7 @@ import {
   createDatetimeTool,
   createCompressionTool,
   createSigningTool,
+  createColorTool,
 } from '@cogitator-ai/wasm-tools';
 import { Cogitator, Agent } from '@cogitator-ai/core';
 
@@ -83,6 +84,7 @@ const agent = new Agent({
     createDatetimeTool(),
     createCompressionTool(),
     createSigningTool(),
+    createColorTool(),
   ],
 });
 
@@ -413,6 +415,22 @@ const signing = createSigningTool({ timeout: 10000 });
 ```
 
 WASM has no secure random source, so the tool generates a 32-byte seed on the host with `node:crypto` when `generateKeypair` is called without `seed`; the seed is the private key. Keys and signatures use `encoding: 'hex'` (default) or `'base64'`. Signatures are RFC 8032 Ed25519 and interoperate with `node:crypto`; non-canonical or off-curve public keys fail verification. Empty messages are allowed.
+
+### createColorTool(options?)
+
+Convert color formats (HEX, RGB, HSL) and calculate WCAG 2.x contrast ratios.
+
+```typescript
+const color = createColorTool({ timeout: 5000 });
+
+// Convert: { operation: "convert", color: "#ff0000" }
+// → { hex: "#ff0000", rgb: { r: 255, g: 0, b: 0, a: 1 }, hsl: { h: 0, s: 100, l: 50, a: 1 } }
+
+// Contrast: { operation: "contrast", color: "#000000", color2: "#ffffff" }
+// → { ratio: 21, normalText: { aa: true, aaa: true }, largeText: { aa: true, aaa: true } }
+```
+
+Supports `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb()`, `rgba()`, `hsl()`, and `hsla()` inputs with alpha preservation. Contrast calculations follow WCAG 2.x relative luminance and evaluate AA/AAA conformance for normal and large text.
 
 ### getWasmPath(name)
 

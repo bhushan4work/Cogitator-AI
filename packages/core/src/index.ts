@@ -103,6 +103,10 @@ export {
   restrictFileTools,
   isPathAllowed,
   createCapabilitiesTool,
+  recallToolOutputTool,
+  isRecallToolOutput,
+  RECALL_TOOL_OUTPUT,
+  type RecallToolOutputParams,
   createDeviceTools,
   createSelfTools,
   loadCustomTools,
@@ -321,6 +325,15 @@ export type {
   LLMPluginMetadata,
   LLMPlugin,
 } from './llm/index';
+export {
+  anthropicCompactionSummarizer,
+  ANTHROPIC_COMPACTION_BETA,
+  type AnthropicCompactionOptions,
+} from './llm/anthropic-compaction';
+export {
+  memoryCompactionMiddleware,
+  type MemoryCompactionDeps,
+} from './middleware/memory-compaction';
 
 export { InMemoryRunCheckpointStore, ThreadRunCheckpointStore } from './cogitator/run-checkpoints';
 export { PromptRegistry, promptKey } from './cogitator/prompts';
@@ -339,6 +352,10 @@ export {
   promptInjectionMiddleware,
   guardrailsMiddleware,
   compactionMiddleware,
+  clearToolOutputsMiddleware,
+  restoreClearedOutputs,
+  clearedOutputNote,
+  isClearedArguments,
   type TripwireDetails,
 } from './middleware/index';
 export type { PromptTarget, StartABTestOptions, PromptResolution } from './cogitator/prompts';

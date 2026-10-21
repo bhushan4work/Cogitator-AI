@@ -1,5 +1,21 @@
 # @cogitator-ai/rag
 
+## 0.8.3
+
+### Patch Changes
+
+- Updated dependencies [[`99ceb01`](https://github.com/cogitator-ai/Cogitator-AI/commit/99ceb0107f7403fba0a95e31fd2d10b743144a03)]:
+  - @cogitator-ai/types@0.53.0
+  - @cogitator-ai/memory@0.18.0
+
+## 0.8.2
+
+### Patch Changes
+
+- Updated dependencies [[`85d05b2`](https://github.com/cogitator-ai/Cogitator-AI/commit/85d05b20fe48738ee6ddcea83a043bb890b6d077)]:
+  - @cogitator-ai/types@0.52.0
+  - @cogitator-ai/memory@0.17.0
+
 ## 0.8.1
 
 ### Patch Changes

@@ -29,7 +29,7 @@ With `@cogitator-ai/core` you usually configure memory on the runtime (`new Cogi
 - **Token Counting** - Estimate token usage without tiktoken dependency
 - **Context Builder** - Token-aware context with `recent`, `relevant` (embedding-ranked) and `hybrid` strategies
 - **Scoped Semantic Memory** - Embeddings tagged with `metadata.agentId` / `metadata.threadId` never leak to other agents
-- **Sessions & Compaction** - `SessionManager` for channel sessions, `CompactionService` for summarizing long histories
+- **Sessions & Compaction** - `SessionManager` for channel sessions, `CompactionService` for summarizing long histories, hierarchically into grounded atoms that a compaction never loses while they are open
 - **Embedding Services** - OpenAI, Ollama and Google embedding integration
 - **Semantic Search** - Vector similarity search with pgvector
 - **Hybrid Search** - BM25 + Vector with Reciprocal Rank Fusion
@@ -407,16 +407,17 @@ interface ContextBuilderConfig {
   includeSemanticContext?: boolean;
   includeGraphContext?: boolean;
   graphContextOptions?: GraphContextOptions;
+  partitions?: Partial<Record<ContextPartition, ContextPartitionBudget>>; // merged over the defaults
 }
 ```
 
 Strategies:
 
-- `recent` - the newest messages that fit into the token budget, as one unbroken run: the window stops at the first message that does not fit, so a reply never appears without the message it answers
+- `recent` - the newest messages that fit into the token budget, as one unbroken run back from the newest: a tool result too large for the room left stays as a short note in its place and the run goes on past it, any other message that does not fit ends the run, so a reply never appears without the message it answers
 - `relevant` - messages ranked by embedding similarity to `currentInput` (requires `embeddingService`; falls back to `recent` without input), returned in chronological order
 - `hybrid` - always keeps the latest messages and fills the remaining budget with the most relevant older ones
 
-The system prompt is always kept and counted: history gets what it leaves of `maxTokens - reserveTokens`, and a prompt larger than that is still sent whole, with a note in `warnings`. Entries are counted by their text, tool call arguments and images rather than only by their saved `tokenCount`. `relevant` and `hybrid` score the newest 200 entries and embed each entry once per builder (vectors are cached by entry id). Give the builder a `messageIndex` to keep those vectors in an embedding store instead: each entry is embedded once, in the background, and older entries of the thread are found by a search of the store.
+The system prompt is always kept and counted: the rest of the context gets what it leaves of `maxTokens - reserveTokens`, and a prompt larger than that is still sent whole, with a note in `warnings`. Entries are counted by their text, tool call arguments and images rather than only by their saved `tokenCount`. `relevant` and `hybrid` score the newest 200 entries and embed each entry once per builder (vectors are cached by entry id). Give the builder a `messageIndex` to keep those vectors in an embedding store instead: each entry is embedded once, in the background, and older entries of the thread are found by a search of the store.
 
 ```typescript
 import { MessageIndex } from '@cogitator-ai/memory';
@@ -431,6 +432,42 @@ const builder = new ContextBuilder(
 ```
 
 Every built-in adapter reports its changes through `onChange(listener)` (`entry-added`, `entry-deleted`, `thread-cleared`, `thread-deleted`), which is what `attach` listens to, and every built-in embedding store reads vectors by source with `getBySources(ids)`. An adapter of your own reports its changes by extending `ChangeReportingMemoryAdapter` and passing each write's result through `reported()`. Vectors carry `metadata.index: 'messages'` and the thread's `agentId` and `userId`.
+
+### Partitions and Message Order
+
+A context is assembled by a `ContextAssembler` from partitions, each with a `share` of the budget it may take, and some `required`:
+
+| Partition   | Holds                                       | Default                  |
+| ----------- | ------------------------------------------- | ------------------------ |
+| `system`    | the system prompt                           | required, sent whole     |
+| `pinned`    | `pinned` texts of `build()`                 | required                 |
+| `index`     | the `index` text of `build()`               | required                 |
+| `summaries` | compaction summaries                        | required                 |
+| `brief`     | the `brief` text of `build()`               | required                 |
+| `facts`     | facts                                       | 15%                      |
+| `recall`    | semantic search results, then graph context | 35%                      |
+| `recent`    | history, selected by the strategy           | what the others leave    |
+| `final`     | `currentInput`, counted, not in `messages`  | required, always counted |
+
+Required partitions are fitted first. The others split what they leave by their shares, no more than each needs, and what the shares cannot place goes to those still short of room in fill order (`facts`, `recall`, `recent`). The shares of the partitions that are not required may add up to 1 at most, else the constructor throws. A text block that a kept block of a more lasting partition holds in full, word for word (a fact the system prompt states, a search result that repeats a fact), is left out as a `duplicate`.
+
+`messages` is ordered for the prompt cache: one system message (the system prompt, `pinned`, `index`), the compaction summary and the history, whose last message and the last message of the turn before it carry `cacheBreakpoint: true` (`markTurnEnds`), then a user message with what changes every turn (the brief, `Known facts:`, `Relevant context:` and graph context) in a `<memory_context>` block, which is also `memoryContext`. A caller that adds the input itself should send `memoryContext` in front of the input as one user message, as a Cogitator run does, which adds its `context` and the insights of reflection to the same block. `formatTurnContext(blocks)` builds that text from texts of your own, `extendTurnContext(text, block)` adds a block to it, and `withoutTurnContext(text)` gives the input back without it.
+
+```typescript
+const context = await builder.build({
+  threadId: 'thread_123',
+  agentId: 'agent-1',
+  systemPrompt: 'You are a helpful assistant.',
+  pinned: ['The user is on the Pro plan.'],
+  brief: 'Current date and time: Wednesday, October 21, 2026, 17:20.',
+  currentInput: 'What changed since yesterday?',
+});
+
+context.partitions; // tokens per partition, e.g. { system: 9, final: 8, pinned: 9, brief: 15, recent: 2400 }
+context.dropped.blocks; // [{ partition: 'recent', reason: 'budget', tokens: 310, sourceId: 'entry_17' }, ...]
+```
+
+Every left out block is in `dropped.blocks` with its `partition`, `reason` (`budget`, `duplicate`, `not-selected` for an entry the strategy did not pick, `oversized` for one larger than its partition could hold), `tokens` and `sourceId`. `ContextAssembler`, `DEFAULT_PARTITIONS` and `fitInOrder` are exported for contexts of your own.
 
 ### Basic Usage
 
@@ -456,7 +493,7 @@ const context = await builder.build({
 console.log(context.messages);
 console.log(context.tokenCount);
 console.log(context.truncated);
-console.log(context.dropped); // what was left out: entries, facts, semanticResults, graphNodes, tokenCount
+console.log(context.dropped); // what was left out: entries, facts, semanticResults, graphNodes, tokenCount, blocks
 ```
 
 ### Budget per Build
@@ -473,7 +510,7 @@ const context = await builder.build({
 });
 ```
 
-A build without a budget from either side throws. `reserveTokens` defaults to 10% of the budget used (at least 100).
+A build without a budget from either side throws. `reserveTokens` defaults to 10% of the budget used (at least 100), and `build()` takes its own `reserveTokens` too. A Cogitator run passes `reserveTokens: 0`, since its budget already leaves room for the answer, and the builder counts the input in the budget.
 
 ### With Facts and Semantic Search
 
@@ -512,11 +549,13 @@ Semantic context is scoped by embedding metadata: entries with `metadata.agentId
 
 ```typescript
 interface BuiltContext {
-  messages: Message[];
+  messages: Message[]; // system message, history (cache breakpoints at its end and the turn before), turn context
+  memoryContext?: string; // brief, facts, recall and graph context, sent with the input
+  partitions: Partial<Record<ContextPartition, number>>; // tokens per partition, the input included
   facts: Fact[];
   semanticResults: (Embedding & { score: number })[];
   graphContext?: GraphContext; // with includeGraphContext and a graph adapter
-  tokenCount: number;
+  tokenCount: number; // tokens of the context, without the input
   truncated: boolean; // history entries were left out
   dropped: DroppedContext; // what was left out of the context
   errors?: ContextBuildError[]; // parts that failed to load and were left out
@@ -526,6 +565,8 @@ interface BuiltContext {
     includedMessageCount: number;
     factsIncluded: number;
     semanticResultsIncluded: number;
+    graphNodesIncluded: number;
+    graphEdgesIncluded: number;
   };
 }
 
@@ -534,7 +575,8 @@ interface DroppedContext {
   facts: Fact[]; // facts visible to the user that did not fit
   semanticResults: (Embedding & { score: number })[]; // search results that did not fit
   graphNodes: GraphNode[]; // graph nodes cut from the graph context
-  tokenCount: number; // tokens of all of the above
+  tokenCount: number; // tokens of everything left out
+  blocks: DroppedBlock[]; // every block left out, with its partition and reason
 }
 
 interface ContextBuildError {
@@ -599,6 +641,32 @@ await sessions.compact(session.id, {
 A thread is compacted once its conversation holds `threshold` tokens or `messageThreshold` entries, whichever comes first (set at least one). On an adapter with branches (every built-in one) nothing is deleted: a `compaction` entry at the end of the active branch names the first kept entry and holds the summary, and `readCompactedHistory(memory, { threadId })` (or `compactedHistory(path)` on a path read with `types: HISTORY_ENTRY_TYPES`) gives the conversation as the summary, the kept entries and everything after them. `ContextBuilder` and the runtime read history this way, other branches and evidence keep the summarized entries, and `getEntries` still returns all of them. An adapter without `getPath` gets the summary dated just before the first kept entry and the summarized entries deleted.
 
 `compact()` requires the `compaction` option, without it use `CompactionService` directly. The summarizer (`SummarizeFn`) is called as `summarize(messages, options)`, where `options` is a `SummarizeOptions` `{ model?, prompt? }` filled from the `summaryModel` / `summaryPrompt` of the compaction config.
+
+### Hierarchical Compaction
+
+`strategy: 'hierarchical'` keeps the summary as a tree of what the conversation established, so it is never summarized again and loses nothing it still needs:
+
+```typescript
+await compaction.compact(session.id, {
+  strategy: 'hierarchical',
+  threshold: 60_000,
+  keepRecent: 0,
+  keepRecentTokens: 8000, // newest whole turns kept verbatim
+  chapterTokens: 4000, // default
+  chapterConcurrency: 1, // default
+  chaptersPerArc: 4, // default
+  arcsPerSaga: 4, // default
+});
+```
+
+- The entries new since the last compaction, up to the kept tail, are read in chapters of about `chapterTokens` tokens, each opening with the end of the one before, one at a time (`chapterConcurrency` reads more at once). For each the summarizer gets a numbered transcript and `options.prompt` asks for a JSON array of atoms and lists the items still open, which it may close (`summaryPrompt` is added to it), up to three tries.
+- A `CompactionAtom` has a `kind` (`fact`, `task`, `decision`, `constraint`, `error`, `file`, `thread`), a `status` (`open`, `closed`), a `text` and `evidence`. Every quote is checked against its entry, and an atom whose quotes do not all hold is not `verified`. Files tool calls worked on, failed tool calls and open task lines (`TODO:`, `- [ ]`) are taken from the entries with no model.
+- Chapters beyond `chaptersPerArc` fold into arcs and arcs beyond `arcsPerSaga` into the saga, with no model. An open task, decision, constraint, error or question is closed, or opened again once done, only by an atom whose evidence holds. The saga keeps every open item and the newest 200 facts and files, so the handoff stops growing.
+- The summary is written only when it still holds every open item of the one before, else `compact()` throws and the thread stays as it was.
+- The whole tree is one `compaction` entry, `event.levels` (`CompactionLevels`: `saga`, `arcs`, `chapters`, each a `CompactionNode` with `from`, `to` and `atoms`), and its message is the handoff: `Open tasks`, `Constraints`, `Decisions`, `Unresolved errors`, `Open questions`, `Files`, `Facts` and `Done`, in the same order every time so it stays in the prompt cache.
+- `keepRecentTokens` keeps the newest tokens in whole turns that open with a user message, so a tool call keeps its result. Without it the newest `keepRecent` entries stay.
+
+`chapterAtoms(window, config, { own, open })` returns the checked atoms of one window, told the `open` items it may close. `anthropicCompactionSummarizer({ model })` from `@cogitator-ai/core` is a `SummarizeFn` that has Anthropic's compaction on request write the answer, checked like any other. A Cogitator compacts a run's thread this way after the run with `memory.compaction`, see [Compaction After a Run](https://cogitator.app/docs/memory#compaction-after-a-run).
 
 ---
 
@@ -882,11 +950,17 @@ import type {
   ContextBuilderConfig,
   ContextStrategy,
   BuiltContext,
+  DroppedContext,
+  BuildContextOptions,
   MemoryConfig,
   CheckedEvidence,
 } from '@cogitator-ai/memory';
 
 import type {
+  ContextPartition,
+  ContextPartitionBudget,
+  DroppedReason,
+  DroppedBlock,
   MemoryEntryType,
   NewMemoryEntry,
   PathQueryOptions,

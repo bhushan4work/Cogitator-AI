@@ -6,6 +6,7 @@ import type {
   ModelCallRequest,
   ModelResponseEvent,
   ModelTurnEvent,
+  RunEndEvent,
   RunInputEvent,
   RunMiddleware,
   ToolCallHandler,
@@ -42,6 +43,25 @@ export class MiddlewarePipeline<TDeps = unknown> {
     for (const layer of this.layers) {
       if (!layer.beforeRun) continue;
       await claimed(layer.name, () => layer.beforeRun?.(event, context));
+    }
+  }
+
+  /**
+   * Runs every `afterRun` hook, in order, once a run finished. The run is done by then, so a hook
+   * that throws is logged and the next one still runs.
+   */
+  async afterRun(event: RunEndEvent, context: RunMiddlewareContext<TDeps>): Promise<void> {
+    for (const layer of this.layers) {
+      if (!layer.afterRun) continue;
+      try {
+        await layer.afterRun(event, context);
+      } catch (error) {
+        getLogger().warn('An afterRun hook failed after the run finished', {
+          middleware: layer.name,
+          runId: event.result.runId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   }
 
