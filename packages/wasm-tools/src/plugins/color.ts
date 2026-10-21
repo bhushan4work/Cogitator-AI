@@ -1,12 +1,7 @@
 interface ColorInput {
   operation?: 'convert' | 'contrast';
   color?: string;
-  color1?: string;
   color2?: string;
-  foreground?: string;
-  background?: string;
-  input?: string;
-  text?: string;
 }
 
 interface RgbColor {
@@ -28,23 +23,13 @@ interface TextAccessibilityResult {
   aaa: boolean;
 }
 
-interface LevelAccessibilityResult {
-  normal: boolean;
-  large: boolean;
-  normalText?: boolean;
-  largeText?: boolean;
-}
-
 interface ColorOutput {
   hex?: string;
   rgb?: RgbColor;
   hsl?: HslColor;
   ratio?: number;
-  contrastRatio?: number;
   normalText?: TextAccessibilityResult;
   largeText?: TextAccessibilityResult;
-  aa?: LevelAccessibilityResult;
-  aaa?: LevelAccessibilityResult;
   error?: string;
 }
 
@@ -389,7 +374,6 @@ function calculateContrast(c1: RgbColor, c2: RgbColor) {
 
   return {
     ratio,
-    contrastRatio: ratio,
     normalText: {
       aa: normalAA,
       aaa: normalAAA,
@@ -397,18 +381,6 @@ function calculateContrast(c1: RgbColor, c2: RgbColor) {
     largeText: {
       aa: largeAA,
       aaa: largeAAA,
-    },
-    aa: {
-      normal: normalAA,
-      large: largeAA,
-      normalText: normalAA,
-      largeText: largeAA,
-    },
-    aaa: {
-      normal: normalAAA,
-      large: largeAAA,
-      normalText: normalAAA,
-      largeText: largeAAA,
     },
   };
 }
@@ -429,7 +401,7 @@ export function color(): number {
 
     let operation = input.operation;
     if (!operation) {
-      if (input.color2 !== undefined || input.background !== undefined) {
+      if (input.color2 !== undefined) {
         operation = 'contrast';
       } else {
         operation = 'convert';
@@ -437,7 +409,7 @@ export function color(): number {
     }
 
     if (operation === 'convert') {
-      const colorStr = input.color ?? input.color1 ?? input.foreground ?? input.input ?? input.text;
+      const colorStr = input.color;
       if (typeof colorStr !== 'string') {
         throw new Error('color must be a string for convert operation');
       }
@@ -460,8 +432,8 @@ export function color(): number {
     }
 
     if (operation === 'contrast') {
-      const c1Str = input.color ?? input.color1 ?? input.foreground;
-      const c2Str = input.color2 ?? input.background;
+      const c1Str = input.color;
+      const c2Str = input.color2;
       if (typeof c1Str !== 'string' || typeof c2Str !== 'string') {
         throw new Error('contrast operation requires two colors (color and color2)');
       }

@@ -10,11 +10,8 @@ interface ConvertOutput {
 
 interface ContrastOutput {
   ratio?: number;
-  contrastRatio?: number;
   normalText?: { aa: boolean; aaa: boolean };
   largeText?: { aa: boolean; aaa: boolean };
-  aa?: { normal: boolean; large: boolean };
-  aaa?: { normal: boolean; large: boolean };
   error?: string;
 }
 
@@ -292,11 +289,11 @@ describe('color plugin: contrast', () => {
       color2: '#ffffff',
     });
     expect(res.code).toBe(0);
-    expect(res.output.ratio).toBe(21);
-    expect(res.output.normalText).toEqual({ aa: true, aaa: true });
-    expect(res.output.largeText).toEqual({ aa: true, aaa: true });
-    expect(res.output.aa).toMatchObject({ normal: true, large: true });
-    expect(res.output.aaa).toMatchObject({ normal: true, large: true });
+    expect(res.output).toEqual({
+      ratio: 21,
+      normalText: { aa: true, aaa: true },
+      largeText: { aa: true, aaa: true },
+    });
   });
 
   it('is symmetric regardless of color order', () => {
@@ -310,9 +307,7 @@ describe('color plugin: contrast', () => {
       color: '#ffffff',
       color2: '#000000',
     });
-    expect(res1.output.ratio).toBe(res2.output.ratio);
-    expect(res1.output.normalText).toEqual(res2.output.normalText);
-    expect(res1.output.largeText).toEqual(res2.output.largeText);
+    expect(res1.output).toEqual(res2.output);
   });
 
   it('calculates same-color contrast ratio = 1:1', () => {
@@ -322,9 +317,11 @@ describe('color plugin: contrast', () => {
       color2: '#ffffff',
     });
     expect(res.code).toBe(0);
-    expect(res.output.ratio).toBe(1);
-    expect(res.output.normalText).toEqual({ aa: false, aaa: false });
-    expect(res.output.largeText).toEqual({ aa: false, aaa: false });
+    expect(res.output).toEqual({
+      ratio: 1,
+      normalText: { aa: false, aaa: false },
+      largeText: { aa: false, aaa: false },
+    });
   });
 
   it('tests WCAG AA threshold with #767676 on white (ratio ~ 4.54:1)', () => {
@@ -334,11 +331,11 @@ describe('color plugin: contrast', () => {
       color2: '#ffffff',
     });
     expect(res.code).toBe(0);
-    expect(res.output.ratio).toBe(4.54);
-    // 4.54 >= 4.5 (AA normal: pass), < 7.0 (AAA normal: fail)
-    expect(res.output.normalText).toEqual({ aa: true, aaa: false });
-    // 4.54 >= 3.0 (AA large: pass), >= 4.5 (AAA large: pass)
-    expect(res.output.largeText).toEqual({ aa: true, aaa: true });
+    expect(res.output).toEqual({
+      ratio: 4.54,
+      normalText: { aa: true, aaa: false },
+      largeText: { aa: true, aaa: true },
+    });
   });
 
   it('compares unrounded contrast against AA threshold: #6363f8 on #ffffff rounds to 4.5 but fails normal-text AA', () => {
@@ -348,14 +345,12 @@ describe('color plugin: contrast', () => {
       color2: '#ffffff',
     });
     expect(res.code).toBe(0);
-    // Raw ratio is ~4.4961 which rounds to 4.5, but unrounded < 4.5 so normal-text AA fails
-    expect(res.output.ratio).toBe(4.5);
-    expect(res.output.contrastRatio).toBe(4.5);
-    expect(res.output.normalText?.aa).toBe(false);
-    expect(res.output.aa?.normal).toBe(false);
-    // Large-text AA requires 3.0, which passes
-    expect(res.output.largeText?.aa).toBe(true);
-    expect(res.output.aa?.large).toBe(true);
+    // Raw ratio is ~4.4961 which rounds to 4.5, but unrounded < 4.5 so normal-text AA fails and large-text AAA fails
+    expect(res.output).toEqual({
+      ratio: 4.5,
+      normalText: { aa: false, aaa: false },
+      largeText: { aa: true, aaa: false },
+    });
   });
 
   it('tests WCAG AAA threshold with #595959 on white (ratio ~ 7.00:1)', () => {
@@ -365,9 +360,11 @@ describe('color plugin: contrast', () => {
       color2: '#ffffff',
     });
     expect(res.code).toBe(0);
-    expect(res.output.ratio).toBe(7);
-    expect(res.output.normalText).toEqual({ aa: true, aaa: true });
-    expect(res.output.largeText).toEqual({ aa: true, aaa: true });
+    expect(res.output).toEqual({
+      ratio: 7,
+      normalText: { aa: true, aaa: true },
+      largeText: { aa: true, aaa: true },
+    });
   });
 
   it('tests large-text AA boundary with pure red on white (ratio ~ 4.00:1)', () => {
@@ -377,11 +374,12 @@ describe('color plugin: contrast', () => {
       color2: '#ffffff',
     });
     expect(res.code).toBe(0);
-    expect(res.output.ratio).toBe(4);
-    // 4.00 < 4.5 (normal AA fail, normal AAA fail)
-    expect(res.output.normalText).toEqual({ aa: false, aaa: false });
-    // 4.00 >= 3.0 (large AA pass), < 4.5 (large AAA fail)
-    expect(res.output.largeText).toEqual({ aa: true, aaa: false });
+    // 4.00 < 4.5 (normal AA fail, normal AAA fail), >= 3.0 (large AA pass), < 4.5 (large AAA fail)
+    expect(res.output).toEqual({
+      ratio: 4,
+      normalText: { aa: false, aaa: false },
+      largeText: { aa: true, aaa: false },
+    });
   });
 
   it('accepts contrast between different color formats', () => {
@@ -391,17 +389,44 @@ describe('color plugin: contrast', () => {
       color2: 'hsl(0, 0%, 100%)',
     });
     expect(res.code).toBe(0);
-    expect(res.output.ratio).toBe(21);
+    expect(res.output).toEqual({
+      ratio: 21,
+      normalText: { aa: true, aaa: true },
+      largeText: { aa: true, aaa: true },
+    });
   });
 
-  it('supports foreground and background aliases', () => {
+  it('returns strictly the documented shape { ratio, normalText, largeText }', () => {
+    const res = runPlugin<ContrastOutput>('color', 'color', {
+      operation: 'contrast',
+      color: '#000000',
+      color2: '#ffffff',
+    });
+    expect(res.code).toBe(0);
+    expect(Object.keys(res.output).sort()).toEqual(['largeText', 'normalText', 'ratio']);
+    expect(res.output).not.toHaveProperty('contrastRatio');
+    expect(res.output).not.toHaveProperty('aa');
+    expect(res.output).not.toHaveProperty('aaa');
+  });
+
+  it('rejects unsupported foreground and background aliases', () => {
     const res = runPlugin<ContrastOutput>('color', 'color', {
       operation: 'contrast',
       foreground: '#000',
       background: '#fff',
     });
-    expect(res.code).toBe(0);
-    expect(res.output.ratio).toBe(21);
+    expect(res.code).toBe(1);
+    expect(res.output.error).toMatch(/two colors/i);
+  });
+
+  it('rejects unsupported color1 alias without color', () => {
+    const res = runPlugin<ContrastOutput>('color', 'color', {
+      operation: 'contrast',
+      color1: '#000',
+      color2: '#fff',
+    });
+    expect(res.code).toBe(1);
+    expect(res.output.error).toMatch(/two colors/i);
   });
 
   it('returns error if either color is invalid', () => {

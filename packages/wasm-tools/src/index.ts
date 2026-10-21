@@ -478,18 +478,9 @@ export const colorToolSchema = z.object({
     .string()
     .optional()
     .describe(
-      'Color string for convert, or first/foreground color for contrast (#rgb, #rrggbb, #rrggbbaa, rgb, rgba, hsl, hsla)'
+      'Color string for convert, or first color for contrast (#rgb, #rrggbb, #rrggbbaa, rgb, rgba, hsl, hsla)'
     ),
-  color2: z.string().optional().describe('Second/background color for contrast calculation'),
-  color1: z.string().optional().describe('Alias for color (first color in contrast calculation)'),
-  foreground: z
-    .string()
-    .optional()
-    .describe('Alias for color (foreground color in contrast calculation)'),
-  background: z
-    .string()
-    .optional()
-    .describe('Alias for color2 (background color in contrast calculation)'),
+  color2: z.string().optional().describe('Second color for contrast calculation'),
 });
 
 export function createSlugTool(options?: { timeout?: number }): Tool<SlugToolInput, unknown> {
