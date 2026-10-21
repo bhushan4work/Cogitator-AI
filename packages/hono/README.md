@@ -116,11 +116,11 @@ Creates a Hono sub-application with all Cogitator endpoints.
 
 ### Tools & Health
 
-| Method | Path      | Description     |
-| ------ | --------- | --------------- |
-| `GET`  | `/tools`  | List all tools  |
-| `GET`  | `/health` | Health check    |
-| `GET`  | `/ready`  | Readiness check |
+| Method | Path      | Description                          |
+| ------ | --------- | ------------------------------------ |
+| `GET`  | `/tools`  | List all tools                       |
+| `GET`  | `/health` | Health check                         |
+| `GET`  | `/ready`  | Readiness probe ({ status, checks }) |
 
 ### Docs (`enableSwagger: true`)
 

@@ -104,7 +104,7 @@ Run/stream body: `{ input: string; context?: object; threadId?: string; timeout?
 ```
 GET    /api/tools                     - List all tools
 GET    /api/health                    - Health check ({ status, uptime, timestamp })
-GET    /api/ready                     - Readiness check
+GET    /api/ready                     - Readiness probe ({ status, checks })
 GET    /api/docs                      - Swagger UI
 GET    /api/openapi.json              - OpenAPI spec
 ```

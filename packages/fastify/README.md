@@ -101,7 +101,7 @@ GET    /api/swarms/:name/blackboard   - Get configured blackboard sections
 ```
 GET    /api/tools                     - List all tools
 GET    /api/health                    - Health check ({ status, uptime, timestamp })
-GET    /api/ready                     - Readiness check
+GET    /api/ready                     - Readiness probe ({ status, checks })
 GET    /api/docs                      - Swagger UI (enableSwagger)
 GET    /api/docs/json                 - OpenAPI spec (enableSwagger)
 ```

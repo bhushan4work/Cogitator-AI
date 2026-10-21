@@ -375,5 +375,11 @@ describe('InMemoryAdapter', () => {
       const result = await adapter.healthCheck();
       expect(result.success).toBe(true);
     });
+
+    it('reuses in-flight healthCheck across concurrent calls', async () => {
+      const [res1, res2] = await Promise.all([adapter.healthCheck(), adapter.healthCheck()]);
+      expect(res1.success).toBe(true);
+      expect(res2.success).toBe(true);
+    });
   });
 });

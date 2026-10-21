@@ -62,7 +62,7 @@ interface MongoCollection<T extends Document> extends Pick<
 
 interface MongoDatabase {
   collection<T extends Document>(name: string): MongoCollection<T>;
-  command?(command: Document): Promise<Document>;
+  command(command: Document): Promise<Document>;
 }
 
 interface MongoClient extends Pick<DriverClient, 'connect' | 'close'> {
@@ -389,12 +389,10 @@ export class MongoDBAdapter extends BranchingMemoryAdapter {
     return this.success(undefined);
   }
 
-  async healthCheck(): Promise<MemoryResult<void>> {
+  protected override async performHealthCheck(): Promise<MemoryResult<void>> {
     if (!this.db) return this.failure('Not connected');
     try {
-      if (typeof this.db.command === 'function') {
-        await this.db.command({ ping: 1 });
-      }
+      await this.db.command({ ping: 1 });
       return this.success(undefined);
     } catch (err) {
       return this.failure(err instanceof Error ? err.message : String(err));

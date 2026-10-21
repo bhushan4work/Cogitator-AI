@@ -20,4 +20,23 @@ describe('Cogitator.getMemory', () => {
     expect(await cog.getMemory()).toBeUndefined();
     await cog.close();
   });
+
+  it('reports memoryConfigured without exposing private config', async () => {
+    const unconfigured = new Cogitator();
+    expect(unconfigured.memoryConfigured).toBe(false);
+
+    const configured = new Cogitator({
+      memory: { adapter: 'memory' },
+    });
+    expect(configured.memoryConfigured).toBe(true);
+
+    // Ensure config is not exposed publicly
+    expect('config' in configured).toBe(true); // JS property exists internally
+    // @ts-expect-error config is private
+    const _privateConfig = configured.config;
+    void _privateConfig;
+
+    await unconfigured.close();
+    await configured.close();
+  });
 });

@@ -1075,11 +1075,11 @@ describe('PostgresAdapter', () => {
   });
 
   describe('healthCheck', () => {
-    it('returns success on connected adapter and queries SELECT 1', async () => {
+    it('returns success on connected adapter and queries SELECT 1 with 3s driver timeout', async () => {
       mockPool.query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });
       const result = await adapter.healthCheck();
       expect(result.success).toBe(true);
-      expect(mockPool.query).toHaveBeenCalledWith('SELECT 1');
+      expect(mockPool.query).toHaveBeenCalledWith({ text: 'SELECT 1', timeout: 3000 });
     });
 
     it('returns failure when not connected', async () => {
@@ -1094,13 +1094,40 @@ describe('PostgresAdapter', () => {
       }
     });
 
-    it('returns failure when query throws', async () => {
-      mockPool.query.mockRejectedValueOnce(new Error('connection terminated unexpectedly'));
+    it('returns failure when driver query times out or throws', async () => {
+      mockPool.query.mockRejectedValueOnce(new Error('Query read timeout'));
       const result = await adapter.healthCheck();
       expect(result.success).toBe(false);
       if (!result.success) {
-        expect(result.error).toContain('connection terminated unexpectedly');
+        expect(result.error).toContain('Query read timeout');
       }
+    });
+
+    it('reuses in-flight check promise across concurrent calls and resets after settlement', async () => {
+      mockPool.query.mockClear();
+      let resolveQuery!: (val: { rows: Record<string, unknown>[] }) => void;
+      const delayedQuery = new Promise<{ rows: Record<string, unknown>[] }>((res) => {
+        resolveQuery = res;
+      });
+      mockPool.query.mockReturnValueOnce(delayedQuery);
+
+      const check1 = adapter.healthCheck();
+      const check2 = adapter.healthCheck();
+
+      // Only 1 driver query should have been dispatched
+      expect(mockPool.query).toHaveBeenCalledTimes(1);
+
+      resolveQuery({ rows: [{ '?column?': 1 }] });
+      const [res1, res2] = await Promise.all([check1, check2]);
+
+      expect(res1.success).toBe(true);
+      expect(res2.success).toBe(true);
+
+      // After settling, a new check runs a new driver query
+      mockPool.query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });
+      const check3 = await adapter.healthCheck();
+      expect(check3.success).toBe(true);
+      expect(mockPool.query).toHaveBeenCalledTimes(2);
     });
   });
 });

@@ -117,11 +117,11 @@ WebSocket support is attached to the HTTP server with [`setupWebSocket`](#websoc
 
 ### Tools & Health
 
-| Method | Path      | Description     |
-| ------ | --------- | --------------- |
-| `GET`  | `/tools`  | List all tools  |
-| `GET`  | `/health` | Health check    |
-| `GET`  | `/ready`  | Readiness check |
+| Method | Path      | Description                          |
+| ------ | --------- | ------------------------------------ |
+| `GET`  | `/tools`  | List all tools                       |
+| `GET`  | `/health` | Health check                         |
+| `GET`  | `/ready`  | Readiness probe ({ status, checks }) |
 
 ### Docs (`enableSwagger: true`)
 

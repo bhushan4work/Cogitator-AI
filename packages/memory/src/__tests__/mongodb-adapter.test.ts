@@ -1381,5 +1381,30 @@ describe('MongoDBAdapter', () => {
         expect(result.error).toContain('MongoNetworkError');
       }
     });
+
+    it('reuses in-flight healthCheck across concurrent calls', async () => {
+      mockDb.command.mockClear();
+      let resolveCommand!: (val: Document) => void;
+      const delayedCommand = new Promise<Document>((res) => {
+        resolveCommand = res;
+      });
+      mockDb.command.mockReturnValueOnce(delayedCommand);
+
+      const check1 = adapter.healthCheck();
+      const check2 = adapter.healthCheck();
+
+      expect(mockDb.command).toHaveBeenCalledTimes(1);
+
+      resolveCommand({ ok: 1 });
+      const [res1, res2] = await Promise.all([check1, check2]);
+
+      expect(res1.success).toBe(true);
+      expect(res2.success).toBe(true);
+
+      mockDb.command.mockResolvedValueOnce({ ok: 1 });
+      const check3 = await adapter.healthCheck();
+      expect(check3.success).toBe(true);
+      expect(mockDb.command).toHaveBeenCalledTimes(2);
+    });
   });
 });

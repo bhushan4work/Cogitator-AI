@@ -40,7 +40,7 @@ describe('Hono readiness check (/ready)', () => {
   it('returns 200 with checks: {} when memory is unconfigured', async () => {
     const cogitator = {
       getMemory: vi.fn().mockResolvedValue(undefined),
-      config: {},
+      memoryConfigured: false,
     };
 
     const app = createApp(cogitator);
@@ -111,7 +111,7 @@ describe('Hono readiness check (/ready)', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const cogitator = {
       getMemory: vi.fn().mockResolvedValue(undefined),
-      config: { memory: { adapter: 'postgres' } },
+      memoryConfigured: true,
     };
 
     const app = createApp(cogitator);

@@ -138,7 +138,12 @@ CMD ["node","dist/index.js"]
 
 The builder has the toolchain native dependencies compile with and keeps the package store in a BuildKit cache, the runtime stage keeps only production dependencies, runs as the unprivileged `node` user, and `tini` forwards signals and reaps child processes such as MCP servers.
 
-The server adapters expose `GET /health` and `GET /ready` under their base path (`/cogitator` by default), so point the health check at whatever path you mounted them on. Probe `127.0.0.1` rather than `localhost`: in Alpine images `localhost` resolves to the IPv6 `::1` first, which a server listening on `0.0.0.0` refuses.
+The server adapters expose `GET /health` and `GET /ready` under their base path (`/cogitator` by default):
+
+- `/health` is a liveness probe: it verifies the HTTP process is running and responding without checking external backends. Use it for container orchestrator restarts, such as Docker's `HEALTHCHECK`.
+- `/ready` is a readiness probe: it verifies connectivity to configured dependencies (such as the memory adapter) and returns HTTP 200 when ready, or HTTP 503 when a dependency check fails or times out. Use it for load balancers and traffic routing so unready instances do not receive requests.
+
+Probe `127.0.0.1` rather than `localhost`: in Alpine images `localhost` resolves to the IPv6 `::1` first, which a server listening on `0.0.0.0` refuses.
 
 ## GPU and CPU-Only Mode
 

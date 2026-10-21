@@ -235,8 +235,15 @@ function isEmptyAnswer(response: ChatResponse): boolean {
  * ```
  */
 export class Cogitator implements ToolInvoker {
-  readonly config: CogitatorConfig;
+  private config: CogitatorConfig;
   private observers: RunObserver[];
+
+  /**
+   * Whether a memory adapter was configured for this Cogitator instance.
+   */
+  get memoryConfigured(): boolean {
+    return Boolean(this.config.memory?.adapter);
+  }
   /** Prices model calls whose provider reports no cost: by `llm.pricing`, then by the model registry. */
   readonly pricer: CallPricer;
   private backends = new Map<string, LLMBackend>();

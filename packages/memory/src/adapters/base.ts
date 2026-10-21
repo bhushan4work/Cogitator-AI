@@ -56,6 +56,36 @@ export abstract class BaseMemoryAdapter implements MemoryAdapter {
 
   abstract disconnect(): Promise<MemoryResult<void>>;
 
+  private healthCheckPromise: Promise<MemoryResult<void>> | null = null;
+
+  /**
+   * Checks connectivity to the underlying store with a lightweight, non-mutating operation.
+   *
+   * Ensures at most one health check is in flight per adapter, reusing its pending promise
+   * across subsequent probes until it settles, including after a probe times out.
+   */
+  async healthCheck(): Promise<MemoryResult<void>> {
+    if (this.healthCheckPromise) {
+      return this.healthCheckPromise;
+    }
+    const check = (async () => {
+      try {
+        return await this.performHealthCheck();
+      } finally {
+        this.healthCheckPromise = null;
+      }
+    })();
+    this.healthCheckPromise = check;
+    return check;
+  }
+
+  /**
+   * Override in subclasses to perform the actual connectivity check.
+   */
+  protected async performHealthCheck(): Promise<MemoryResult<void>> {
+    return this.success(undefined);
+  }
+
   private lastEntryTimes = new Map<string, number>();
 
   protected generateId(prefix: string): string {

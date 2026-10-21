@@ -1081,5 +1081,30 @@ describe('RedisAdapter listThreads', () => {
         expect(result.error).toContain('Connection reset');
       }
     });
+
+    it('reuses in-flight healthCheck across concurrent calls', async () => {
+      mockRedisClient.ping.mockClear();
+      let resolvePing!: (val: string) => void;
+      const delayedPing = new Promise<string>((res) => {
+        resolvePing = res;
+      });
+      mockRedisClient.ping.mockReturnValueOnce(delayedPing);
+
+      const check1 = adapter.healthCheck();
+      const check2 = adapter.healthCheck();
+
+      expect(mockRedisClient.ping).toHaveBeenCalledTimes(1);
+
+      resolvePing('PONG');
+      const [res1, res2] = await Promise.all([check1, check2]);
+
+      expect(res1.success).toBe(true);
+      expect(res2.success).toBe(true);
+
+      mockRedisClient.ping.mockResolvedValueOnce('PONG');
+      const check3 = await adapter.healthCheck();
+      expect(check3.success).toBe(true);
+      expect(mockRedisClient.ping).toHaveBeenCalledTimes(2);
+    });
   });
 });

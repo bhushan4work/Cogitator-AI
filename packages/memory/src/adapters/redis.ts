@@ -593,7 +593,7 @@ export class RedisAdapter extends BranchingMemoryAdapter {
     return this.success(undefined);
   }
 
-  async healthCheck(): Promise<MemoryResult<void>> {
+  protected override async performHealthCheck(): Promise<MemoryResult<void>> {
     if (!this.client) return this.failure('Not connected');
     return this.run(async (client) => {
       await client.ping();

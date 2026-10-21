@@ -76,7 +76,7 @@ describe('checkReadiness', () => {
   it('returns 200 with empty checks when memory is unconfigured', async () => {
     const target = {
       getMemory: vi.fn().mockResolvedValue(undefined),
-      config: {},
+      memoryConfigured: false,
     };
 
     const result = await checkReadiness(target);
@@ -101,11 +101,7 @@ describe('checkReadiness', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const target = {
       getMemory: vi.fn().mockResolvedValue(undefined),
-      config: {
-        memory: {
-          adapter: 'postgres',
-        },
-      },
+      memoryConfigured: true,
     };
 
     const result = await checkReadiness(target);
@@ -121,11 +117,7 @@ describe('checkReadiness', () => {
   it('returns 503 when memory is configured but target has no getMemory function', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const target = {
-      config: {
-        memory: {
-          adapter: 'mongodb',
-        },
-      },
+      memoryConfigured: true,
     };
 
     const result = await checkReadiness(target);
@@ -178,7 +170,7 @@ describe('checkReadiness', () => {
         .mockRejectedValue(
           new Error('Driver init failed: dial tcp 192.168.1.100:27017: connect: connection refused')
         ),
-      config: { memory: { adapter: 'mongodb' } },
+      memoryConfigured: true,
     };
 
     const result = await checkReadiness(target);
@@ -226,7 +218,7 @@ describe('checkReadiness', () => {
       getMemory: vi
         .fn()
         .mockImplementation(() => new Promise((resolve) => setTimeout(resolve, 500))),
-      config: { memory: { adapter: 'postgres' } },
+      memoryConfigured: true,
     };
 
     const result = await checkReadiness(target, { timeoutMs: 50 });
@@ -239,21 +231,29 @@ describe('checkReadiness', () => {
     errorSpy.mockRestore();
   });
 
-  it('accepts wrapped context objects like { runtime: cogitator }', async () => {
+  it('enforces a single overall deadline across getMemory and healthCheck combined', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const memory = {
-      provider: 'memory',
-      healthCheck: vi.fn().mockResolvedValue({ success: true, data: undefined }),
+      provider: 'postgres',
+      healthCheck: vi
+        .fn()
+        .mockImplementation(() => new Promise((resolve) => setTimeout(resolve, 40))),
     } as unknown as MemoryAdapter;
 
-    const runtime = {
-      getMemory: vi.fn().mockResolvedValue(memory),
+    const target = {
+      // getMemory takes 30ms, healthCheck takes 40ms. Each is < 50ms, but combined (70ms) exceeds 50ms.
+      getMemory: vi
+        .fn()
+        .mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve(memory), 30))),
     };
 
-    const result = await checkReadiness({ runtime });
-    expect(result.statusCode).toBe(200);
+    const result = await checkReadiness(target, { timeoutMs: 50 });
+    expect(result.statusCode).toBe(503);
     expect(result.body).toEqual({
-      status: 'ok',
-      checks: { memory: 'ok' },
+      status: 'error',
+      checks: { memory: 'error' },
     });
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });

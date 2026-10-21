@@ -242,7 +242,7 @@ export class SQLiteAdapter extends BranchingMemoryAdapter {
     return this.success(undefined);
   }
 
-  async healthCheck(): Promise<MemoryResult<void>> {
+  protected override async performHealthCheck(): Promise<MemoryResult<void>> {
     if (!this.db) return this.failure('Not connected');
     try {
       this.db.prepare('SELECT 1').get();

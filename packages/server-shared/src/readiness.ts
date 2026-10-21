@@ -15,12 +15,7 @@ export interface ReadinessResult {
 
 export interface ReadinessTarget {
   getMemory?: () => Promise<MemoryAdapter | undefined | null>;
-  config?: {
-    memory?: {
-      adapter?: string;
-    };
-  };
-  runtime?: ReadinessTarget;
+  readonly memoryConfigured?: boolean;
 }
 
 export interface ReadinessOptions {
@@ -45,9 +40,10 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 /**
  * Runs readiness checks for the server, verifying connectivity to configured dependencies.
  *
- * Enforces a 3-second timeout per check. Adapters without healthCheck() report 'unchecked'
- * and do not fail readiness. Unconfigured memory is not treated as a connection failure.
- * Returns HTTP 200 when no checks fail, and 503 when any check fails.
+ * Enforces a single 3-second deadline for the entire memory readiness check. Adapters without
+ * healthCheck() report 'unchecked' and do not fail readiness. Unconfigured memory is not
+ * treated as a connection failure. Returns HTTP 200 when no checks fail, and 503 when any
+ * check fails.
  */
 export async function checkReadiness(
   target?: ReadinessTarget | null,
@@ -56,43 +52,34 @@ export async function checkReadiness(
   const timeoutMs = options.timeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
   const checks: Record<string, ReadinessCheckStatus> = {};
 
-  const cogitator =
-    target && 'runtime' in target && (target as { runtime?: ReadinessTarget }).runtime
-      ? (target as { runtime: ReadinessTarget }).runtime
-      : target;
-
-  const configuredAdapter = cogitator?.config?.memory?.adapter ?? target?.config?.memory?.adapter;
-
-  if (cogitator?.getMemory) {
+  if (target?.getMemory) {
     try {
-      const memory = await withTimeout(
-        cogitator.getMemory(),
+      await withTimeout(
+        (async () => {
+          const memory = await target.getMemory!();
+          if (!memory) {
+            if (target.memoryConfigured) {
+              console.error('[readiness] Configured memory adapter failed to connect');
+              checks.memory = 'error';
+            }
+          } else if (typeof memory.healthCheck === 'function') {
+            const result = await memory.healthCheck();
+            if (result?.success) {
+              checks.memory = 'ok';
+            } else {
+              console.error(
+                '[readiness] Memory healthCheck failed:',
+                result?.error ?? 'Unknown error'
+              );
+              checks.memory = 'error';
+            }
+          } else {
+            checks.memory = 'unchecked';
+          }
+        })(),
         timeoutMs,
-        'Memory initialization timed out'
+        'Memory readiness check timed out'
       );
-
-      if (!memory) {
-        if (configuredAdapter) {
-          console.error(
-            `[readiness] Configured memory adapter "${configuredAdapter}" failed to connect`
-          );
-          checks.memory = 'error';
-        }
-      } else if (typeof memory.healthCheck === 'function') {
-        const result = await withTimeout(
-          memory.healthCheck(),
-          timeoutMs,
-          'Memory healthCheck timed out'
-        );
-        if (result?.success) {
-          checks.memory = 'ok';
-        } else {
-          console.error('[readiness] Memory healthCheck failed:', result?.error ?? 'Unknown error');
-          checks.memory = 'error';
-        }
-      } else {
-        checks.memory = 'unchecked';
-      }
     } catch (err) {
       console.error(
         '[readiness] Memory check error:',
@@ -100,10 +87,8 @@ export async function checkReadiness(
       );
       checks.memory = 'error';
     }
-  } else if (configuredAdapter) {
-    console.error(
-      `[readiness] Configured memory adapter "${configuredAdapter}" is not initialized`
-    );
+  } else if (target?.memoryConfigured) {
+    console.error('[readiness] Configured memory adapter is not initialized');
     checks.memory = 'error';
   }
 
