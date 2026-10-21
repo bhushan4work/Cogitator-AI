@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { pluginCall } from '../helpers/run-plugin';
+import { pluginCall, runPlugin } from '../helpers/run-plugin';
 
 const markdown = pluginCall<{ html: string; error?: string }>('markdown', 'markdown');
 const regex = pluginCall<{ result: unknown; matchCount?: number; error?: string }>(
@@ -18,6 +18,10 @@ const diff = pluginCall<{ diff: string; additions: number; deletions: number; er
   'diff'
 );
 const slug = pluginCall<{ slug: string; error?: string }>('slug', 'slug');
+const textcase = pluginCall<{ result: string; words: string[]; error?: string }>(
+  'textcase',
+  'textcase'
+);
 const validate = pluginCall<{ valid: boolean; normalized?: string; error?: string }>(
   'validation',
   'validate'
@@ -280,5 +284,174 @@ describe('validation plugin', () => {
     const out = validate({ value, type: 'url' });
     expect(out.valid).toBe(valid);
     expect(out.normalized).toBe(normalized);
+  });
+});
+
+describe('textcase plugin', () => {
+  it('converts to all seven target formats', () => {
+    const text = 'parseHTTPResponse';
+    expect(textcase({ text, to: 'camel' })).toEqual({
+      result: 'parseHttpResponse',
+      words: ['parse', 'http', 'response'],
+    });
+    expect(textcase({ text, to: 'pascal' })).toEqual({
+      result: 'ParseHttpResponse',
+      words: ['parse', 'http', 'response'],
+    });
+    expect(textcase({ text, to: 'snake' })).toEqual({
+      result: 'parse_http_response',
+      words: ['parse', 'http', 'response'],
+    });
+    expect(textcase({ text, to: 'kebab' })).toEqual({
+      result: 'parse-http-response',
+      words: ['parse', 'http', 'response'],
+    });
+    expect(textcase({ text, to: 'constant' })).toEqual({
+      result: 'PARSE_HTTP_RESPONSE',
+      words: ['parse', 'http', 'response'],
+    });
+    expect(textcase({ text, to: 'title' })).toEqual({
+      result: 'Parse Http Response',
+      words: ['parse', 'http', 'response'],
+    });
+    expect(textcase({ text, to: 'sentence' })).toEqual({
+      result: 'Parse http response',
+      words: ['parse', 'http', 'response'],
+    });
+  });
+
+  it('splits acronyms correctly in parseHTTPResponse and XMLHttpRequest', () => {
+    expect(textcase({ text: 'parseHTTPResponse', to: 'snake' }).words).toEqual([
+      'parse',
+      'http',
+      'response',
+    ]);
+    expect(textcase({ text: 'XMLHttpRequest', to: 'kebab' })).toEqual({
+      result: 'xml-http-request',
+      words: ['xml', 'http', 'request'],
+    });
+    expect(textcase({ text: 'getJSONFromURL', to: 'camel' })).toEqual({
+      result: 'getJsonFromUrl',
+      words: ['get', 'json', 'from', 'url'],
+    });
+  });
+
+  it('splits camelcase and pascalcase boundaries', () => {
+    expect(textcase({ text: 'camelCaseString', to: 'snake' }).words).toEqual([
+      'camel',
+      'case',
+      'string',
+    ]);
+    expect(textcase({ text: 'PascalCaseIdentifier', to: 'kebab' }).words).toEqual([
+      'pascal',
+      'case',
+      'identifier',
+    ]);
+  });
+
+  it('applies the digit rule: digit runs are separate tokens at letter-digit and digit-letter boundaries', () => {
+    expect(textcase({ text: 'version2Beta', to: 'camel' })).toEqual({
+      result: 'version2Beta',
+      words: ['version', '2', 'beta'],
+    });
+    expect(textcase({ text: 'utf8', to: 'kebab' })).toEqual({
+      result: 'utf-8',
+      words: ['utf', '8'],
+    });
+    expect(textcase({ text: '8utf', to: 'snake' })).toEqual({
+      result: '8_utf',
+      words: ['8', 'utf'],
+    });
+    expect(textcase({ text: 'v2024Release', to: 'snake' })).toEqual({
+      result: 'v_2024_release',
+      words: ['v', '2024', 'release'],
+    });
+    expect(textcase({ text: 'step123to456', to: 'constant' })).toEqual({
+      result: 'STEP_123_TO_456',
+      words: ['step', '123', 'to', '456'],
+    });
+  });
+
+  it('handles whitespace, _, -, ., / separators including repeated and leading/trailing separators', () => {
+    expect(textcase({ text: 'hello world', to: 'snake' }).words).toEqual(['hello', 'world']);
+    expect(textcase({ text: 'hello_world-foo.bar/baz', to: 'kebab' })).toEqual({
+      result: 'hello-world-foo-bar-baz',
+      words: ['hello', 'world', 'foo', 'bar', 'baz'],
+    });
+    expect(
+      textcase({ text: '  ---___...///hello---world___foo...bar///baz///...___---  ', to: 'camel' })
+    ).toEqual({
+      result: 'helloWorldFooBarBaz',
+      words: ['hello', 'world', 'foo', 'bar', 'baz'],
+    });
+    expect(
+      textcase({
+        text: '\t\n  _.-/parseHTTPResponse--XMLHttpRequest_version2Beta.utf8//  ',
+        to: 'snake',
+      })
+    ).toEqual({
+      result: 'parse_http_response_xml_http_request_version_2_beta_utf_8',
+      words: [
+        'parse',
+        'http',
+        'response',
+        'xml',
+        'http',
+        'request',
+        'version',
+        '2',
+        'beta',
+        'utf',
+        '8',
+      ],
+    });
+  });
+
+  it('handles empty input and separator-only input without errors', () => {
+    for (const to of [
+      'camel',
+      'pascal',
+      'snake',
+      'kebab',
+      'constant',
+      'title',
+      'sentence',
+    ] as const) {
+      expect(textcase({ text: '', to })).toEqual({
+        result: '',
+        words: [],
+      });
+      expect(textcase({ text: '   ---___...///   ', to })).toEqual({
+        result: '',
+        words: [],
+      });
+    }
+    const emptyRun = runPlugin('textcase', 'textcase', { text: '', to: 'snake' });
+    expect(emptyRun.code).toBe(0);
+    expect(emptyRun.output).toEqual({ result: '', words: [] });
+  });
+
+  it('returns an error and non-zero exit code on invalid target case or input', () => {
+    const invalidTarget = runPlugin<{ error?: string }>('textcase', 'textcase', {
+      text: 'hello',
+      to: 'screaming_snake',
+    });
+    expect(invalidTarget.code).toBe(1);
+    expect(invalidTarget.output.error).toContain('Invalid target case');
+
+    const nonStringText = runPlugin<{ error?: string }>('textcase', 'textcase', {
+      text: 12345,
+      to: 'camel',
+    });
+    expect(nonStringText.code).toBe(1);
+    expect(nonStringText.output.error).toContain('text must be a string');
+
+    const nonObject = runPlugin<{ error?: string }>('textcase', 'textcase', 'not-json-object');
+    expect(nonObject.code).toBe(1);
+    expect(nonObject.output.error).toBeDefined();
+
+    const emptyObject = runPlugin<{ error?: string }>('textcase', 'textcase', {});
+    expect(emptyObject.code).toBe(1);
+    expect(emptyObject.output.error).toContain('text must be a string');
   });
 });

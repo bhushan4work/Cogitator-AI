@@ -344,6 +344,13 @@ export const slugToolSchema = z.object({
   maxLength: z.number().int().min(1).optional().describe('Maximum length of the slug'),
 });
 
+export const textcaseToolSchema = z.object({
+  text: z.string().describe('Text to convert between naming conventions'),
+  to: z
+    .enum(['camel', 'pascal', 'snake', 'kebab', 'constant', 'title', 'sentence'])
+    .describe('Target casing format'),
+});
+
 export const unitsToolSchema = z.object({
   value: z.number().describe('Numeric value to convert'),
   from: z
@@ -473,6 +480,23 @@ export function createSlugTool(options?: { timeout?: number }): Tool<SlugToolInp
     parameters: slugToolSchema,
     category: 'utility',
     tags: ['slug', 'url', 'text'],
+    timeout: options?.timeout ?? 5000,
+  });
+}
+
+export function createTextcaseTool(options?: {
+  timeout?: number;
+}): Tool<TextcaseToolInput, unknown> {
+  return defineWasmTool({
+    name: 'textcase',
+    description:
+      'Convert text between camel, pascal, snake, kebab, constant, title, and sentence cases',
+    wasmModule: getWasmPath('textcase'),
+    wasi: true,
+    wasmFunction: 'textcase',
+    parameters: textcaseToolSchema,
+    category: 'utility',
+    tags: ['textcase', 'casing', 'string', 'text'],
     timeout: options?.timeout ?? 5000,
   });
 }
@@ -627,6 +651,7 @@ export function createSigningTool(options?: { timeout?: number }): Tool<SigningT
 }
 
 export type SlugToolInput = z.infer<typeof slugToolSchema>;
+export type TextcaseToolInput = z.infer<typeof textcaseToolSchema>;
 export type UnitsToolInput = z.infer<typeof unitsToolSchema>;
 export type ValidationToolInput = z.infer<typeof validationToolSchema>;
 export type DiffToolInput = z.infer<typeof diffToolSchema>;
