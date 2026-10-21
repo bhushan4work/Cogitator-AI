@@ -1,5 +1,13 @@
 # @cogitator-ai/voice
 
+## 0.7.13
+
+### Patch Changes
+
+- Updated dependencies [[`dedb431`](https://github.com/cogitator-ai/Cogitator-AI/commit/dedb4311ba307f4023d32c4e1391a4b166a58b76)]:
+  - @cogitator-ai/types@0.57.0
+  - @cogitator-ai/core@0.55.0
+
 ## 0.7.12
 
 ### Patch Changes

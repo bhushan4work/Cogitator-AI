@@ -1,5 +1,12 @@
 # @cogitator-ai/test-utils
 
+## 0.9.1
+
+### Patch Changes
+
+- Updated dependencies [[`dedb431`](https://github.com/cogitator-ai/Cogitator-AI/commit/dedb4311ba307f4023d32c4e1391a4b166a58b76)]:
+  - @cogitator-ai/types@0.57.0
+
 ## 0.9.0
 
 ### Minor Changes
