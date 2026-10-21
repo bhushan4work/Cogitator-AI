@@ -407,6 +407,21 @@ describe('textcase plugin', () => {
     });
   });
 
+  it('handles accented and cyrillic unicode input correctly', () => {
+    expect(textcase({ text: 'café au lait', to: 'snake' })).toEqual({
+      result: 'café_au_lait',
+      words: ['café', 'au', 'lait'],
+    });
+    expect(textcase({ text: 'naïveUser', to: 'kebab' })).toEqual({
+      result: 'naïve-user',
+      words: ['naïve', 'user'],
+    });
+    expect(textcase({ text: 'привет мир', to: 'snake' })).toEqual({
+      result: 'привет_мир',
+      words: ['привет', 'мир'],
+    });
+  });
+
   it('handles empty input and separator-only input without errors', () => {
     for (const to of [
       'camel',

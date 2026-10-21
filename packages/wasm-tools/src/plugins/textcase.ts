@@ -21,16 +21,20 @@ const TARGET_CASES: readonly TargetCase[] = [
   'sentence',
 ];
 
+const RE_DIGIT = /\p{Nd}/u;
+const RE_LOWER = /\p{Ll}/u;
+const RE_UPPER = /\p{Lu}/u;
+
 function isDigit(ch: string): boolean {
-  return ch >= '0' && ch <= '9';
+  return RE_DIGIT.test(ch);
 }
 
 function isLower(ch: string): boolean {
-  return ch >= 'a' && ch <= 'z';
+  return RE_LOWER.test(ch);
 }
 
 function isUpper(ch: string): boolean {
-  return ch >= 'A' && ch <= 'Z';
+  return RE_UPPER.test(ch);
 }
 
 /**
@@ -40,23 +44,24 @@ function isUpper(ch: string): boolean {
  * Digit-to-digit transitions remain in the same token (e.g. '2024' remains a single token).
  *
  * Splitting rules for an alphanumeric chunk:
- * 1. Letter-digit boundary: [a-zA-Z] followed by [0-9] splits ('utf8' -> 'utf' + '8')
- * 2. Digit-letter boundary: [0-9] followed by [a-zA-Z] splits ('version2Beta' -> '2' + 'beta')
+ * 1. Letter-digit boundary: letter followed by digit splits ('utf8' -> 'utf' + '8')
+ * 2. Digit-letter boundary: digit followed by letter splits ('version2Beta' -> '2' + 'beta')
  * 3. CamelCase / PascalCase boundary: lowercase followed by uppercase splits ('parseHTTP' -> 'parse' + 'HTTP')
  * 4. Acronym boundary: uppercase followed by uppercase and then lowercase splits
  *    ('parseHTTPResponse' -> 'HTTP' + 'Response', 'XMLHttpRequest' -> 'XML' + 'Http')
  */
 function splitChunk(chunk: string): string[] {
+  const chars = Array.from(chunk);
   const words: string[] = [];
   let currentWord = '';
 
-  for (let i = 0; i < chunk.length; i++) {
-    const c = chunk[i];
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i];
     currentWord += c;
 
-    if (i < chunk.length - 1) {
-      const next = chunk[i + 1];
-      const nextNext = i + 2 < chunk.length ? chunk[i + 2] : '';
+    if (i < chars.length - 1) {
+      const next = chars[i + 1];
+      const nextNext = i + 2 < chars.length ? chars[i + 2] : '';
 
       const isCurrentDigit = isDigit(c);
       const isNextDigit = isDigit(next);
@@ -105,7 +110,7 @@ function splitChunk(chunk: string): string[] {
  */
 function splitWords(text: string): string[] {
   // Separators: whitespace, _, -, ., / (or any non-alphanumeric character)
-  const chunks = text.split(/[^a-zA-Z0-9]+/).filter((c) => c.length > 0);
+  const chunks = text.split(/[^\p{L}\p{N}]+/u).filter((c) => c.length > 0);
   const words: string[] = [];
 
   for (const chunk of chunks) {
@@ -119,8 +124,9 @@ function splitWords(text: string): string[] {
 }
 
 function capitalize(word: string): string {
-  if (word.length === 0) return '';
-  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+  const chars = Array.from(word);
+  if (chars.length === 0) return '';
+  return chars[0].toUpperCase() + chars.slice(1).join('').toLowerCase();
 }
 
 /**
