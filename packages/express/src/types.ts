@@ -275,4 +275,8 @@ export interface WebSocketResponse {
   error?: string;
 }
 
-export type { OpenAPISpec } from '@cogitator-ai/server-shared';
+export type {
+  OpenAPISpec,
+  ReadinessResponse,
+  ReadinessCheckStatus,
+} from '@cogitator-ai/server-shared';

@@ -62,7 +62,20 @@ export function generateOpenAPISpec(ctx: OpenAPIContext, config: SwaggerConfig):
     get: {
       tags: ['health'],
       summary: 'Readiness check',
-      responses: { 200: { description: 'Service is ready' } },
+      responses: {
+        200: {
+          description: 'Service is ready',
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/ReadinessResponse' } },
+          },
+        },
+        503: {
+          description: 'Service is not ready',
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/ReadinessResponse' } },
+          },
+        },
+      },
     },
   };
 
@@ -434,6 +447,17 @@ function generateSchemas(): Record<string, unknown> {
         status: { type: 'string', enum: ['ok', 'degraded', 'error'] },
         uptime: { type: 'number' },
         timestamp: { type: 'number' },
+      },
+    },
+    ReadinessResponse: {
+      type: 'object',
+      required: ['status', 'checks'],
+      properties: {
+        status: { type: 'string', enum: ['ok', 'error'] },
+        checks: {
+          type: 'object',
+          additionalProperties: { type: 'string', enum: ['ok', 'error', 'unchecked'] },
+        },
       },
     },
     AgentListResponse: {

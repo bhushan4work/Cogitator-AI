@@ -225,7 +225,7 @@ function isEmptyAnswer(response: ChatResponse): boolean {
  * ```
  */
 export class Cogitator implements ToolInvoker {
-  private config: CogitatorConfig;
+  readonly config: CogitatorConfig;
   private observers: RunObserver[];
   /** Prices model calls whose provider reports no cost: by `llm.pricing`, then by the model registry. */
   readonly pricer: CallPricer;

@@ -1,4 +1,5 @@
 import Router from '@koa/router';
+import { checkReadiness } from '@cogitator-ai/server-shared';
 import type { CogitatorState, HealthResponse } from '../types.js';
 
 export function createHealthRoutes(): Router<CogitatorState> {
@@ -13,8 +14,11 @@ export function createHealthRoutes(): Router<CogitatorState> {
     ctx.body = response;
   });
 
-  router.get('/ready', (ctx) => {
-    ctx.body = { status: 'ok' };
+  router.get('/ready', async (ctx) => {
+    const cogitator = ctx.state?.cogitator?.runtime;
+    const { statusCode, body } = await checkReadiness(cogitator);
+    ctx.status = statusCode;
+    ctx.body = body;
   });
 
   return router;

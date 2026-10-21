@@ -5,6 +5,8 @@ import type {
   AgentRunResponse,
   ContextPolicy,
   PendingApproval,
+  ReadinessCheckStatus,
+  ReadinessResponse,
   ThreadMessageRole,
   WorkflowRunRequestBody,
 } from '@cogitator-ai/server-shared';
@@ -41,6 +43,8 @@ export type {
   SwarmMessage,
   ToolApprovalDecision,
   PendingApproval,
+  ReadinessResponse,
+  ReadinessCheckStatus,
 };
 
 export interface AuthContext {

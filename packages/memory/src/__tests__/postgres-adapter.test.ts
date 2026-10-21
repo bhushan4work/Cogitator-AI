@@ -971,4 +971,34 @@ describe('PostgresAdapter', () => {
       expect(() => freshAdapter.setVectorDimensions(NaN)).toThrow();
     });
   });
+
+  describe('healthCheck', () => {
+    it('returns success on connected adapter and queries SELECT 1', async () => {
+      mockPool.query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] });
+      const result = await adapter.healthCheck();
+      expect(result.success).toBe(true);
+      expect(mockPool.query).toHaveBeenCalledWith('SELECT 1');
+    });
+
+    it('returns failure when not connected', async () => {
+      const unconnected = new PostgresAdapter({
+        provider: 'postgres',
+        connectionString: 'postgresql://localhost:5432/db',
+      });
+      const result = await unconnected.healthCheck();
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toBe('Not connected');
+      }
+    });
+
+    it('returns failure when query throws', async () => {
+      mockPool.query.mockRejectedValueOnce(new Error('connection terminated unexpectedly'));
+      const result = await adapter.healthCheck();
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('connection terminated unexpectedly');
+      }
+    });
+  });
 });

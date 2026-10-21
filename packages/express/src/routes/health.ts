@@ -1,7 +1,8 @@
 import { Router } from 'express';
+import { checkReadiness } from '@cogitator-ai/server-shared';
 import type { RouteContext, HealthResponse } from '../types.js';
 
-export function createHealthRoutes(_ctx: RouteContext, startTime: number = Date.now()): Router {
+export function createHealthRoutes(ctx: RouteContext, startTime: number = Date.now()): Router {
   const router = Router();
 
   router.get('/health', (_req, res) => {
@@ -13,8 +14,9 @@ export function createHealthRoutes(_ctx: RouteContext, startTime: number = Date.
     res.json(response);
   });
 
-  router.get('/ready', (_req, res) => {
-    res.json({ status: 'ok' });
+  router.get('/ready', async (_req, res) => {
+    const { statusCode, body } = await checkReadiness(ctx?.cogitator);
+    res.status(statusCode).json(body);
   });
 
   return router;

@@ -406,6 +406,16 @@ export class PostgresAdapter
     }
   }
 
+  async healthCheck(): Promise<MemoryResult<void>> {
+    if (!this.pool) return this.failure('Not connected');
+    try {
+      await this.pool.query('SELECT 1');
+      return this.success(undefined);
+    } catch (error) {
+      return this.failure(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   /** Why embeddings cannot be written or searched by vector, or null when they can. */
   private vectorUnavailable(): MemoryResult<never> | null {
     return this.vectorStore.available ? null : this.failure(this.vectorStore.reason);

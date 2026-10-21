@@ -128,6 +128,16 @@ export class SQLiteAdapter extends ChangeReportingMemoryAdapter {
     return this.success(undefined);
   }
 
+  async healthCheck(): Promise<MemoryResult<void>> {
+    if (!this.db) return this.failure('Not connected');
+    try {
+      this.db.prepare('SELECT 1').get();
+      return this.success(undefined);
+    } catch (err) {
+      return this.failure((err as Error).message);
+    }
+  }
+
   async createThread(
     agentId: string,
     metadata: Record<string, unknown> = {},

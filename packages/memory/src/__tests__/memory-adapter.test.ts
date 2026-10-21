@@ -27,6 +27,14 @@ describe('InMemoryAdapter', () => {
       await adapter.disconnect();
       expect(adapter.stats.threads).toBe(0);
     });
+
+    it('healthCheck succeeds', async () => {
+      const result = await adapter.healthCheck();
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data).toBeUndefined();
+      }
+    });
   });
 
   describe('thread operations', () => {
@@ -298,6 +306,13 @@ describe('InMemoryAdapter', () => {
   describe('provider property', () => {
     it('returns memory as provider', () => {
       expect(adapter.provider).toBe('memory');
+    });
+  });
+
+  describe('healthCheck', () => {
+    it('returns success for in-memory adapter', async () => {
+      const result = await adapter.healthCheck();
+      expect(result.success).toBe(true);
     });
   });
 });

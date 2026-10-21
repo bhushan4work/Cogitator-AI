@@ -877,4 +877,31 @@ describe('RedisAdapter listThreads', () => {
       ],
     ]);
   });
+
+  describe('healthCheck', () => {
+    it('returns success on connected adapter and calls ping', async () => {
+      mockRedisClient.ping.mockResolvedValueOnce('PONG');
+      const result = await adapter.healthCheck();
+      expect(result.success).toBe(true);
+      expect(mockRedisClient.ping).toHaveBeenCalled();
+    });
+
+    it('returns failure when not connected', async () => {
+      const unconnected = new RedisAdapter({ provider: 'redis', url: 'redis://localhost:6379' });
+      const result = await unconnected.healthCheck();
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toBe('Not connected');
+      }
+    });
+
+    it('returns failure when ping throws', async () => {
+      mockRedisClient.ping.mockRejectedValueOnce(new Error('Connection reset'));
+      const result = await adapter.healthCheck();
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('Connection reset');
+      }
+    });
+  });
 });

@@ -27,6 +27,8 @@ export type {
   SwarmRunResponse,
   BlackboardResponse,
   HealthResponse,
+  ReadinessResponse,
+  ReadinessCheckStatus,
   ErrorResponse,
   WebSocketMessage,
   WebSocketResponse,

@@ -136,3 +136,14 @@ export type { RunUsage } from './usage.js';
 export { generateOpenAPISpec, generateSwaggerHTML } from './openapi.js';
 
 export type { OpenAPISpec, SwaggerConfig, OpenAPIContext } from './openapi-types.js';
+
+export { checkReadiness, DEFAULT_READINESS_TIMEOUT_MS } from './readiness.js';
+
+export type {
+  ReadinessCheckStatus,
+  ReadinessStatus,
+  ReadinessResponse,
+  ReadinessResult,
+  ReadinessTarget,
+  ReadinessOptions,
+} from './readiness.js';

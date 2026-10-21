@@ -60,4 +60,36 @@ describe('generateOpenAPISpec', () => {
       });
     }
   });
+
+  it('documents the readiness check path and response schema', () => {
+    const readyPath = spec.paths['/ready']?.get as Record<string, unknown>;
+    expect(readyPath).toBeDefined();
+    expect(readyPath.summary).toBe('Readiness check');
+    expect(readyPath.responses).toMatchObject({
+      200: {
+        description: 'Service is ready',
+        content: {
+          'application/json': { schema: { $ref: '#/components/schemas/ReadinessResponse' } },
+        },
+      },
+      503: {
+        description: 'Service is not ready',
+        content: {
+          'application/json': { schema: { $ref: '#/components/schemas/ReadinessResponse' } },
+        },
+      },
+    });
+
+    const schema = spec.components?.schemas?.ReadinessResponse as Record<string, unknown>;
+    expect(schema).toBeDefined();
+    expect(schema.required).toEqual(['status', 'checks']);
+    expect(property('ReadinessResponse', 'properties', 'status')).toEqual({
+      type: 'string',
+      enum: ['ok', 'error'],
+    });
+    expect(property('ReadinessResponse', 'properties', 'checks')).toEqual({
+      type: 'object',
+      additionalProperties: { type: 'string', enum: ['ok', 'error', 'unchecked'] },
+    });
+  });
 });

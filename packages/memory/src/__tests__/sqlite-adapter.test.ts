@@ -567,4 +567,33 @@ describe('SQLiteAdapter', () => {
       expect(adapter.provider).toBe('sqlite');
     });
   });
+
+  describe('healthCheck', () => {
+    it('returns success on connected adapter', async () => {
+      mockStmt.get.mockReturnValueOnce({ '1': 1 });
+      const result = await adapter.healthCheck();
+      expect(result.success).toBe(true);
+      expect(mockDb.prepare).toHaveBeenCalledWith('SELECT 1');
+    });
+
+    it('returns failure when not connected', async () => {
+      const unconnected = new SQLiteAdapter({ provider: 'sqlite', path: ':memory:' });
+      const result = await unconnected.healthCheck();
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toBe('Not connected');
+      }
+    });
+
+    it('returns failure when query fails', async () => {
+      mockStmt.get.mockImplementationOnce(() => {
+        throw new Error('disk I/O error');
+      });
+      const result = await adapter.healthCheck();
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('disk I/O error');
+      }
+    });
+  });
 });

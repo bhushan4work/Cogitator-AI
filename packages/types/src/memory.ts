@@ -239,6 +239,10 @@ export interface MemoryAdapter {
 
   connect(): Promise<MemoryResult<void>>;
   disconnect(): Promise<MemoryResult<void>>;
+  /**
+   * Checks connectivity to the underlying store with a lightweight, non-mutating operation.
+   */
+  healthCheck?(): Promise<MemoryResult<void>>;
 }
 
 /**

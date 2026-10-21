@@ -30,7 +30,10 @@ type CollectionSurface = Pick<
   ): Promise<WithId<StoredDoc> | null>;
 };
 type ClientSurface = Pick<DriverClient, 'connect' | 'close'> & {
-  db(name?: string): { collection(name: string): CollectionSurface };
+  db(name?: string): {
+    collection(name: string): CollectionSurface;
+    command?(cmd: Document): Promise<Document>;
+  };
 };
 
 const deleted = { acknowledged: true, deletedCount: 1 };
@@ -58,6 +61,7 @@ const mockCollection = {
 
 const mockDb = {
   collection: vi.fn<(name: string) => CollectionSurface>().mockReturnValue(mockCollection),
+  command: vi.fn().mockResolvedValue({ ok: 1 }),
 } satisfies ReturnType<ClientSurface['db']>;
 
 const mockClient = {
@@ -831,6 +835,36 @@ describe('MongoDBAdapter', () => {
   describe('provider', () => {
     it('returns mongodb as provider', () => {
       expect(adapter.provider).toBe('mongodb');
+    });
+  });
+
+  describe('healthCheck', () => {
+    it('returns success on connected adapter and executes ping command', async () => {
+      mockDb.command.mockResolvedValueOnce({ ok: 1 });
+      const result = await adapter.healthCheck();
+      expect(result.success).toBe(true);
+      expect(mockDb.command).toHaveBeenCalledWith({ ping: 1 });
+    });
+
+    it('returns failure when not connected', async () => {
+      const unconnected = new MongoDBAdapter({
+        provider: 'mongodb',
+        uri: 'mongodb://localhost:27017',
+      });
+      const result = await unconnected.healthCheck();
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toBe('Not connected');
+      }
+    });
+
+    it('returns failure when command throws', async () => {
+      mockDb.command.mockRejectedValueOnce(new Error('MongoNetworkError'));
+      const result = await adapter.healthCheck();
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('MongoNetworkError');
+      }
     });
   });
 });
