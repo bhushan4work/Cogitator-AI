@@ -1,5 +1,75 @@
 # @cogitator-ai/tetsu
 
+## 0.5.15
+
+### Patch Changes
+
+- Updated dependencies [[`92bcc11`](https://github.com/cogitator-ai/Cogitator-AI/commit/92bcc119e71742eaf2a4a3bffdeceaa18b153e5d)]:
+  - @cogitator-ai/types@0.50.0
+  - @cogitator-ai/memory@0.15.0
+  - @cogitator-ai/core@0.48.0
+  - @cogitator-ai/server-shared@0.5.15
+
+## 0.5.14
+
+### Patch Changes
+
+- Updated dependencies [[`db16bbc`](https://github.com/cogitator-ai/Cogitator-AI/commit/db16bbc5f7c49b052382ea8dd4c0ba597216d913), [`db16bbc`](https://github.com/cogitator-ai/Cogitator-AI/commit/db16bbc5f7c49b052382ea8dd4c0ba597216d913)]:
+  - @cogitator-ai/types@0.49.0
+  - @cogitator-ai/memory@0.14.0
+  - @cogitator-ai/core@0.47.0
+  - @cogitator-ai/server-shared@0.5.14
+
+## 0.5.13
+
+### Patch Changes
+
+- Updated dependencies [[`b42f62e`](https://github.com/cogitator-ai/Cogitator-AI/commit/b42f62ecd300cd945c42a91014b1297bc4e10c43)]:
+  - @cogitator-ai/core@0.46.0
+  - @cogitator-ai/types@0.48.0
+  - @cogitator-ai/memory@0.13.3
+  - @cogitator-ai/server-shared@0.5.13
+
+## 0.5.12
+
+### Patch Changes
+
+- Updated dependencies [[`ed48837`](https://github.com/cogitator-ai/Cogitator-AI/commit/ed4883796a82b5f2b832a5bb45ba861fb0b17f45)]:
+  - @cogitator-ai/core@0.45.0
+  - @cogitator-ai/types@0.47.0
+  - @cogitator-ai/memory@0.13.2
+  - @cogitator-ai/server-shared@0.5.12
+
+## 0.5.11
+
+### Patch Changes
+
+- Updated dependencies [[`f68ebd8`](https://github.com/cogitator-ai/Cogitator-AI/commit/f68ebd892ee493279058212105381e8acb73b70e)]:
+  - @cogitator-ai/core@0.44.0
+  - @cogitator-ai/types@0.46.0
+  - @cogitator-ai/memory@0.13.1
+  - @cogitator-ai/server-shared@0.5.11
+
+## 0.5.10
+
+### Patch Changes
+
+- Updated dependencies [[`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b), [`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b), [`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b)]:
+  - @cogitator-ai/memory@0.13.0
+  - @cogitator-ai/core@0.43.0
+  - @cogitator-ai/types@0.45.0
+  - @cogitator-ai/server-shared@0.5.10
+
+## 0.5.9
+
+### Patch Changes
+
+- Updated dependencies [[`b5c11eb`](https://github.com/cogitator-ai/Cogitator-AI/commit/b5c11eb5368f52169273527c2ea6f16e83ab8b22)]:
+  - @cogitator-ai/types@0.44.0
+  - @cogitator-ai/core@0.42.0
+  - @cogitator-ai/memory@0.12.9
+  - @cogitator-ai/server-shared@0.5.9
+
 ## 0.5.8
 
 ### Patch Changes

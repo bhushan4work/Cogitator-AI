@@ -36,6 +36,31 @@ export interface PostgresTraceStoreConfig {
   poolSize?: number;
 }
 
+/** The columns of a stored trace, in the order `storeTrace` passes their values. */
+const TRACE_COLUMNS = [
+  'id',
+  'run_id',
+  'agent_id',
+  'thread_id',
+  'input',
+  'output',
+  'context',
+  'steps',
+  'tool_calls',
+  'reflections',
+  'metrics',
+  'score',
+  'model',
+  'duration',
+  'usage',
+  'labels',
+  'is_demo',
+  'expected',
+  'prompt',
+  'created_at',
+  'trace_id',
+] as const;
+
 export class PostgresTraceStore implements CombinedPersistentStore {
   private pool: Pool | null = null;
   private config: PostgresTraceStoreConfig;
@@ -111,6 +136,9 @@ export class PostgresTraceStore implements CombinedPersistentStore {
     await this.pool.query(
       `ALTER TABLE ${this.schema}.traces ADD COLUMN IF NOT EXISTS prompt JSONB`
     );
+    await this.pool.query(
+      `ALTER TABLE ${this.schema}.traces ADD COLUMN IF NOT EXISTS trace_id TEXT`
+    );
 
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS ${this.schema}.prompts (
@@ -185,6 +213,10 @@ export class PostgresTraceStore implements CombinedPersistentStore {
       ON ${this.schema}.traces(agent_id, created_at)
     `);
     await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_traces_trace_id
+      ON ${this.schema}.traces(trace_id) WHERE trace_id IS NOT NULL
+    `);
+    await this.pool.query(`
       CREATE INDEX IF NOT EXISTS idx_traces_score
       ON ${this.schema}.traces(agent_id, score)
     `);
@@ -210,6 +242,26 @@ export class PostgresTraceStore implements CombinedPersistentStore {
     `);
   }
 
+  /**
+   * Stores a trace as the one trace of its run: it replaces the trace stored under its id, and any
+   * other trace of the same run, such as one an earlier version stored under the run's trace id.
+   * A paused run and the run that resumes it share their run id, and what the run did last wins.
+   */
+  private traceUpsert(): string {
+    const placeholders = TRACE_COLUMNS.map((_, index) => `$${index + 1}`).join(', ');
+    const param = (column: (typeof TRACE_COLUMNS)[number]) =>
+      `$${TRACE_COLUMNS.indexOf(column) + 1}`;
+    const updates = TRACE_COLUMNS.filter((column) => column !== 'id')
+      .map((column) => `${column} = EXCLUDED.${column}`)
+      .join(', ');
+    return `WITH superseded AS (
+         DELETE FROM ${this.schema}.traces WHERE run_id = ${param('run_id')} AND id <> ${param('id')}
+       )
+       INSERT INTO ${this.schema}.traces (${TRACE_COLUMNS.join(', ')})
+       VALUES (${placeholders})
+       ON CONFLICT (id) DO UPDATE SET ${updates}`;
+  }
+
   private generateId(prefix: string): string {
     return `${prefix}_${nanoid(12)}`;
   }
@@ -217,33 +269,29 @@ export class PostgresTraceStore implements CombinedPersistentStore {
   async storeTrace(trace: ExecutionTrace): Promise<void> {
     if (!this.pool) throw new Error('Not connected');
 
-    await this.pool.query(
-      `INSERT INTO ${this.schema}.traces
-       (id, run_id, agent_id, thread_id, input, output, context, steps, tool_calls, reflections, metrics, score, model, duration, usage, labels, is_demo, expected, prompt, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
-      [
-        trace.id,
-        trace.runId,
-        trace.agentId,
-        trace.threadId,
-        trace.input,
-        trace.output,
-        trace.context ?? null,
-        trace.steps,
-        trace.toolCalls,
-        trace.reflections ?? null,
-        trace.metrics,
-        trace.score,
-        trace.model,
-        trace.duration,
-        trace.usage,
-        trace.labels ?? [],
-        trace.isDemo,
-        trace.expected ?? null,
-        trace.prompt ?? null,
-        trace.createdAt,
-      ]
-    );
+    await this.pool.query(this.traceUpsert(), [
+      trace.id,
+      trace.runId,
+      trace.agentId,
+      trace.threadId,
+      trace.input,
+      trace.output,
+      trace.context ?? null,
+      trace.steps,
+      trace.toolCalls,
+      trace.reflections ?? null,
+      trace.metrics,
+      trace.score,
+      trace.model,
+      trace.duration,
+      trace.usage,
+      trace.labels ?? [],
+      trace.isDemo,
+      trace.expected ?? null,
+      trace.prompt ?? null,
+      trace.createdAt,
+      trace.traceId ?? null,
+    ]);
   }
 
   async storeTraceMany(traces: ExecutionTrace[]): Promise<void> {
@@ -255,33 +303,29 @@ export class PostgresTraceStore implements CombinedPersistentStore {
       await client.query('BEGIN');
 
       for (const trace of traces) {
-        await client.query(
-          `INSERT INTO ${this.schema}.traces
-           (id, run_id, agent_id, thread_id, input, output, context, steps, tool_calls, reflections, metrics, score, model, duration, usage, labels, is_demo, expected, prompt, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
-          [
-            trace.id,
-            trace.runId,
-            trace.agentId,
-            trace.threadId,
-            trace.input,
-            trace.output,
-            trace.context ?? null,
-            trace.steps,
-            trace.toolCalls,
-            trace.reflections ?? null,
-            trace.metrics,
-            trace.score,
-            trace.model,
-            trace.duration,
-            trace.usage,
-            trace.labels ?? [],
-            trace.isDemo,
-            trace.expected ?? null,
-            trace.prompt ?? null,
-            trace.createdAt,
-          ]
-        );
+        await client.query(this.traceUpsert(), [
+          trace.id,
+          trace.runId,
+          trace.agentId,
+          trace.threadId,
+          trace.input,
+          trace.output,
+          trace.context ?? null,
+          trace.steps,
+          trace.toolCalls,
+          trace.reflections ?? null,
+          trace.metrics,
+          trace.score,
+          trace.model,
+          trace.duration,
+          trace.usage,
+          trace.labels ?? [],
+          trace.isDemo,
+          trace.expected ?? null,
+          trace.prompt ?? null,
+          trace.createdAt,
+          trace.traceId ?? null,
+        ]);
       }
 
       await client.query('COMMIT');
@@ -306,9 +350,10 @@ export class PostgresTraceStore implements CombinedPersistentStore {
   async getTraceByRunId(runId: string): Promise<ExecutionTrace | null> {
     if (!this.pool) throw new Error('Not connected');
 
-    const result = await this.pool.query(`SELECT * FROM ${this.schema}.traces WHERE run_id = $1`, [
-      runId,
-    ]);
+    const result = await this.pool.query(
+      `SELECT * FROM ${this.schema}.traces WHERE run_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [runId]
+    );
 
     if (result.rows.length === 0) return null;
 
@@ -325,6 +370,10 @@ export class PostgresTraceStore implements CombinedPersistentStore {
     if (query.agentId) {
       sql += ` AND agent_id = $${paramIndex++}`;
       params.push(query.agentId);
+    }
+    if (query.traceId) {
+      sql += ` AND trace_id = $${paramIndex++}`;
+      params.push(query.traceId);
     }
     if (query.minScore !== undefined) {
       sql += ` AND score >= $${paramIndex++}`;
@@ -465,6 +514,7 @@ export class PostgresTraceStore implements CombinedPersistentStore {
       isDemo: row.is_demo as boolean,
       expected: row.expected as unknown,
       ...(row.prompt ? { prompt: row.prompt as RunPrompt } : {}),
+      ...(row.trace_id ? { traceId: row.trace_id as string } : {}),
       createdAt: new Date(row.created_at as string),
     };
   }

@@ -17,7 +17,7 @@ Website docs: [Evals](https://cogitator.app/docs/evals), [Datasets](https://cogi
 ## Features
 
 - **EvalSuite** — Run datasets against agents or plain functions with configurable concurrency, timeouts, and retries
-- **4 Deterministic Metrics** — exactMatch, contains, regex, jsonSchema (Zod)
+- **5 Deterministic Metrics** — exactMatch, contains, similarity, regex, jsonSchema (Zod)
 - **5 LLM-as-Judge Metrics** — faithfulness, relevance, coherence, helpfulness, custom llmMetric
 - **3 Statistical Metrics** — latency, cost, tokenUsage with full percentile breakdowns
 - **Custom Metrics** — `metric()` factory for anything domain-specific
@@ -152,25 +152,37 @@ All transformations return new `Dataset` instances — the original is never mut
 
 ### Deterministic
 
-Binary (0 or 1) metrics that compare output against expected values.
+Metrics that compare output against expected values using string operations or schema validation.
 
-| Metric       | Description                                | Requires `expected` |
-| ------------ | ------------------------------------------ | ------------------- |
-| `exactMatch` | Exact string match (case optional)         | Yes                 |
-| `contains`   | Output contains expected substring         | Yes                 |
-| `regex`      | Output matches a regex pattern             | No                  |
-| `jsonSchema` | Output is valid JSON matching a Zod schema | No                  |
+| Metric       | Description                                    | Requires `expected` |
+| ------------ | ---------------------------------------------- | ------------------- |
+| `exactMatch` | Exact string match (case optional)             | Yes                 |
+| `contains`   | Output contains expected substring             | Yes                 |
+| `similarity` | Levenshtein distance similarity score (0 to 1) | Yes                 |
+| `regex`      | Output matches a regex pattern                 | No                  |
+| `jsonSchema` | Output is valid JSON matching a Zod schema     | No                  |
 
 ```typescript
-import { exactMatch, contains, regex, jsonSchema } from '@cogitator-ai/evals';
+import {
+  exactMatch,
+  contains,
+  similarity,
+  regex,
+  jsonSchema,
+  threshold,
+} from '@cogitator-ai/evals';
 import { z } from 'zod';
 
 const metrics = [
   exactMatch({ caseSensitive: true }),
   contains(),
+  similarity(),
   regex(/\d{4}-\d{2}-\d{2}/),
   jsonSchema(z.object({ answer: z.string(), confidence: z.number() })),
 ];
+
+// Assert similarity is at least 0.8
+const assertions = [threshold('similarity', 0.8)];
 ```
 
 Every built-in per-case metric takes a `name` option. A suite refuses two metrics with the same name, because their scores would merge into one aggregate, so name the second of a kind:
@@ -278,6 +290,7 @@ import { threshold } from '@cogitator-ai/evals';
 
 const assertions = [
   threshold('exactMatch', 0.9),
+  threshold('similarity', 0.8),
   threshold('latency', 5000),
   threshold('relevance', 0.7),
 ];
@@ -463,21 +476,22 @@ result.report('ci');
 
 ### Metrics
 
-| Export         | Type          | Description                         |
-| -------------- | ------------- | ----------------------------------- |
-| `exactMatch`   | Deterministic | Exact string match                  |
-| `contains`     | Deterministic | Substring match                     |
-| `regex`        | Deterministic | Regex pattern match                 |
-| `jsonSchema`   | Deterministic | Zod schema validation               |
-| `faithfulness` | LLM Judge     | Factual accuracy                    |
-| `relevance`    | LLM Judge     | Topical relevance                   |
-| `coherence`    | LLM Judge     | Logical structure                   |
-| `helpfulness`  | LLM Judge     | Practical usefulness                |
-| `llmMetric`    | LLM Judge     | Custom judge prompt                 |
-| `latency`      | Statistical   | Response time percentiles           |
-| `cost`         | Statistical   | Token cost aggregation              |
-| `tokenUsage`   | Statistical   | Input/output token counts           |
-| `metric`       | Custom        | Factory for domain-specific metrics |
+| Export         | Type          | Description                           |
+| -------------- | ------------- | ------------------------------------- |
+| `exactMatch`   | Deterministic | Exact string match                    |
+| `contains`     | Deterministic | Substring match                       |
+| `similarity`   | Deterministic | Levenshtein distance similarity score |
+| `regex`        | Deterministic | Regex pattern match                   |
+| `jsonSchema`   | Deterministic | Zod schema validation                 |
+| `faithfulness` | LLM Judge     | Factual accuracy                      |
+| `relevance`    | LLM Judge     | Topical relevance                     |
+| `coherence`    | LLM Judge     | Logical structure                     |
+| `helpfulness`  | LLM Judge     | Practical usefulness                  |
+| `llmMetric`    | LLM Judge     | Custom judge prompt                   |
+| `latency`      | Statistical   | Response time percentiles             |
+| `cost`         | Statistical   | Token cost aggregation                |
+| `tokenUsage`   | Statistical   | Input/output token counts             |
+| `metric`       | Custom        | Factory for domain-specific metrics   |
 
 ### Assertions
 

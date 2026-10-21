@@ -23,14 +23,44 @@ import type { PiiConfig, PromptInjectionConfig } from './security';
 import type { DeployConfig } from './deploy';
 import type { DecisionBackend } from './decision';
 import type { ContextManagerConfig } from './context';
+import type { RunMiddleware } from './middleware';
 import type { LoggingConfig } from './logging';
 import type { ABTestStore, ABTestVariant, InstructionVersionStore } from './prompt-optimization';
+
+/**
+ * Where a run's spans go in a distributed trace: the trace they join and the span that is the
+ * parent of the run's root span. W3C ids: 32 lowercase hex characters for the trace, 16 for the
+ * span.
+ */
+export interface TraceParent {
+  traceId: string;
+  parentSpanId?: string;
+}
+
+/** Telemetry settings of a runtime. */
+export interface TelemetryConfig {
+  /**
+   * Record the GenAI content attributes on the spans: what the model was sent and answered
+   * (`gen_ai.system_instructions`, `gen_ai.input.messages`, `gen_ai.output.messages`,
+   * `gen_ai.tool.definitions`) and tool arguments and results (`gen_ai.tool.call.arguments`,
+   * `gen_ai.tool.call.result`). Off by default: prompts and answers are often sensitive and large.
+   * Cogitator's own `tool.arguments`, `tool.error` and `decision.answers` attributes are recorded
+   * as before, whatever this says.
+   */
+  captureContent?: boolean;
+}
 
 /**
  * Sees every run of a `Cogitator`, next to the callbacks a single run passes.
  * An observer that throws is logged and never fails the run.
  */
 export interface RunObserver {
+  /**
+   * This observer wants model and tool content on its spans (see
+   * `TelemetryConfig.captureContent`). Content is recorded while such an observer watches, and
+   * only observers that asked for it receive it.
+   */
+  captureContent?: boolean;
   onRunStart?(event: {
     runId: string;
     agentId: string;
@@ -88,6 +118,13 @@ export interface CogitatorConfig {
      * provider's cache hits lower the run's cost.
      */
     promptCache?: PromptCacheConfig | false;
+    /**
+     * When a model an agent falls back from (`fallbackModels`) is skipped. Each model has its
+     * own breaker, shared by every run of this runtime: after `failureThreshold` failures in a
+     * row, or at once for an out-of-quota account, a rejected key or a missing model, turns go
+     * straight to the next model for `resetTimeout` ms, and then try it again.
+     */
+    modelCircuitBreaker?: ModelCircuitBreakerConfig;
   };
   /**
    * Where paused runs are kept. Defaults to the memory adapter's threads (so
@@ -100,6 +137,14 @@ export interface CogitatorConfig {
    * `LangfuseExporter` give one with `observer()`.
    */
   observers?: RunObserver[];
+  /** Telemetry settings: content capture for the spans of every run. */
+  telemetry?: TelemetryConfig;
+  /**
+   * Hooks around the model and tool calls of every run of this runtime, outermost, before the
+   * agent's and the run's own (see `RunMiddleware`). Their `wrapToolCall` also wraps tool
+   * calls made with `invokeTool()`.
+   */
+  middleware?: RunMiddleware[];
   /**
    * Versioned instructions and A/B tests. Runs of an agent with a deployed
    * version use its instructions; while an A/B test runs, each thread gets
@@ -140,6 +185,36 @@ export interface CogitatorConfig {
   deploy?: DeployConfig;
 }
 
+/** See `CogitatorConfig.llm.modelCircuitBreaker`. */
+export interface ModelCircuitBreakerConfig {
+  /** Failures in a row that make a model be skipped (default 5) */
+  failureThreshold?: number;
+  /** How long a failing model is skipped, in ms (default 30 000) */
+  resetTimeout?: number;
+  /** Calls that must succeed after `resetTimeout` before the model counts as healthy (default 3) */
+  halfOpenRequests?: number;
+}
+
+/** A turn of a run moved from one model to the next of the agent's `fallbackModels`. */
+export interface ModelFallbackEvent {
+  /** The model that failed, as `provider/model` */
+  from: string;
+  /** The model the turn goes on with, as `provider/model` */
+  to: string;
+  /** Why `from` failed: its error, or a `CIRCUIT_OPEN` error when it was skipped */
+  error: Error;
+}
+
+/** A model turn of a run, as the run keeps it: after every `afterModel` middleware. */
+export interface KeptModelTurn {
+  /** The turn's text, empty when it only calls tools */
+  content: string;
+  /** The tool calls the turn asks for, none on a final answer */
+  toolCalls: ToolCall[];
+  /** The model that answered, as `provider/model` */
+  model: string;
+}
+
 export type ImageInput =
   string | { data: string; mimeType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' };
 
@@ -147,13 +222,21 @@ export type AudioFormat = 'mp3' | 'mp4' | 'mpeg' | 'mpga' | 'm4a' | 'wav' | 'web
 
 export type AudioInput = string | { data: string; format: AudioFormat };
 
-export interface RunOptions {
+export interface RunOptions<TDeps = unknown> {
   input: string;
   /** Images to include with the input. Can be URLs or base64 encoded data. */
   images?: ImageInput[];
   /** Audio files to transcribe and include with the input. Can be URLs or base64 encoded data. */
   audio?: AudioInput[];
+  /** Data added to the system prompt for this run, as JSON: the model reads it */
   context?: Record<string, unknown>;
+  /**
+   * Your own values for the run's tools, such as a database client, a logger or the signed-in
+   * user: tools get them as `context.deps`. Unlike `context`, they never reach the model, the
+   * memory, spans or a paused run's checkpoint, so pass them again to `resume()`. Required when
+   * the agent declares its deps type (`new Agent<Deps>(...)`)
+   */
+  deps?: TDeps;
   threadId?: string;
   timeout?: number;
   /** Abort signal for cancelling the run. */
@@ -167,6 +250,14 @@ export interface RunOptions {
   onReasoning?: (delta: string) => void;
   /** Called when an agent hands the conversation over to another */
   onHandoff?: (handoff: HandoffEvent) => void;
+  /** Called when a turn moves from a failing model to the next of the agent's `fallbackModels` */
+  onModelFallback?: (event: ModelFallbackEvent) => void;
+  /**
+   * Called for each model turn the run keeps, before its tool calls run: the text and calls as
+   * every `afterModel` middleware left them. A run without `stream: true` gets the text of
+   * turns that call tools only from here
+   */
+  onModelTurn?: (turn: KeptModelTurn) => void;
   /** Overrides the agent's `reasoning` for this run */
   reasoning?: ReasoningConfig;
   /**
@@ -210,11 +301,23 @@ export interface RunOptions {
   onRunError?: (error: Error, runId: string, usage?: RunUsage) => void;
   /** Callback when a span is created */
   onSpan?: (span: Span) => void;
+  /**
+   * The trace this run joins: its root span becomes a child of `parentSpanId`. Without it, a run
+   * started inside a tool of another run joins that run's trace under the tool's span, and any
+   * other run starts a trace of its own.
+   */
+  trace?: TraceParent;
   /** Callback when memory operation fails */
   onMemoryError?: (error: Error, operation: 'save' | 'load') => void;
 
   /** Execute tool calls in parallel. Default: false (sequential execution) */
   parallelToolCalls?: boolean;
+
+  /**
+   * Hooks around this run's model and tool calls, after the Cogitator's and the agent's
+   * middleware (see `RunMiddleware`). Pass them again to `resume()`.
+   */
+  middleware?: RunMiddleware<TDeps>[];
 
   /**
    * The user the run acts for. It owns the threads the run creates, scopes the
@@ -232,6 +335,12 @@ export interface RunOptions {
   channelType?: string;
   channelId?: string;
 }
+
+/**
+ * `deps` as a run of an agent with deps type `TDeps` must pass them: required when the agent
+ * declares its deps type, optional otherwise.
+ */
+export type RunDeps<TDeps> = unknown extends TDeps ? { deps?: unknown } : { deps: TDeps };
 
 export interface PromptsConfig {
   /** Default: in process memory */
@@ -292,6 +401,10 @@ export interface ToolInvocationOptions {
    */
   context?: Record<string, unknown>;
   /**
+   * `deps` for the tool, as a run passes them (`RunOptions.deps`)
+   */
+  deps?: unknown;
+  /**
    * Decides a call that needs approval (`requiresApproval`, or the guardrails), as
    * `RunOptions.onApproval` does in a run. Without it `guardrails.onToolApproval` decides. A call
    * nobody decides, or one answered with `'pause'`, is refused: there is no run to pause, so the
@@ -313,7 +426,11 @@ export interface ToolInvocationResult extends ToolResult {
  * outside a run (an MCP server, a self-modifying agent) takes it to honor all of that.
  */
 export interface ToolInvoker {
-  /** Never throws for a failing tool: the error is in the result's `error` */
+  /**
+   * Never throws for a failing tool: the error is in the result's `error`. An error a
+   * `wrapToolCall` middleware of the Cogitator throws, and a `tripwire()` raised in the tool
+   * itself (a nested agent run), are thrown, as they would fail a run.
+   */
   invokeTool(
     tool: Tool,
     args: unknown,
@@ -386,6 +503,11 @@ export interface RunCheckpoint {
   };
   reasoning: string[];
   startedAt: number;
+  /**
+   * The trace the paused run belongs to and its root span, so the resumed run continues the
+   * trace under it. Missing in checkpoints saved before it existed
+   */
+  trace?: { traceId: string; rootSpanId: string };
 }
 
 /**
@@ -400,8 +522,8 @@ export interface RunCheckpointStore {
 }
 
 /** Options for `cogitator.resume()`: run options, minus what the checkpoint fixes. */
-export interface ResumeOptions extends Omit<
-  RunOptions,
+export interface ResumeOptions<TDeps = unknown> extends Omit<
+  RunOptions<TDeps>,
   'input' | 'images' | 'audio' | 'context' | 'threadId' | 'threadAccess'
 > {
   /**
@@ -433,7 +555,10 @@ export interface RunResult {
   readonly runId: string;
   readonly agentId: string;
   readonly threadId: string;
-  /** Actual model used (may differ from agent.model if cost routing is enabled) */
+  /**
+   * The model that gave the final answer, as `provider/model`, when it may differ from the
+   * agent's `model`: cost routing picked it, or the turn fell back to one of `fallbackModels`
+   */
   readonly modelUsed?: string;
   readonly usage: {
     readonly inputTokens: number;

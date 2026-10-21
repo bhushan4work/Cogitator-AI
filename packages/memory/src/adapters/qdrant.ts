@@ -10,7 +10,7 @@ import type {
 import type { QdrantClient as RestClient, Schemas } from '@qdrant/js-client-rest';
 import { nanoid } from 'nanoid';
 import { createHash } from 'node:crypto';
-import { EMPTY_DELETE_FILTER_ERROR, hasDeleteCondition } from '../search/filter';
+import { EMPTY_DELETE_FILTER_ERROR, filterSourceTypes, hasDeleteCondition } from '../search/filter';
 
 const POINT_ID_NAMESPACE = Buffer.from('a165b27944774045b57221d3df84e73b', 'hex');
 
@@ -33,7 +33,13 @@ function qdrantPointId(embeddingId: string): string {
  */
 type QdrantClient = Pick<
   RestClient,
-  'getCollections' | 'createCollection' | 'upsert' | 'query' | 'delete'
+  | 'getCollections'
+  | 'createCollection'
+  | 'upsert'
+  | 'query'
+  | 'delete'
+  | 'scroll'
+  | 'createPayloadIndex'
 >;
 
 type QdrantFilter = Schemas['Filter'];
@@ -43,8 +49,13 @@ type QdrantCondition = Schemas['Condition'];
 function qdrantFilter(filter: SearchFilter | undefined): QdrantFilter | undefined {
   if (!filter) return undefined;
   const must: QdrantCondition[] = [];
-  if (filter.sourceType) {
-    must.push({ key: 'sourceType', match: { value: filter.sourceType } });
+  const types = filterSourceTypes(filter);
+  if (types?.length === 1) {
+    must.push({ key: 'sourceType', match: { value: types[0]! } });
+  } else if (types && types.length > 1) {
+    must.push({ key: 'sourceType', match: { any: types } });
+  } else if (types) {
+    must.push({ key: 'sourceType', match: { any: ['__no_source_type__'] } });
   }
   if (filter.threadId) {
     must.push({ key: 'metadata.threadId', match: { value: filter.threadId } });
@@ -64,6 +75,30 @@ function qdrantFilter(filter: SearchFilter | undefined): QdrantFilter | undefine
     must.push({ key: `metadata.${key}`, match: { value } });
   }
   return must.length > 0 ? { must } : undefined;
+}
+
+/** How many points one page of a scroll reads */
+const SCROLL_PAGE = 256;
+
+/** Payload fields the adapter filters on, indexed so filtered searches stay fast */
+const INDEXED_FIELDS = ['sourceId', 'sourceType', 'metadata.threadId'];
+
+/** A stored point as an embedding, with `vector` when the point came with one */
+function pointToEmbedding(point: {
+  id: string | number;
+  payload?: Record<string, unknown> | null;
+  vector?: unknown;
+}): Embedding {
+  const payload: Record<string, unknown> = point.payload ?? {};
+  return {
+    id: typeof payload.embeddingId === 'string' ? payload.embeddingId : String(point.id),
+    sourceId: payload.sourceId as string,
+    sourceType: payload.sourceType as Embedding['sourceType'],
+    vector: Array.isArray(point.vector) ? (point.vector as number[]) : [],
+    content: payload.content as string,
+    createdAt: new Date(payload.createdAt as string),
+    metadata: (payload.metadata as Record<string, unknown> | undefined) ?? {},
+  };
 }
 
 export class QdrantAdapter implements EmbeddingAdapter {
@@ -102,6 +137,20 @@ export class QdrantAdapter implements EmbeddingAdapter {
         await client.createCollection(this.collection, {
           vectors: { size: this.dimensions, distance: 'Cosine' },
         });
+      }
+      for (const field of INDEXED_FIELDS) {
+        try {
+          await client.createPayloadIndex(this.collection, {
+            field_name: field,
+            field_schema: 'keyword',
+            wait: true,
+          });
+        } catch (err) {
+          console.warn(
+            `QdrantAdapter: no payload index on ${field}, filtered searches scan more:`,
+            (err as Error).message
+          );
+        }
       }
 
       this.client = client;
@@ -151,6 +200,45 @@ export class QdrantAdapter implements EmbeddingAdapter {
     }
   }
 
+  /**
+   * Replaces the points of the source with one whose id comes from the source id, so processes
+   * replacing the same source at once overwrite one point instead of adding two.
+   */
+  async replaceBySource(
+    embedding: Omit<Embedding, 'id' | 'createdAt'>
+  ): Promise<MemoryResult<Embedding>> {
+    if (!this.client) return this.failure('Not connected');
+
+    const id = `emb_src_${createHash('sha1').update(embedding.sourceId).digest('hex').slice(0, 24)}`;
+    const full: Embedding = { ...embedding, id, createdAt: new Date() };
+    try {
+      await this.client.delete(this.collection, {
+        wait: true,
+        filter: { must: [{ key: 'sourceId', match: { value: embedding.sourceId } }] },
+      });
+      await this.client.upsert(this.collection, {
+        wait: true,
+        points: [
+          {
+            id: qdrantPointId(id),
+            vector: full.vector,
+            payload: {
+              embeddingId: id,
+              sourceId: full.sourceId,
+              sourceType: full.sourceType,
+              content: full.content,
+              createdAt: full.createdAt.toISOString(),
+              metadata: full.metadata ?? {},
+            },
+          },
+        ],
+      });
+      return this.success(full);
+    } catch (err) {
+      return this.failure((err as Error).message);
+    }
+  }
+
   async search(
     options: SemanticSearchOptions
   ): Promise<MemoryResult<(Embedding & { score: number })[]>> {
@@ -170,21 +258,36 @@ export class QdrantAdapter implements EmbeddingAdapter {
         filter,
       });
 
-      const embeddings: (Embedding & { score: number })[] = points.map((point) => {
-        const payload: Record<string, unknown> = point.payload ?? {};
-        return {
-          id: typeof payload.embeddingId === 'string' ? payload.embeddingId : String(point.id),
-          sourceId: payload.sourceId as string,
-          sourceType: payload.sourceType as Embedding['sourceType'],
-          vector: [],
-          content: payload.content as string,
-          createdAt: new Date(payload.createdAt as string),
-          metadata: (payload.metadata as Record<string, unknown> | undefined) ?? {},
+      return this.success(
+        points.map((point) => ({
+          ...pointToEmbedding({ id: point.id, payload: point.payload }),
           score: point.score,
-        };
-      });
+        }))
+      );
+    } catch (err) {
+      return this.failure((err as Error).message);
+    }
+  }
 
-      return this.success(embeddings);
+  async getBySources(sourceIds: string[]): Promise<MemoryResult<Embedding[]>> {
+    if (!this.client) return this.failure('Not connected');
+    if (sourceIds.length === 0) return this.success([]);
+
+    try {
+      const found: Embedding[] = [];
+      let offset: Schemas['ExtendedPointId'] | null | undefined;
+      do {
+        const page = await this.client.scroll(this.collection, {
+          filter: { must: [{ key: 'sourceId', match: { any: sourceIds } }] },
+          limit: SCROLL_PAGE,
+          with_payload: true,
+          with_vector: true,
+          ...(offset !== undefined && offset !== null && { offset }),
+        });
+        found.push(...page.points.map(pointToEmbedding));
+        offset = page.next_page_offset as Schemas['ExtendedPointId'] | null | undefined;
+      } while (offset !== undefined && offset !== null);
+      return this.success(found);
     } catch (err) {
       return this.failure((err as Error).message);
     }

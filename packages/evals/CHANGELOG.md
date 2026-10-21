@@ -1,5 +1,11 @@
 # @cogitator-ai/evals
 
+## 0.7.0
+
+### Minor Changes
+
+- [#206](https://github.com/cogitator-ai/Cogitator-AI/pull/206) [`b1730d6`](https://github.com/cogitator-ai/Cogitator-AI/commit/b1730d6516e0501a2ecdae9530bf4e1c9482ac05) Thanks [@bhushan4work](https://github.com/bhushan4work)! - Add `similarity()` metric to compute string similarity using Levenshtein distance with two-row dynamic programming. Calculates `score = 1 - distance / max(output.length, expected.length)`, scoring 1 for identical strings and two empty strings without division by zero, and near 0 for unrelated strings. Supports `caseSensitive` (default `false`), whitespace trimming matching `exactMatch`, custom `name`, and includes distance in `details` whenever score is below 1.
+
 ## 0.6.1
 
 ### Patch Changes

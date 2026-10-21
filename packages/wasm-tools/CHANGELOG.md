@@ -1,5 +1,66 @@
 # @cogitator-ai/wasm-tools
 
+## 0.9.0
+
+### Minor Changes
+
+- [#222](https://github.com/cogitator-ai/Cogitator-AI/pull/222) [`d2ced0e`](https://github.com/cogitator-ai/Cogitator-AI/commit/d2ced0edf3686e0cb9aacf61be5e8809af0329c6) Thanks [@bhushan4work](https://github.com/bhushan4work)! - Add `textcase` WASM tool (`createTextcaseTool`, `textcaseToolSchema`) for converting text between camel, pascal, snake, kebab, constant, title, and sentence cases with acronym, separator, and digit-boundary token splitting.
+
+## 0.8.4
+
+### Patch Changes
+
+- Updated dependencies [[`92bcc11`](https://github.com/cogitator-ai/Cogitator-AI/commit/92bcc119e71742eaf2a4a3bffdeceaa18b153e5d)]:
+  - @cogitator-ai/types@0.50.0
+
+## 0.8.3
+
+### Patch Changes
+
+- Updated dependencies [[`db16bbc`](https://github.com/cogitator-ai/Cogitator-AI/commit/db16bbc5f7c49b052382ea8dd4c0ba597216d913), [`db16bbc`](https://github.com/cogitator-ai/Cogitator-AI/commit/db16bbc5f7c49b052382ea8dd4c0ba597216d913)]:
+  - @cogitator-ai/types@0.49.0
+
+## 0.8.2
+
+### Patch Changes
+
+- Updated dependencies [[`b42f62e`](https://github.com/cogitator-ai/Cogitator-AI/commit/b42f62ecd300cd945c42a91014b1297bc4e10c43)]:
+  - @cogitator-ai/types@0.48.0
+
+## 0.8.1
+
+### Patch Changes
+
+- Updated dependencies [[`ed48837`](https://github.com/cogitator-ai/Cogitator-AI/commit/ed4883796a82b5f2b832a5bb45ba861fb0b17f45)]:
+  - @cogitator-ai/types@0.47.0
+
+## 0.8.0
+
+### Minor Changes
+
+- [#211](https://github.com/cogitator-ai/Cogitator-AI/pull/211) [`80ef037`](https://github.com/cogitator-ai/Cogitator-AI/commit/80ef03765a7d42082dac2fe7c9ee01e80040fc16) Thanks [@CG-5228](https://github.com/CG-5228)! - Add `units` WASM tool (`createUnitsTool`, `unitsToolSchema`) for deterministic unit conversions across length, mass, temperature, volume, speed, and data size categories.
+
+## 0.7.25
+
+### Patch Changes
+
+- Updated dependencies [[`f68ebd8`](https://github.com/cogitator-ai/Cogitator-AI/commit/f68ebd892ee493279058212105381e8acb73b70e)]:
+  - @cogitator-ai/types@0.46.0
+
+## 0.7.24
+
+### Patch Changes
+
+- Updated dependencies [[`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b), [`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b), [`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b)]:
+  - @cogitator-ai/types@0.45.0
+
+## 0.7.23
+
+### Patch Changes
+
+- Updated dependencies [[`b5c11eb`](https://github.com/cogitator-ai/Cogitator-AI/commit/b5c11eb5368f52169273527c2ea6f16e83ab8b22)]:
+  - @cogitator-ai/types@0.44.0
+
 ## 0.7.22
 
 ### Patch Changes

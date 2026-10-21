@@ -4,9 +4,17 @@ import {
   toolPartsToText,
   toolResultParts,
   toolToSchema,
+  withParsedArguments,
 } from '@cogitator-ai/core';
 import { defaultSpecificationVersion } from './ai-version.js';
-import type { ApprovalCheck, Tool, ToolContext, ToolSchema } from '@cogitator-ai/types';
+import type {
+  ApprovalCheck,
+  Tool,
+  ToolApprovalDecision,
+  ToolContext,
+  ToolInvoker,
+  ToolSchema,
+} from '@cogitator-ai/types';
 import { isRecord, toJSONValue } from './json.js';
 import type {
   AISDKJSONSchemaConverterOptions,
@@ -14,6 +22,7 @@ import type {
   AISDKSchemaValidation,
   AISDKTool,
   AISDKToolExecutionOptions,
+  AISDKToolOptions,
   AISDKToolLike,
   AISDKValidationIssue,
   AISDKValidationResult,
@@ -432,9 +441,22 @@ function toToolResultContent(output: unknown) {
  * fields of the AI SDK tool context (`agentId`, `runId`, `threadId`, `userId`, `channelType`,
  * `channelId`) are forwarded to the Cogitator `ToolContext`. A tool with `requiresApproval` gets
  * the same `needsApproval`, so ai@6 and ai@7 ask before they run it.
+ *
+ * Pass `options.invoker` (your `Cogitator`) to run the calls through `invokeTool`, with approval
+ * on every AI SDK version, the guardrails, the sandbox and `tool.timeout`, see `AISDKToolOptions`.
+ *
+ * @example
+ * ```ts
+ * const tools = convertToolsToAISDK(agent.tools, {
+ *   invoker: cogitator,
+ *   onApproval: async (request) => ({ approved: await askUser(request) }),
+ * });
+ * await generateText({ model, tools, prompt });
+ * ```
  */
 export function toAISDKTool<TParams = unknown, TResult = unknown>(
-  cogTool: Tool<TParams, TResult>
+  cogTool: Tool<TParams, TResult>,
+  options: AISDKToolOptions = {}
 ): AISDKTool<TParams, TResult> {
   const schema = createAISDKSchema(cogTool);
   const needsApproval = needsApprovalOf(cogTool);
@@ -444,7 +466,10 @@ export function toAISDKTool<TParams = unknown, TResult = unknown>(
       ? cogTool.parameters
       : (schema as unknown as Tool<TParams, TResult>['parameters']),
     parameters: schema,
-    execute: (input, options) => cogTool.execute(input, cogitatorContext(options)),
+    execute: (input, executeOptions) =>
+      options.invoker
+        ? invokeThrough(options.invoker, cogTool, input, executeOptions, options)
+        : cogTool.execute(input, cogitatorContext(executeOptions)),
     ...(needsApproval !== undefined && { needsApproval }),
   };
   return Object.assign(aiTool, {
@@ -457,10 +482,97 @@ export function convertToolsFromAISDK(aiTools: Record<string, AISDKToolLike>): T
   return Object.entries(aiTools).map(([name, aiTool]) => fromAISDKTool(aiTool, name));
 }
 
-export function convertToolsToAISDK(cogTools: Tool[]): Record<string, AISDKTool> {
+export function convertToolsToAISDK(
+  cogTools: Tool[],
+  options: AISDKToolOptions = {}
+): Record<string, AISDKTool> {
   const result: Record<string, AISDKTool> = {};
   for (const tool of cogTools) {
-    result[tool.name] = toAISDKTool(tool);
+    result[tool.name] = toAISDKTool(tool, options);
   }
   return result;
+}
+
+const APPROVED: ToolApprovalDecision = { approved: true };
+
+/**
+ * One call of a converted tool run through the invoker. The AI SDK parsed the arguments with the
+ * tool's own schema, so they are taken as they come. A call the AI SDK approval flow approved is
+ * not asked again.
+ */
+async function invokeThrough<TParams, TResult>(
+  invoker: ToolInvoker,
+  cogTool: Tool<TParams, TResult>,
+  input: TParams,
+  executeOptions: AISDKToolExecutionOptions,
+  options: AISDKToolOptions
+): Promise<TResult> {
+  const context = cogitatorContext(executeOptions);
+  const sdkApproved = asksAISDKApproval(cogTool, input) && approvedByAISDK(executeOptions);
+  const onApproval = sdkApproved ? async () => APPROVED : options.onApproval;
+  const result = await invoker.invokeTool(withParsedArguments(cogTool), input, {
+    toolCallId: executeOptions.toolCallId,
+    runId: context.runId,
+    agentId: context.agentId,
+    signal: context.signal,
+    ...(context.threadId !== undefined && { threadId: context.threadId }),
+    ...(context.userId !== undefined && { userId: context.userId }),
+    ...(context.channelType !== undefined && { channelType: context.channelType }),
+    ...(context.channelId !== undefined && { channelId: context.channelId }),
+    ...(onApproval && { onApproval }),
+  });
+  if (result.error !== undefined) throw new Error(result.error);
+  return result.result as TResult;
+}
+
+/**
+ * Whether the AI SDK asks approval for this call: the converted tool's `needsApproval` (its
+ * `requiresApproval`) holds for the input. Only such a call can have been approved through the
+ * AI SDK approval flow. A call the AI SDK never asks about, even one the guardrails want
+ * approved, is decided by the invoker however the messages look.
+ */
+function asksAISDKApproval<TParams>(cogTool: Tool<TParams>, input: TParams): boolean {
+  const needsApproval = needsApprovalOf(cogTool);
+  return typeof needsApproval === 'function' ? needsApproval(input) : needsApproval === true;
+}
+
+/**
+ * Whether the AI SDK approval flow (ai@6, ai@7) approved this call, read the way the AI SDK
+ * reads it (`collectToolApprovals`): the last message is a tool message with an approving
+ * `tool-approval-response`, to a `tool-approval-request` of an assistant message for this call.
+ * The messages come from the client in most apps, so set the AI SDK's
+ * `experimental_toolApprovalSecret` to have it refuse approvals the server did not sign.
+ */
+function approvedByAISDK({ toolCallId, messages }: AISDKToolExecutionOptions): boolean {
+  const history = Array.isArray(messages) ? messages : [];
+  const last: unknown = history.at(-1);
+  if (!isRecord(last) || last.role !== 'tool' || !Array.isArray(last.content)) return false;
+
+  const approved = new Set<string>();
+  for (const part of last.content) {
+    if (
+      isRecord(part) &&
+      part.type === 'tool-approval-response' &&
+      part.approved === true &&
+      typeof part.approvalId === 'string'
+    ) {
+      approved.add(part.approvalId);
+    }
+  }
+  if (approved.size === 0) return false;
+
+  return history.some(
+    (message) =>
+      isRecord(message) &&
+      message.role === 'assistant' &&
+      Array.isArray(message.content) &&
+      message.content.some(
+        (part) =>
+          isRecord(part) &&
+          part.type === 'tool-approval-request' &&
+          part.toolCallId === toolCallId &&
+          typeof part.approvalId === 'string' &&
+          approved.has(part.approvalId)
+      )
+  );
 }

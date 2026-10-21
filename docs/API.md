@@ -63,6 +63,12 @@ interface CogitatorConfig {
     retry?: LLMRetryConfig | false;
     // Prompt caching (on by default); false turns it off
     promptCache?: PromptCacheConfig | false;
+    // When a model agents fall back from (fallbackModels) is skipped, per model, shared by all runs
+    modelCircuitBreaker?: {
+      failureThreshold?: number;
+      resetTimeout?: number;
+      halfOpenRequests?: number;
+    };
     // Prices of your own in USD per million tokens, by model string or its tail after any '/',
     // over the model registry: { input, output, inputCached?, inputCacheWrite?, inputCacheWrite1h? }
     pricing?: Record<string, ModelPriceConfig>;
@@ -75,6 +81,9 @@ interface CogitatorConfig {
 
   // Versioned instructions and A/B tests (cog.prompts)
   prompts?: PromptsConfig;
+
+  // Hooks around the model and tool calls of every run, also wrapping invokeTool()
+  middleware?: RunMiddleware[];
 
   limits?: {
     maxConcurrentRuns?: number;
@@ -223,7 +232,7 @@ Cogitator has no event emitter. For observability, use the `RunOptions` callback
 #### RunOptions
 
 ```typescript
-interface RunOptions {
+interface RunOptions<TDeps = unknown> {
   input: string;
 
   // Images (URLs or base64) and audio to transcribe
@@ -240,6 +249,9 @@ interface RunOptions {
 
   // Additional context injected into the system prompt
   context?: Record<string, unknown>;
+  // Your own values for the tools (context.deps): never sent to the model, memory, spans or
+  // checkpoints. Required when the agent declares its deps type (new Agent<Deps>(...))
+  deps?: TDeps;
 
   threadId?: string;
   timeout?: number; // overrides agent.timeout
@@ -257,6 +269,9 @@ interface RunOptions {
   // Execute tool calls in parallel (default: false)
   parallelToolCalls?: boolean;
 
+  // Hooks around this run's model and tool calls, after the Cogitator's and the agent's
+  middleware?: RunMiddleware<TDeps>[];
+
   // The user the run acts for: owns the threads it creates, reaches tools as context.userId
   userId?: string;
   // 'owner' (default): only the thread's creator may continue it; 'shared': anyone
@@ -273,6 +288,8 @@ interface RunOptions {
   onToken?: (token: string) => void;
   onReasoning?: (delta: string) => void;
   onHandoff?: (handoff: { from: string; to: string; reason?: string }) => void;
+  // A turn moved from a failing model to the next of the agent's fallbackModels
+  onModelFallback?: (event: { from: string; to: string; error: Error }) => void;
   onToolCall?: (call: ToolCall) => void;
   onToolResult?: (result: ToolResult) => void;
   onRunStart?: (data: { runId: string; agentId: string; input: string; threadId: string }) => void;
@@ -294,7 +311,7 @@ interface RunResult {
   readonly agentId: string;
   readonly threadId: string;
 
-  // Actual model used (may differ from agent.model with cost routing)
+  // The model of the final answer when it may differ from agent.model: cost routing or a fallback
   readonly modelUsed?: string;
 
   readonly usage: {
@@ -361,7 +378,7 @@ const agent = new Agent(config: AgentConfig);
 #### AgentConfig
 
 ```typescript
-interface AgentConfig {
+interface AgentConfig<TDeps = unknown> {
   id?: string; // stable id (generated when omitted)
   name: string;
   description?: string;
@@ -372,6 +389,9 @@ interface AgentConfig {
   model?: string;
   // Explicit provider override (useful for OpenRouter and similar proxies)
   provider?: string;
+  // Models a turn moves to, in order, when model is down, out of quota, rejects the key or is
+  // gone. Rate limits and server errors are retried on model first
+  fallbackModels?: Array<string | { model: string; provider?: string }>;
 
   temperature?: number; // default: 0.7
   topP?: number;
@@ -391,6 +411,8 @@ interface AgentConfig {
 
   maxIterations?: number; // default: 10
   timeout?: number; // ms; falls back to limits.defaultTimeout, then 120000
+  // Hooks around this agent's model and tool calls, after the Cogitator's middleware
+  middleware?: RunMiddleware<TDeps>[];
 }
 ```
 
@@ -451,7 +473,7 @@ const tools = toolset(getWeather);
 #### ToolConfig
 
 ```typescript
-interface ToolConfig<TParams = unknown, TResult = unknown> {
+interface ToolConfig<TParams = unknown, TResult = unknown, TDeps = unknown> {
   name: string;
   description: string;
   category?:
@@ -468,13 +490,23 @@ interface ToolConfig<TParams = unknown, TResult = unknown> {
   tags?: string[];
 
   parameters: ZodType<TParams>;
-  execute: (params: TParams, context: ToolContext) => Promise<TResult>;
+  // Annotate context as ToolContext<Deps> to read the run's deps, typed
+  execute: (params: TParams, context: ToolContext<TDeps>) => Promise<TResult>;
 
   sideEffects?: ('filesystem' | 'network' | 'database' | 'process' | 'external')[];
   requiresApproval?: boolean | ((params: TParams) => boolean);
   timeout?: number;
   sandbox?: SandboxConfig; // from @cogitator-ai/sandbox
   maxResultLength?: number; // overrides limits.maxToolResultLength for this tool
+
+  title?: string; // name for people, such as an MCP client shows
+  outputSchema?: ZodType<TResult>; // advertised by MCPServer, results sent as structuredContent
+  annotations?: {
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
 }
 ```
 
@@ -501,16 +533,25 @@ The model reads at most `limits.maxToolResultLength` characters of a result (def
 #### ToolContext
 
 ```typescript
-interface ToolContext {
+interface BaseToolContext<TDeps = unknown> {
   agentId: string;
   runId: string;
   signal: AbortSignal;
+  toolCallId?: string;
   threadId?: string;
   userId?: string;
   channelType?: string;
   channelId?: string;
+  deps?: TDeps; // RunOptions.deps
 }
+
+// With a deps type, deps is present and typed
+type ToolContext<TDeps = unknown> = unknown extends TDeps
+  ? BaseToolContext
+  : BaseToolContext<TDeps> & { deps: TDeps };
 ```
+
+`new Agent<AppDeps>(...)` makes `deps` required in `run()` and `resume()` and refuses tools whose deps type is unrelated to `AppDeps` (declare every field the tools read in it: tool methods are compared loosely, so a tool reading a field `AppDeps` lacks still compiles). A paused run's checkpoint never holds `deps`, so `resume()` takes them again.
 
 #### Built-in Tools
 
@@ -1223,6 +1264,27 @@ const result = await cog.run(agent, {
 });
 ```
 
+### Run middleware
+
+Callbacks and observers only watch a run. `RunMiddleware` changes it, in `middleware` of the Cogitator, the agent or the run:
+
+```typescript
+import { tripwire, type RunMiddleware } from '@cogitator-ai/core';
+
+const guard: RunMiddleware = {
+  name: 'guard',
+  beforeRun: ({ input }) => {
+    if (input.includes('DROP TABLE')) tripwire('SQL in the input');
+  },
+  beforeModel: ({ messages }, context) => undefined, // or { messages } to change the conversation
+  wrapModelCall: (call, next, context) => next(call), // call.request, call.model, call.stream
+  afterModel: ({ response }) => undefined, // or { content } / { toolCalls }
+  wrapToolCall: (call, next, context) => next(call), // call.toolCall, call.args, call.approved
+};
+```
+
+The Cogitator's middleware runs outermost, then the agent's, then the run's, then the built-in PII masking, prompt injection, guardrails and compaction. See [Run Middleware](https://cogitator.app/docs/core/middleware).
+
 ### Workflow callbacks
 
 ```typescript
@@ -1295,7 +1357,7 @@ String enum (each value equals its name), `ERROR_STATUS_CODES` maps each to an H
 
 Errors of model provider calls are `LLMError`s with a `kind` (also `details.kind`, type `LLMErrorKind`): `rate_limit`, `quota`, `authentication`, `permission`, `not_found`, `invalid_request`, `context_overflow`, `content_filter`, `overloaded`, `server_error`, `timeout`, `network` or `invalid_response`, read from the provider's own error codes. A `quota` error is `LLM_QUOTA_EXCEEDED` and never retried. A call the caller aborts fails with the abort reason.
 
-`cog.run()` throws a `CogitatorError` when the run hits its `timeout` (`Run timed out after <n>ms` → `RUN_TIMEOUT`, with what the finished model calls used and cost in `details.usage`), when cost routing finds the budget exceeded (`Budget exceeded: …` → `BUDGET_EXCEEDED`), and when guardrails block the input or output (`Input blocked: …` / `Output blocked: …` → `LLM_CONTENT_FILTERED`, with `details.harmScores`), so server adapters answer with that status and message.
+`cog.run()` throws a `CogitatorError` when the run hits its `timeout` (`Run timed out after <n>ms` → `RUN_TIMEOUT`, with what the finished model calls used and cost in `details.usage`), when cost routing finds the budget exceeded (`Budget exceeded: …` → `BUDGET_EXCEEDED`), when guardrails block the input or output (`Input blocked: …` / `Output blocked: …` → `LLM_CONTENT_FILTERED`, with `details.harmScores`), and when a run middleware calls `tripwire()` (`Guardrail "<name>" tripped: …` → `GUARDRAIL_TRIPPED` 400, with `details.middleware`, `details.reason` and `details.info`), so server adapters answer with that status and message.
 
 ```typescript
 enum ErrorCode {
@@ -1348,6 +1410,7 @@ enum ErrorCode {
   // Security
   PROMPT_INJECTION_DETECTED,
   PII_DETECTED,
+  GUARDRAIL_TRIPPED, // a middleware tripwire() stopped the run
 
   // General
   VALIDATION_ERROR,

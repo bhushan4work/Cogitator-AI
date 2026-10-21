@@ -7,7 +7,7 @@ export type {
   StatisticalMetricFn,
   StatisticalScore,
 } from './types';
-export { exactMatch, contains, regex, jsonSchema } from './deterministic';
+export { exactMatch, contains, similarity, regex, jsonSchema } from './deterministic';
 export { metric } from './custom';
 export type { CustomMetricConfig } from './custom';
 export { latency, cost, tokenUsage } from './statistical';

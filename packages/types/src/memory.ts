@@ -3,7 +3,7 @@
  */
 
 import type { Message, ToolCall, ToolResult } from './message';
-import type { GraphContext, GraphContextOptions } from './knowledge-graph';
+import type { GraphContext, GraphContextOptions, GraphNode } from './knowledge-graph';
 
 export type MemoryType = 'conversation' | 'fact' | 'embedding';
 
@@ -158,6 +158,32 @@ export interface MemoryQueryOptions {
   includeToolCalls?: boolean;
 }
 
+/** Which threads `listThreads` returns, and in which order. */
+export interface ListThreadsOptions {
+  /** Threads of this agent only */
+  agentId?: string;
+  /**
+   * Threads whose metadata holds each of these values under these top-level keys, compared as
+   * they are: `{ userId: 'u1', archived: false }`
+   */
+  metadata?: Record<string, string | number | boolean>;
+  /** Threads updated at this time or later */
+  updatedAfter?: Date;
+  /** Threads per page, 50 by default, at most 500 */
+  limit?: number;
+  /** Where the page starts: `nextCursor` of the page before, with the same filters and order */
+  cursor?: string;
+  /** By `updatedAt`, then by id: `desc` (default) starts with the threads updated last */
+  order?: 'asc' | 'desc';
+}
+
+/** A page of `listThreads`. */
+export interface ThreadPage {
+  threads: Thread[];
+  /** Pass as `cursor` for the next page, absent on the last one */
+  nextCursor?: string;
+}
+
 export interface SemanticSearchOptions {
   query?: string;
   vector?: number[];
@@ -165,6 +191,18 @@ export interface SemanticSearchOptions {
   threshold?: number;
   filter?: SearchFilter;
 }
+
+/**
+ * A change an adapter made to what it stores, reported once the write succeeded. An entry the
+ * adapter dropped to stay within its limits is reported as deleted.
+ */
+export type MemoryChange =
+  | { type: 'entry-added'; entry: MemoryEntry }
+  | { type: 'entry-deleted'; entryId: string; threadId?: string }
+  | { type: 'thread-cleared'; threadId: string }
+  | { type: 'thread-deleted'; threadId: string };
+
+export type MemoryChangeListener = (change: MemoryChange) => void;
 
 /**
  * Core memory adapter - all adapters implement this
@@ -180,12 +218,24 @@ export interface MemoryAdapter {
   getThread(threadId: string): Promise<MemoryResult<Thread | null>>;
   updateThread(threadId: string, metadata: Record<string, unknown>): Promise<MemoryResult<Thread>>;
   deleteThread(threadId: string): Promise<MemoryResult<void>>;
+  /**
+   * Threads in pages, newest update first by default, filtered by agent, metadata and update
+   * time. A thread's `updatedAt` changes when it is created or its metadata is updated, not
+   * when an entry is added.
+   */
+  listThreads(options?: ListThreadsOptions): Promise<MemoryResult<ThreadPage>>;
 
   addEntry(entry: NewMemoryEntry): Promise<MemoryResult<MemoryEntry>>;
   getEntries(options: MemoryQueryOptions): Promise<MemoryResult<MemoryEntry[]>>;
   getEntry(entryId: string): Promise<MemoryResult<MemoryEntry | null>>;
   deleteEntry(entryId: string): Promise<MemoryResult<void>>;
   clearThread(threadId: string): Promise<MemoryResult<void>>;
+  /**
+   * Calls `listener` with every change the adapter makes from now on, until the returned
+   * function is called. The built-in adapters report every change; one that does not is still
+   * read correctly, its entries are only indexed when a context is built.
+   */
+  onChange?(listener: MemoryChangeListener): () => void;
 
   connect(): Promise<MemoryResult<void>>;
   disconnect(): Promise<MemoryResult<void>>;
@@ -213,6 +263,15 @@ export interface EmbeddingAdapter {
   search(options: SemanticSearchOptions): Promise<MemoryResult<(Embedding & { score: number })[]>>;
   deleteEmbedding(embeddingId: string): Promise<MemoryResult<void>>;
   deleteBySource(sourceId: string): Promise<MemoryResult<void>>;
+  /** The embeddings of these sources, vectors included, in no particular order */
+  getBySources?(sourceIds: string[]): Promise<MemoryResult<Embedding[]>>;
+  /**
+   * Stores `embedding` as the only one of its source, atomically: two processes replacing the
+   * same source at once leave one embedding, not two
+   */
+  replaceBySource?(
+    embedding: Omit<Embedding, 'id' | 'createdAt'>
+  ): Promise<MemoryResult<Embedding>>;
   /**
    * Deletes every embedding the filter matches; a filter without any condition is rejected.
    * Built-in stores implement it, RAG re-ingest needs it to replace a source's chunks.
@@ -259,7 +318,12 @@ export type EmbeddingServiceConfig =
 export type ContextStrategy = 'recent' | 'relevant' | 'hybrid';
 
 export interface ContextBuilderConfig {
-  maxTokens: number;
+  /**
+   * Token budget of a built context. Without it, `build()` takes `maxTokens` from its options:
+   * a Cogitator run passes the context window of the model it runs on
+   */
+  maxTokens?: number;
+  /** Tokens of the budget kept free for the answer (default 10% of `maxTokens`, at least 100) */
   reserveTokens?: number;
   strategy: ContextStrategy;
   includeSystemPrompt?: boolean;
@@ -280,13 +344,34 @@ export interface ContextBuildError {
   error: Error;
 }
 
+/** What a built context left out. */
+export interface DroppedContext {
+  /**
+   * History entries left out, in conversation order: those the budget had no room for, and with
+   * the `relevant` and `hybrid` strategies also those the selection passed over (entries scored
+   * too low, tool entries, entries older than the newest 200 it scores)
+   */
+  entries: MemoryEntry[];
+  /** Facts visible to the user that did not fit */
+  facts: Fact[];
+  /** Search results close enough to the input that did not fit */
+  semanticResults: (Embedding & { score: number })[];
+  /** Knowledge graph nodes cut from the graph context */
+  graphNodes: GraphNode[];
+  /** Tokens of everything left out */
+  tokenCount: number;
+}
+
 export interface BuiltContext {
   messages: Message[];
   facts: Fact[];
   semanticResults: (Embedding & { score: number })[];
   graphContext?: GraphContext;
   tokenCount: number;
+  /** Whether history entries were left out, see `dropped.entries` */
   truncated: boolean;
+  /** What was left out of the context */
+  dropped: DroppedContext;
   /** Parts of the context that failed to load and were left out */
   errors?: ContextBuildError[];
   /** Budget problems, such as a system prompt that alone exceeds `maxTokens - reserveTokens` */
@@ -309,7 +394,11 @@ export interface MemoryConfig {
   sqlite?: Omit<SQLiteAdapterConfig, 'provider'>;
   mongodb?: Omit<MongoDBAdapterConfig, 'provider'>;
   qdrant?: Omit<QdrantAdapterConfig, 'provider'>;
-  embedding?: EmbeddingServiceConfig;
+  /**
+   * The embedding model: a provider's config, or an `EmbeddingService` of your own (another
+   * provider, a cache in front of one), which the runtime uses as it is
+   */
+  embedding?: EmbeddingServiceConfig | EmbeddingService;
   contextBuilder?: Partial<ContextBuilderConfig>;
 }
 
@@ -322,6 +411,11 @@ export interface HybridSearchWeights {
 
 export interface SearchFilter {
   sourceType?: Embedding['sourceType'];
+  /**
+   * Any of these source types, for stores that support it (every built-in one does). A store
+   * that ignores it returns other types too, so a caller filters the results again.
+   */
+  sourceTypes?: Embedding['sourceType'][];
   threadId?: string;
   agentId?: string;
   /** Only embeddings of this user (`metadata.userId`) and those of no user */

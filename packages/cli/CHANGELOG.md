@@ -1,5 +1,114 @@
 # @cogitator-ai/cli
 
+## 0.8.10
+
+### Patch Changes
+
+- Updated dependencies [[`92bcc11`](https://github.com/cogitator-ai/Cogitator-AI/commit/92bcc119e71742eaf2a4a3bffdeceaa18b153e5d)]:
+  - @cogitator-ai/types@0.50.0
+  - @cogitator-ai/memory@0.15.0
+  - @cogitator-ai/core@0.48.0
+  - @cogitator-ai/channels@0.12.6
+  - @cogitator-ai/config@0.17.5
+  - @cogitator-ai/deploy@0.6.14
+  - @cogitator-ai/mcp@19.5.7
+  - @cogitator-ai/studio@0.2.2
+
+## 0.8.9
+
+### Patch Changes
+
+- Updated dependencies [[`db16bbc`](https://github.com/cogitator-ai/Cogitator-AI/commit/db16bbc5f7c49b052382ea8dd4c0ba597216d913), [`db16bbc`](https://github.com/cogitator-ai/Cogitator-AI/commit/db16bbc5f7c49b052382ea8dd4c0ba597216d913), [`db16bbc`](https://github.com/cogitator-ai/Cogitator-AI/commit/db16bbc5f7c49b052382ea8dd4c0ba597216d913)]:
+  - @cogitator-ai/types@0.49.0
+  - @cogitator-ai/memory@0.14.0
+  - @cogitator-ai/core@0.47.0
+  - create-cogitator-app@0.8.6
+  - @cogitator-ai/channels@0.12.5
+  - @cogitator-ai/config@0.17.4
+  - @cogitator-ai/deploy@0.6.13
+  - @cogitator-ai/mcp@19.5.6
+  - @cogitator-ai/studio@0.2.1
+
+## 0.8.8
+
+### Patch Changes
+
+- Updated dependencies [[`b42f62e`](https://github.com/cogitator-ai/Cogitator-AI/commit/b42f62ecd300cd945c42a91014b1297bc4e10c43)]:
+  - @cogitator-ai/core@0.46.0
+  - @cogitator-ai/types@0.48.0
+  - @cogitator-ai/studio@0.2.0
+  - @cogitator-ai/channels@0.12.4
+  - @cogitator-ai/mcp@19.5.5
+  - @cogitator-ai/config@0.17.3
+  - @cogitator-ai/deploy@0.6.12
+  - @cogitator-ai/memory@0.13.3
+
+## 0.8.7
+
+### Patch Changes
+
+- Updated dependencies [[`ed48837`](https://github.com/cogitator-ai/Cogitator-AI/commit/ed4883796a82b5f2b832a5bb45ba861fb0b17f45)]:
+  - @cogitator-ai/core@0.45.0
+  - @cogitator-ai/types@0.47.0
+  - @cogitator-ai/channels@0.12.3
+  - @cogitator-ai/mcp@19.5.4
+  - @cogitator-ai/studio@0.1.12
+  - @cogitator-ai/config@0.17.2
+  - @cogitator-ai/deploy@0.6.11
+  - @cogitator-ai/memory@0.13.2
+
+## 0.8.6
+
+### Patch Changes
+
+- Updated dependencies [[`f68ebd8`](https://github.com/cogitator-ai/Cogitator-AI/commit/f68ebd892ee493279058212105381e8acb73b70e)]:
+  - @cogitator-ai/core@0.44.0
+  - @cogitator-ai/types@0.46.0
+  - @cogitator-ai/channels@0.12.2
+  - @cogitator-ai/mcp@19.5.3
+  - @cogitator-ai/studio@0.1.11
+  - @cogitator-ai/config@0.17.1
+  - @cogitator-ai/deploy@0.6.10
+  - @cogitator-ai/memory@0.13.1
+
+## 0.8.5
+
+### Patch Changes
+
+- Updated dependencies [[`f903fc1`](https://github.com/cogitator-ai/Cogitator-AI/commit/f903fc15fca7e29f5187f1fc60e099a8a9b28a03), [`f903fc1`](https://github.com/cogitator-ai/Cogitator-AI/commit/f903fc15fca7e29f5187f1fc60e099a8a9b28a03)]:
+  - @cogitator-ai/mcp@19.5.2
+  - create-cogitator-app@0.8.5
+
+## 0.8.4
+
+### Patch Changes
+
+- Updated dependencies [[`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b), [`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b), [`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b)]:
+  - @cogitator-ai/memory@0.13.0
+  - @cogitator-ai/core@0.43.0
+  - @cogitator-ai/types@0.45.0
+  - @cogitator-ai/config@0.17.0
+  - @cogitator-ai/channels@0.12.1
+  - @cogitator-ai/studio@0.1.10
+  - @cogitator-ai/mcp@19.5.1
+  - @cogitator-ai/deploy@0.6.9
+  - create-cogitator-app@0.8.4
+
+## 0.8.3
+
+### Patch Changes
+
+- Updated dependencies [[`b5c11eb`](https://github.com/cogitator-ai/Cogitator-AI/commit/b5c11eb5368f52169273527c2ea6f16e83ab8b22), [`b5c11eb`](https://github.com/cogitator-ai/Cogitator-AI/commit/b5c11eb5368f52169273527c2ea6f16e83ab8b22), [`b5c11eb`](https://github.com/cogitator-ai/Cogitator-AI/commit/b5c11eb5368f52169273527c2ea6f16e83ab8b22)]:
+  - @cogitator-ai/channels@0.12.0
+  - @cogitator-ai/types@0.44.0
+  - @cogitator-ai/core@0.42.0
+  - @cogitator-ai/mcp@19.5.0
+  - create-cogitator-app@0.8.3
+  - @cogitator-ai/config@0.16.1
+  - @cogitator-ai/deploy@0.6.8
+  - @cogitator-ai/memory@0.12.9
+  - @cogitator-ai/studio@0.1.9
+
 ## 0.8.2
 
 ### Patch Changes

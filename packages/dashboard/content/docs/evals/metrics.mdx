@@ -55,6 +55,36 @@ contains(); // case-insensitive (default)
 contains({ caseSensitive: true }); // case-sensitive
 ```
 
+### similarity
+
+Measures string similarity against expected values using Levenshtein distance, implemented via two-row dynamic programming without external dependencies. Calculates:
+
+`score = 1 - distance / max(output.length, expected.length)`
+
+Identical strings score `1`, unrelated strings score near `0`, and two empty strings score `1` without division by zero. Like `exactMatch`, it trims leading and trailing whitespace from both strings and is case-insensitive by default. Cases without `expected` score `0` with details `'no expected value provided'`. When the score is below `1`, `details` reports the distance alongside the expected and received values.
+
+```typescript
+import { EvalSuite, similarity, threshold } from '@cogitator-ai/evals';
+
+const suite = new EvalSuite({
+  dataset,
+  target: { fn },
+  metrics: [similarity()],
+  assertions: [threshold('similarity', 0.8)],
+});
+```
+
+Case-sensitive mode:
+
+```typescript
+similarity({ caseSensitive: true });
+```
+
+| Option          | Type    | Default        | Description                |
+| --------------- | ------- | -------------- | -------------------------- |
+| `caseSensitive` | boolean | false          | Require exact case match   |
+| `name`          | string  | `'similarity'` | Custom name for the metric |
+
 ### regex
 
 Tests the output against a regular expression pattern.
@@ -70,7 +100,7 @@ The `g` and `y` flags are ignored: they make `RegExp.test` resume from the last 
 
 ### Metric names
 
-Every built-in per-case metric (`exactMatch`, `contains`, `regex`, `jsonSchema`, `faithfulness`, `relevance`, `coherence`, `helpfulness`) takes a `name` option. A suite refuses two metrics with the same name, a per-case metric and a statistical one included, because their scores would merge into one aggregate, comparison and CSV column. Name the second metric of a kind:
+Every built-in per-case metric (`exactMatch`, `contains`, `similarity`, `regex`, `jsonSchema`, `faithfulness`, `relevance`, `coherence`, `helpfulness`) takes a `name` option. A suite refuses two metrics with the same name, a per-case metric and a statistical one included, because their scores would merge into one aggregate, comparison and CSV column. Name the second metric of a kind:
 
 ```typescript
 metrics: [

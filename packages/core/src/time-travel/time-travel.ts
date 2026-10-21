@@ -10,6 +10,7 @@ import type {
   RunResult,
   TimeTravelConfig,
   ExecutionStep,
+  ExecutionTrace,
 } from '@cogitator-ai/types';
 import { DEFAULT_TIME_TRAVEL_CONFIG } from '@cogitator-ai/types';
 import type { Agent } from '../agent';
@@ -101,8 +102,13 @@ export class TimeTravel {
     return checkpoints;
   }
 
-  async getCheckpoints(traceId: string): Promise<ExecutionCheckpoint[]> {
-    return this.checkpointStore.getByTrace(traceId);
+  /**
+   * The checkpoints of a run, by its run id. A trace id works too: it gives the checkpoints of
+   * every run of that trace.
+   */
+  async getCheckpoints(id: string): Promise<ExecutionCheckpoint[]> {
+    const ofRun = await this.checkpointStore.list({ runId: id });
+    return ofRun.length > 0 ? ofRun : this.checkpointStore.getByTrace(id);
   }
 
   async getCheckpoint(checkpointId: string): Promise<ExecutionCheckpoint | null> {
@@ -126,7 +132,7 @@ export class TimeTravel {
     if (options?.mode === 'deterministic') {
       await this.recordDeterministicTrace(result);
     } else {
-      await this.recordTrace(result, true);
+      await this.recordTrace(result);
     }
     return result;
   }
@@ -223,12 +229,49 @@ export class TimeTravel {
     return forks;
   }
 
-  async compare(traceId1: string, traceId2: string): Promise<TraceDiff> {
-    return this.comparator.compare(traceId1, traceId2);
+  /**
+   * Compares two recorded runs, each named by its run id, or by its trace id when that trace
+   * holds one recorded run.
+   */
+  async compare(id1: string, id2: string): Promise<TraceDiff> {
+    return this.comparator.compare(await this.resolveRun(id1), await this.resolveRun(id2));
   }
 
   async compareWithOriginal(replayResult: ReplayResult): Promise<TraceDiff> {
-    return this.comparator.compare(replayResult.originalTraceId, replayResult.trace.traceId);
+    const original = await this.originalTrace(replayResult);
+    return this.comparator.compare(
+      original?.id ?? replayResult.originalRunId,
+      await this.resolveRun(replayResult.runId)
+    );
+  }
+
+  /**
+   * The recorded trace of the run a replay started from: stored under its run id, or under its
+   * trace id by versions that keyed traces that way.
+   */
+  private async originalTrace(replay: ReplayResult): Promise<ExecutionTrace | null> {
+    return (
+      (await this.traceStore.getByRunId(replay.originalRunId)) ??
+      (await this.traceStore.get(replay.originalTraceId))
+    );
+  }
+
+  /**
+   * The store id of the run `id` names: a run id as it is, a trace id when exactly one recorded
+   * run belongs to it. Runs started inside other runs share their trace, so a trace id can be
+   * ambiguous: then the run id is needed.
+   */
+  private async resolveRun(id: string): Promise<string> {
+    if (await this.traceStore.get(id)) return id;
+    const byRun = await this.traceStore.getByRunId(id);
+    if (byRun) return byRun.id;
+    const runs = (await this.traceStore.query({ traceId: id })).filter((run) => run.traceId === id);
+    if (runs.length > 1) {
+      throw new Error(
+        `Trace ${id} holds ${runs.length} recorded runs (${runs.map((run) => run.runId).join(', ')}): pass a run id`
+      );
+    }
+    return runs[0]?.id ?? id;
   }
 
   formatDiff(diff: TraceDiff): string {
@@ -248,12 +291,13 @@ export class TimeTravel {
   }
 
   /**
-   * Stores a run's trace under its trace id, so `compare()` can read it. The
-   * trace of an original run is stored once; a replay's is always new.
+   * Stores a run's trace under its run id, so `compare()` can read it. A paused run and the run
+   * that resumes it share the id: what the run did last replaces what it did before, but a
+   * paused result never replaces a trace already stored.
    */
-  private async recordTrace(result: RunResult, replay = false): Promise<void> {
-    const id = result.trace.traceId;
-    if (!replay && (await this.traceStore.get(id))) return;
+  private async recordTrace(result: RunResult): Promise<void> {
+    const id = result.runId;
+    if (result.status === 'paused' && (await this.traceStore.get(id))) return;
     await this.traceStore.store(buildExecutionTrace(result, runInput(result), { id }));
   }
 
@@ -262,15 +306,16 @@ export class TimeTravel {
    * original's up to the replayed step, ending in the replayed output.
    */
   private async recordDeterministicTrace(result: ReplayResult): Promise<void> {
-    const original = await this.traceStore.get(result.originalTraceId);
+    const original = await this.originalTrace(result);
     if (!original) {
-      await this.recordTrace(result, true);
+      await this.recordTrace(result);
       return;
     }
     await this.traceStore.store({
       ...original,
-      id: result.trace.traceId,
+      id: result.runId,
       runId: result.runId,
+      traceId: result.trace.traceId,
       output: result.output,
       steps: stepsBeforeToolCall(original.steps, result.stepsReplayed),
       createdAt: new Date(),
@@ -278,7 +323,7 @@ export class TimeTravel {
     });
   }
 
-  /** Deletes expired checkpoints of the run's agent and the oldest beyond the per-trace cap. */
+  /** Deletes expired checkpoints of the run's agent and the oldest of the run beyond the cap. */
   private async pruneCheckpoints(result: RunResult): Promise<void> {
     const { maxCheckpointsPerTrace, checkpointRetention } = this.config;
 
@@ -292,7 +337,7 @@ export class TimeTravel {
     }
 
     if (maxCheckpointsPerTrace !== undefined && maxCheckpointsPerTrace > 0) {
-      const forTrace = (await this.checkpointStore.getByTrace(result.trace.traceId)).sort(
+      const forTrace = (await this.checkpointStore.list({ runId: result.runId })).sort(
         (a, b) => a.createdAt.getTime() - b.createdAt.getTime()
       );
       for (const checkpoint of forTrace.slice(0, forTrace.length - maxCheckpointsPerTrace)) {
@@ -302,7 +347,7 @@ export class TimeTravel {
   }
 
   private async recordFork(fork: ForkResult): Promise<ForkResult> {
-    await this.recordTrace(fork.result, true);
+    await this.recordTrace(fork.result);
     return fork;
   }
 }

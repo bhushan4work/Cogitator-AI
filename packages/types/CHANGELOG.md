@@ -1,5 +1,121 @@
 # @cogitator-ai/types
 
+## 0.50.0
+
+### Minor Changes
+
+- [#224](https://github.com/cogitator-ai/Cogitator-AI/pull/224) [`92bcc11`](https://github.com/cogitator-ai/Cogitator-AI/commit/92bcc119e71742eaf2a4a3bffdeceaa18b153e5d) - Every message and document is embedded once.
+
+  - `MessageIndex` keeps a vector per history entry in an embedding store (`sourceType: 'message'`). Attached to an adapter it embeds new user and assistant entries in the background, in batches, and deletes vectors with their entries and threads. `ContextBuilder` takes it as `messageIndex`: `relevant` and `hybrid` then embed only the input, read kept vectors for the newest entries and find older ones of the thread with a search of the store, so recall is no longer limited to the newest 200 entries. The `Cogitator` runtime sets one up for `relevant` and `hybrid` when `memory.embedding` and an embedding store are configured (the in-process `memory` adapter keeps vectors in process as before), and `close()` waits for its work. History written before the index is indexed in the background the first time a thread is built.
+  - `MemoryAdapter.onChange(listener)` reports `entry-added`, `entry-deleted`, `thread-cleared` and `thread-deleted` once stored. Every built-in adapter implements it through the new `ChangeReportingMemoryAdapter` base, which adapters of your own can extend. Redis reports threads and entries it expired once a later write or read finds them gone, and its thread index now outlives threads by seven lifetimes for that.
+  - Message vectors are marked `metadata.index: 'messages'` and carry the thread's `agentId` and `userId`, so user filters on a shared store leave out other users' messages.
+  - `EmbeddingAdapter.getBySources(ids)` reads embeddings with their vectors by source, `replaceBySource(embedding)` stores one as the only embedding of its source atomically (so indexes of several processes leave one vector per message), and `SearchFilter.sourceTypes` takes a list of source types. Every built-in store implements all three, stores of your own keep working without them. Semantic context now searches only facts and documents: embeddings stored as `sourceType: 'message'` no longer show up in it.
+  - With `relevant` or `hybrid`, the runtime now writes message vectors into `memory.qdrant` (and the Postgres store), so a read-only Qdrant key needs write access.
+  - RAG: `ingest()` skips a source whose documents, chunker and embedding model did not change, and reports them as `unchanged`. A changed source is written as a new generation before the previous one is deleted, so it is never missing from queries, and its unchanged documents keep their vectors. The first chunk of each document is written last, so an ingest that stopped is finished by the next one. Chunkers get an optional `fingerprint`, which the built-in ones have and a source needs to be skipped. A local keyword index is filled from the store for skipped sources. Chunks carry `ragContentHash`, `ragGeneration` and `ragSourceDocuments`. Chunks stored by earlier versions are replaced once as before.
+  - Postgres: vectors of 2001 to 4000 dimensions get an HNSW index on their `halfvec` cast (pgvector 0.7+) instead of none, in the memory store and both knowledge graph adapters. The memory schema version is recorded in `<schema>.cogitator_schema_migrations`, and `connect()` changes tables only when it is older or they are gone. Processes connecting at once take turns under a lock on the schema instead of failing on the same `CREATE`, in one transaction, so it also holds behind a pooler in transaction mode. A table of 2001 to 4000 dimensions from before gets its index on the first connect, which on a large table takes a while: build it ahead with `CREATE INDEX CONCURRENTLY idx_embeddings_vector ON <schema>.embeddings USING hnsw ((vector::halfvec(<n>)) halfvec_cosine_ops)`. New indexes on `embeddings(source_id)` and `metadata->>'threadId'`. Qdrant gets payload indexes on `sourceId`, `sourceType` and `metadata.threadId`.
+  - `@cogitator-ai/test-utils`: conformance cases `reports-changes` and `get-by-sources`, and source type lists in `filters`.
+
+## 0.49.0
+
+### Minor Changes
+
+- [#223](https://github.com/cogitator-ai/Cogitator-AI/pull/223) [`db16bbc`](https://github.com/cogitator-ai/Cogitator-AI/commit/db16bbc5f7c49b052382ea8dd4c0ba597216d913) - Memory adapters share one contract, checked by a conformance suite, and threads can be listed.
+
+  - `MemoryAdapter.listThreads(options)` pages through threads by update time, filtered by agent, metadata values (compared by type) and update time, with an opaque cursor. Every built-in adapter implements it in the database: Redis keeps an index of threads by update time and adds threads written by earlier versions to it the first time threads are listed. Adapters of your own need to implement it.
+  - Every adapter now keeps the same contract: `addEntry` into a thread that does not exist fails (InMemory, Redis and MongoDB used to store an orphan entry), `updateThread` is atomic under concurrent calls (SQLite, Redis and MongoDB could lose an update), entries with one `createdAt` come back in the order they were added, a negative or fractional `getEntries` limit fails, `createThread` with an empty id fails, a field that was never set comes back absent instead of `null` (Postgres), and InMemory returns copies instead of the objects it stores.
+  - `SessionManager.list()` finds sessions with `listThreads` and no longer keeps an index thread. `indexRefreshInterval` is deprecated and ignored.
+  - `@cogitator-ai/test-utils` ships `memoryAdapterConformanceCases` and `embeddingAdapterConformanceCases`, framework-agnostic suites that check an adapter or embedding store against this contract. `MockMemoryAdapter` implements `listThreads`.
+  - `RedisClient` gains `eval(script, numKeys, ...args)`, run on prefixed keys.
+
+  Upgrading a database that already holds data:
+
+  - Postgres builds its new indexes on `threads` (agent and update time, update time alone, a GIN index on `metadata`) when the adapter connects, which blocks writes to `threads` while each one builds. On a large table create them first with `CREATE INDEX CONCURRENTLY` under the same names (`idx_threads_agent_updated`, `idx_threads_updated`, `idx_threads_metadata`) so connecting finds them in place. The new `entries.seq` column is added without rewriting the table: entries written before it keep their order by `createdAt`.
+  - MongoDB filters on metadata keys that contain a dot with `$getField`, which needs MongoDB 5.0 or later.
+  - Redis lists threads through an index it fills the first time threads are listed, and again when the index is gone.
+
+- [#223](https://github.com/cogitator-ai/Cogitator-AI/pull/223) [`db16bbc`](https://github.com/cogitator-ai/Cogitator-AI/commit/db16bbc5f7c49b052382ea8dd4c0ba597216d913) - `RunOptions.onModelTurn` reports each model turn a run keeps, `{ content, toolCalls, model }`, as every `afterModel` middleware left it and before its tool calls run. A run without `stream: true` gets the text of a turn that calls tools only from here, and a run's own middleware, which sits inside the Cogitator's and the agent's, sees a turn before they do.
+
+  A run that uses memory refuses an empty `threadId` with `VALIDATION_ERROR`, as memory adapters no longer create a thread without an id.
+
+  A tool call that repeats the previous turn's calls, which the run answers with an error instead of running it, is now reported to `onToolCall` and `onToolResult` like any other.
+
+## 0.48.0
+
+### Minor Changes
+
+- [#220](https://github.com/cogitator-ai/Cogitator-AI/pull/220) [`b42f62e`](https://github.com/cogitator-ai/Cogitator-AI/commit/b42f62ecd300cd945c42a91014b1297bc4e10c43) - Telemetry follows the OpenTelemetry GenAI semantic conventions, and runs that belong together share one trace.
+
+  - Spans carry `gen_ai.*` attributes next to the existing `llm.*`, `tool.*` and `run.*` ones: `invoke_agent` on `agent.run`, `chat` on model calls (provider, request parameters, response id, finish reasons, token usage with cache reads, cache writes and reasoning), `execute_tool` on tool calls. `GEN_AI` names them all.
+  - Streamed model calls record `gen_ai.response.time_to_first_chunk`.
+  - Trace and span ids are W3C ids (32 and 16 hex characters) instead of `trace_…` and `span_…`. Code that parsed the old prefixes needs to treat ids as opaque strings. `agent.run` is now an `internal` span instead of `server`.
+  - `RunOptions.trace` puts a run under a given parent, with `parseTraceparent` and `formatTraceparent` for W3C headers. A run started inside a tool of another run joins that run's trace under the tool's span, and `withTraceContext` does the same for any code.
+  - `registerTelemetry(observer)` watches every runtime of the process, and `cogitator.recordSpan()` reports spans of your own orchestration to a runtime's observers.
+  - `telemetry: { captureContent: true }` in the config, or `captureContent: true` on an observer, records system instructions, input and output messages, tool definitions, and tool arguments and results on the spans in the convention's JSON shapes. Observers that did not ask for content never receive it.
+  - The OTLP exporter sends the convention's span names (`chat gpt-5.5`, `execute_tool search`, `invoke_agent researcher`) and array attributes, and keeps the Cogitator name as `cogitator.span_name`.
+  - Workflows put agent runs under their node span, or under a `workflow.run` (`invoke_workflow`) span reported to the runtime's observers when no workflow tracer is on. Workflows running at once on one tracer no longer nest into each other. The `LLM_*` span attribute constants of workflows are deprecated in favour of `GEN_AI`.
+  - Swarms report a `swarm.run` (`invoke_workflow`) span and run their agents under it, distributed swarms on their workers too.
+  - A paused run reports its `agent.run` span with status `unset`, and a resumed run continues its trace. Time travel and learning traces are stored under the run id, since runs can now share a trace id: `timeTravel.compare()` and `getCheckpoints()` take a run id, and still take a trace id that belongs to one recorded run.
+  - A workflow tracer given a `traceparent` with sampling flags `00` (through `setContextFromHeaders`) now leaves the workflow unsampled, as the caller asked, and the trace a workflow runs in takes precedence over a header the tracer kept from an earlier request.
+  - The studio's trace inspector shows the instructions, prompt and response of every model call.
+
+## 0.47.0
+
+### Minor Changes
+
+- [#217](https://github.com/cogitator-ai/Cogitator-AI/pull/217) [`ed48837`](https://github.com/cogitator-ai/Cogitator-AI/commit/ed4883796a82b5f2b832a5bb45ba861fb0b17f45) - `memory.embedding` takes an `EmbeddingService` of your own as well as a provider's config. The runtime uses it as it is for the context builder and the embedding store, so a provider without a built-in service, or a cache in front of one, plugs in without wrapping the runtime. A config with `provider` works as before. A service is code, so it is passed to `new Cogitator()`, while `cogitator.yml` and `defineConfig()` keep taking provider configs only.
+
+## 0.46.0
+
+### Minor Changes
+
+- [#215](https://github.com/cogitator-ai/Cogitator-AI/pull/215) [`f68ebd8`](https://github.com/cogitator-ai/Cogitator-AI/commit/f68ebd892ee493279058212105381e8acb73b70e) - Runs take middleware: hooks around every model call and tool call, for what applies to all of them (masking, guards, caching, argument rewriting, logging). `middleware` on the Cogitator config, the agent and the run takes `RunMiddleware` objects with a `name` and any of five hooks: `beforeRun` checks a new run's input before anything is saved or sent (not called on `resume()`), `beforeModel` can return `{ messages }` to change the conversation from a turn on, `wrapModelCall` wraps each call to each model a turn tries (fallbacks included) and can change the request or the stream sink, call `next` more than once or answer without it, `afterModel` can replace a turn's `content` or `toolCalls` before the run uses them, and `wrapToolCall` wraps each tool call that passed approval and can change its arguments (checked against the tool's schema and `requiresApproval` again, an approval never carrying over to them) or answer for the tool. Every hook gets the run's context: `runId`, `threadId`, the agent, `userId`, the channel, `iteration`, `signal`, `deps` and a `state` map the run's middleware share.
+
+  The Cogitator's middleware runs first, then the agent's (after a handoff, the agent the run went on as), then the run's. `before*` hooks run in that order, `wrap*` hooks nest with the first outermost, `afterModel` runs in reverse. A middleware with `holdsStream: true` makes a streamed run hold each turn's text until the turn is done and the hooks saw it, so text a hook retries, blocks or replaces never reaches a listener. Every call a `wrapModelCall` hook sends counts toward usage, cost and budgets, an answer it gives without the model counts nothing. The Cogitator's `wrapToolCall` hooks also wrap `invokeTool()`, which throws an error they throw, a tripwire among them, as that error would fail a run. A tripwire raised inside a tool, such as a nested run of an `agentAsTool()`, stops the outer run too instead of reaching the model as a tool error.
+
+  `tripwire(reason, info?)` stops a run as a guard that tripped: it fails with the new error code `GUARDRAIL_TRIPPED` (HTTP 400), `details` holding the reason, `info` and the middleware's name, and `isTripwire(error)` tells it apart. Any other error a hook throws fails the run as it is.
+
+  PII masking (`security.pii`), prompt injection detection (`security.promptInjection`), guardrails (`guardrails`) and compaction (`context`) now run as built-in middleware closest to the model, with the same behavior as before. PII masking of agent turns moved from the backend into its middleware, so it also masks what other middleware add, while the runtime's own model calls (guardrails, reflection, summaries) keep the masked backend. `piiMiddleware`, `promptInjectionMiddleware`, `guardrailsMiddleware` and `compactionMiddleware` build them, to give a feature to one agent only.
+
+  A run without middleware of its own behaves exactly as before. `middleware` is code, so `agent.serialize()` and the agent wire format do not carry it, and `toAgentWire()` warns about an agent that has some. New exports: `tripwire`, `isTripwire`, `TripwireDetails`, the four middleware factories, `RunMiddleware`, `RunMiddlewareContext`, `RunInputEvent`, `ModelTurnEvent`, `ModelTurnUpdate`, `ModelCallRequest`, `ModelCallHandler`, `ModelStreamSink`, `ModelResponseEvent`, `ModelResponseUpdate`, `ToolCallRequest` and `ToolCallHandler`.
+
+## 0.45.0
+
+### Minor Changes
+
+- [#210](https://github.com/cogitator-ai/Cogitator-AI/pull/210) [`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b) - A run's history is sized to the model it runs on. With `memory.contextBuilder` set and no `maxTokens`, the runtime used to keep every run within 4000 tokens of history, whatever the model. The budget is now the context window of the model the run starts on (from the model registry, then the model family, else 8192 tokens), minus room for the answer (the agent's `maxTokens`, else 15% of the window, at most half of it), the tool schemas and the input, and below the point where the context manager would compress, when it is on. A model on Ollama gets at most the 4096 tokens Ollama serves by default, except on Ollama Cloud (`https://ollama.com` as `llm.providers.ollama.baseUrl`, or a model tagged `cloud`). The builder keeps `reserveTokens` (10% of the budget by default) on top as slack, a run that leaves no room for history logs a warning, and an explicit `maxTokens` still wins.
+
+  `ContextBuilder.build()` takes `maxTokens` per call, so one builder serves models of different sizes, and `ContextBuilderConfig.maxTokens` is optional: a build without a budget from either side throws, and a budget that is not a positive number throws too, `memory.contextBuilder.maxTokens: 0` included. `BuiltContext.dropped` (`DroppedContext`) lists what was left out: the history entries, facts, search results and graph nodes, with their token count. With the `relevant` and `hybrid` strategies the entries include those the selection passed over. `ContextBuilderConfigSchema` accepts a config without `maxTokens`, and `modelContextWindow(model)` from `@cogitator-ai/core` gives the window the runtime uses.
+
+  **Migration:** runs with `memory.contextBuilder` and no `maxTokens` now send much more history on models with large windows, and every turn costs more on long threads. Set `memory.contextBuilder.maxTokens` to keep a cap, `4000` restores the previous behavior. If your Ollama server runs with a larger context (`OLLAMA_CONTEXT_LENGTH`), set `maxTokens` to use it. Code that builds `BuiltContext` objects of its own, such as test doubles, needs a `dropped` field.
+
+- [#210](https://github.com/cogitator-ai/Cogitator-AI/pull/210) [`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b) - Agents can fall back to other models. `fallbackModels` on an agent lists models a turn moves to, in order, when its model fails in a way another model may not: the provider is down, overloaded or timing out after its retries, the account is out of quota, the key is rejected, the model is gone, the prompt does not fit its context window or its answer could not be read. Rate limits and server errors are still retried on the same model first (`llm.retry`), quota, authentication, permission and missing-model errors move at once, and `content_filter` and `invalid_request` failures, which another model would refuse as well, never move. An aborted run never moves either.
+
+  Each model has a circuit breaker shared by the runtime's runs, `llm.modelCircuitBreaker` (`failureThreshold` 5, `resetTimeout` 30 000 ms, `halfOpenRequests` 3 by default, also accepted by `cogitator.yml` through `@cogitator-ai/config`): a model that keeps failing, or fails in a way that lasts, is skipped until its breaker lets a call through again. A prompt too long for a model and a call cut short by the run's abort or timeout do not count against it. Every turn starts from the agent's model, a stream moves only before its first token, a fallback turn is priced at the model that answered it, `onModelFallback` and an `llm.fallback` span report every move, and `RunResult.modelUsed` names the model of the final answer. When every model fails the run ends with their shared error code, or `LLM_UNAVAILABLE` when they failed differently, each failure in `details.attempts`. `fallbackModels` survives `agent.serialize()` (and `Agent.validateSnapshot` checks it) and the agent wire format.
+
+  A turn the provider ends with `finishReason: 'error'` moves like an unreadable answer, its tokens still counted. A turn that moves to a model with a smaller context window than the agent's model gets its messages cut to fit that window: the system prompt and the newest messages stay, and no tool result loses its call.
+
+  An agent without `fallbackModels` behaves exactly as before. New exports: `FallbackModel`, `ModelFallbackEvent`, `ModelCircuitBreakerConfig` and `ModelCircuitBreakerConfigSchema`.
+
+- [#210](https://github.com/cogitator-ai/Cogitator-AI/pull/210) [`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b) - Tools can get typed per-run dependencies. `RunOptions.deps` reaches every tool of the run as `context.deps`, including tools of agents it hands over to, agents run with `agentAsTool` and `cogitator.invokeTool(tool, args, { deps })`. Unlike `context`, which is added to the system prompt, deps never reach the model, the memory, spans, the run result or a paused run's checkpoint, so `resume()` takes them again. Server adapters, channels, swarms, workflows and the worker start runs without deps for now.
+
+  `ToolContext<Deps>` types `context.deps` for a tool. `new Agent<Deps>(...)` makes `deps` required in `run()` and `resume()` and refuses tools whose deps type is unrelated to `Deps`. Tool methods are compared loosely, so declare every field the agent's tools read in `Deps`.
+
+  - `Tool`, `ToolConfig`, `tool()`, `AgentConfig`, `Agent`, `RunOptions` and `ResumeOptions` take the deps type as a new last type parameter that defaults to `unknown`, and `cogitator.run()`, `resume()`, `invokeTool()` and `agentAsTool()` are generic over it, so existing code compiles as it is.
+  - New types: `BaseToolContext<Deps>` (the context a runtime hands a tool, with `deps?`), `RunDeps<Deps>` and `ToolInvocationOptions.deps`.
+  - `ToolContext` is now a type alias over `BaseToolContext` instead of an interface. `interface X extends ToolContext` still works, but declaration merging into `ToolContext` (`declare module '@cogitator-ai/types' { interface ToolContext { ... } }`) no longer does: merge into `BaseToolContext` instead.
+
+## 0.44.0
+
+### Minor Changes
+
+- [#207](https://github.com/cogitator-ai/Cogitator-AI/pull/207) [`b5c11eb`](https://github.com/cogitator-ai/Cogitator-AI/commit/b5c11eb5368f52169273527c2ea6f16e83ab8b22) - Tools carry a `title`, an `outputSchema` and MCP `annotations` (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), and they cross MCP in both directions. `getTools()` / `wrapMCPTools()` keep the server's title (or the title of its annotations), its hints and its output schema, as a zod schema of the result. `MCPServer` and `cogitatorToMCP()` advertise a tool's title, hints and `z.object()` output schema, and the server sends the result of such a tool as `structuredContent`, with its JSON as text for clients that read only `content`. A result the output schema rejects comes back as a tool error that says why. Only a `z.object()` output schema (`z.strictObject` and `z.looseObject` too) is advertised, since MCP output schemas need an object root and the MCP SDK takes them only as zod object schemas: a record, a union or a pipe is left out, and `MCPServer` warns when it registers such a tool. Nothing checks the output schema in a run.
+
+  A tool the server marks destructive (`destructiveHint: true` without `readOnlyHint: true`) now needs approval: a Cogitator run pauses before it runs, and `invokeTool` asks `onApproval`. The new `requiresApproval` adapter option takes `true` (every tool), `false` (none) or a function of the MCP definition, and `isDestructiveMCPTool()` is the default check. A tool without the hint is not taken as destructive, although MCP's own default for a missing hint is `true`.
+
+  `withParsedArguments(tool)` from core keeps a tool's approval, sandbox, timeout and result limit with a pass-through schema, for running through `invokeTool` a call whose arguments were already parsed with the tool's own schema. `MCPServer` uses it.
+
+  **Migration:** agents whose MCP servers mark tools destructive now pause for approval before calling them. Approve them in your approval flow (`onApproval`, `cogitator.resume()`, the channels approvals), or pass `{ requiresApproval: false }` to `getTools()` / `wrapMCPTools()` for a server you trust (`requiresApproval: false` under `mcpServers.<name>` in a channels assistant config). Code that builds `MCPToolDefinition` objects by hand is unaffected, the new `title` and `outputSchema` fields are optional.
+
 ## 0.43.0
 
 ### Minor Changes

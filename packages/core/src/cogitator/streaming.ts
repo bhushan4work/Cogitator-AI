@@ -1,10 +1,12 @@
 import { nanoid } from 'nanoid';
 import type {
+  ChatRequest,
   ChatUsage,
   FinishReason,
   LLMBackend,
   LLMResponseFormat,
   Message,
+  ModelStreamSink,
   PromptCacheConfig,
   ReasoningConfig,
   ToolCall,
@@ -48,6 +50,45 @@ export async function streamChat(
   responseFormat?: LLMResponseFormat,
   extras: StreamChatExtras = {}
 ): Promise<StreamChatResult> {
+  return streamChatRequest(
+    backend,
+    {
+      model,
+      messages,
+      tools: registry.getSchemas(),
+      ...(extras.toolChoice && { toolChoice: extras.toolChoice }),
+      temperature: agent.config.temperature,
+      topP: agent.config.topP,
+      maxTokens: agent.config.maxTokens,
+      stop: agent.config.stopSequences,
+      responseFormat,
+      reasoning: extras.reasoning,
+      cache: extras.cache,
+      ...(extras.cachePrefix !== undefined && { cachePrefix: extras.cachePrefix }),
+      signal,
+    },
+    { onToken, ...(extras.onReasoning && { onReasoning: extras.onReasoning }) }
+  );
+}
+
+/** When a streamed answer began to arrive, filled in by `streamChatRequest`. */
+export interface StreamTiming {
+  /** `Date.now()` at the first chunk carrying text, reasoning or a tool call */
+  firstChunkAt?: number;
+}
+
+/**
+ * Streams `request` from `backend`: text and reasoning reach `sink` as they arrive, and the turn
+ * comes back assembled and settled by `normalizeTurn`. `timing` gets the time of the first chunk
+ * that carries any of the answer.
+ */
+export async function streamChatRequest(
+  backend: LLMBackend,
+  request: ChatRequest,
+  sink: ModelStreamSink,
+  timing?: StreamTiming
+): Promise<StreamChatResult> {
+  const { messages, signal } = request;
   throwIfStreamAborted(signal);
 
   let content = '';
@@ -60,32 +101,25 @@ export async function streamChat(
   let outputTokens = 0;
   let hasUsageFromStream = false;
 
-  const stream = backend.chatStream({
-    model,
-    messages,
-    tools: registry.getSchemas(),
-    ...(extras.toolChoice && { toolChoice: extras.toolChoice }),
-    temperature: agent.config.temperature,
-    topP: agent.config.topP,
-    maxTokens: agent.config.maxTokens,
-    stop: agent.config.stopSequences,
-    responseFormat,
-    reasoning: extras.reasoning,
-    cache: extras.cache,
-    ...(extras.cachePrefix !== undefined && { cachePrefix: extras.cachePrefix }),
-    signal,
-  });
+  const stream = backend.chatStream(request);
 
   for await (const chunk of stream) {
     throwIfStreamAborted(signal);
+    if (
+      timing &&
+      timing.firstChunkAt === undefined &&
+      (chunk.delta.content || chunk.delta.reasoning || chunk.delta.toolCalls?.length)
+    ) {
+      timing.firstChunkAt = Date.now();
+    }
 
     if (chunk.delta.content) {
       content += chunk.delta.content;
-      onToken(chunk.delta.content);
+      sink.onToken(chunk.delta.content);
     }
     if (chunk.delta.reasoning) {
       reasoning += chunk.delta.reasoning;
-      extras.onReasoning?.(chunk.delta.reasoning);
+      sink.onReasoning?.(chunk.delta.reasoning);
     }
     if (chunk.delta.toolCalls) {
       if (!toolCalls) toolCalls = [];

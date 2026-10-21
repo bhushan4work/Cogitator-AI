@@ -19,6 +19,8 @@ export class AgentDeserializationError extends Error {
   }
 }
 
+const generatedIds = new WeakMap<Agent, string>();
+
 /**
  * AI agent that can execute tasks using LLM and tools.
  *
@@ -41,14 +43,18 @@ export class AgentDeserializationError extends Error {
  *   tools: [searchTool],
  * });
  * ```
+ *
+ * `TDeps` is the type of the `deps` the agent's runs pass to its tools (`RunOptions.deps`). Set
+ * it (`new Agent<AppDeps>(...)`) and `cogitator.run()` requires `deps`, and a tool whose deps
+ * type is unrelated to `AppDeps` is refused. Declare every field the agent's tools read in it:
+ * TypeScript compares tool methods loosely, so a tool reading a field `AppDeps` lacks still
+ * compiles.
  */
-const generatedIds = new WeakMap<Agent, string>();
-
-export class Agent implements IAgent {
+export class Agent<TDeps = unknown> implements IAgent<TDeps> {
   /** Human-readable name of the agent */
   readonly name: string;
   /** Full configuration including model, instructions, tools, and parameters */
-  readonly config: AgentConfig;
+  readonly config: AgentConfig<TDeps>;
 
   /**
    * Create a new Agent instance.
@@ -62,7 +68,7 @@ export class Agent implements IAgent {
    * @param config.maxIterations - Maximum tool call iterations (default: 10)
    * @param config.timeout - Run timeout in milliseconds (default: 120000)
    */
-  constructor(config: AgentConfig) {
+  constructor(config: AgentConfig<TDeps>) {
     this.name = config.name;
 
     let finalConfig = { ...config };
@@ -104,7 +110,7 @@ export class Agent implements IAgent {
   }
 
   /** Tools available to this agent */
-  get tools(): Tool[] {
+  get tools(): Tool<unknown, unknown, TDeps>[] {
     return this.config.tools ?? [];
   }
 
@@ -120,9 +126,9 @@ export class Agent implements IAgent {
    * const fastAgent = agent.clone({ model: 'anthropic/claude-haiku' });
    * ```
    */
-  clone(overrides: Partial<AgentConfig>): Agent {
+  clone(overrides: Partial<AgentConfig<TDeps>>): Agent<TDeps> {
     const { id: _id, ...rest } = this.config;
-    return new Agent({
+    return new Agent<TDeps>({
       ...rest,
       ...overrides,
     });
@@ -148,6 +154,11 @@ export class Agent implements IAgent {
       config: {
         model: this.config.model,
         provider: this.config.provider,
+        ...(this.config.fallbackModels?.length && {
+          fallbackModels: this.config.fallbackModels.map((m) =>
+            typeof m === 'string' ? m : { ...m }
+          ),
+        }),
         instructions: this.config.instructions,
         tools: this.tools.map((t) => t.name),
         description: this.config.description,
@@ -216,6 +227,7 @@ export class Agent implements IAgent {
       description: snapshot.config.description,
       model: snapshot.config.model,
       provider: snapshot.config.provider,
+      ...(snapshot.config.fallbackModels && { fallbackModels: snapshot.config.fallbackModels }),
       instructions: snapshot.config.instructions,
       tools: resolvedTools,
       temperature: snapshot.config.temperature,
@@ -254,9 +266,31 @@ export class Agent implements IAgent {
     if (typeof config.instructions !== 'string') return false;
     if (!Array.isArray(config.tools)) return false;
     if (!config.tools.every((toolName) => typeof toolName === 'string')) return false;
+    if (config.fallbackModels !== undefined && !isFallbackList(config.fallbackModels)) return false;
 
     return true;
   }
+}
+
+/** Most fallback models a snapshot or an agent on the wire may name: each can cost a call per turn. */
+export const MAX_FALLBACK_MODELS = 16;
+
+function isFallbackList(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length <= MAX_FALLBACK_MODELS &&
+    value.every((entry: unknown) => {
+      if (typeof entry === 'string') return entry.length > 0;
+      if (typeof entry !== 'object' || entry === null) return false;
+      const { model, provider, ...rest } = entry as Record<string, unknown>;
+      return (
+        typeof model === 'string' &&
+        model.length > 0 &&
+        (provider === undefined || (typeof provider === 'string' && provider.length > 0)) &&
+        Object.keys(rest).length === 0
+      );
+    })
+  );
 }
 
 function serializeResponseFormat(

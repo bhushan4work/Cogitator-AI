@@ -121,6 +121,28 @@ export class InMemoryEmbeddingAdapter implements EmbeddingAdapter, KeywordSearch
     return { success: true, data: undefined };
   }
 
+  /** Replaces the embeddings of the source with no await in between, so calls cannot interleave */
+  async replaceBySource(
+    embedding: Omit<Embedding, 'id' | 'createdAt'>
+  ): Promise<MemoryResult<Embedding>> {
+    for (const [id, stored] of this.embeddings) {
+      if (stored.sourceId === embedding.sourceId) {
+        this.embeddings.delete(id);
+        this.bm25Index.removeDocument(id);
+      }
+    }
+    const full: Embedding = { ...embedding, id: `emb_${nanoid(12)}`, createdAt: new Date() };
+    this.embeddings.set(full.id, full);
+    this.bm25Index.addDocument({ id: full.id, content: embedding.content });
+    return { success: true, data: full };
+  }
+
+  async getBySources(sourceIds: string[]): Promise<MemoryResult<Embedding[]>> {
+    const wanted = new Set(sourceIds);
+    const found = [...this.embeddings.values()].filter((emb) => wanted.has(emb.sourceId));
+    return { success: true, data: found.map((emb) => ({ ...emb, vector: [...emb.vector] })) };
+  }
+
   async deleteByFilter(filter: EmbeddingDeleteFilter): Promise<MemoryResult<void>> {
     if (!hasDeleteCondition(filter)) return { success: false, error: EMPTY_DELETE_FILTER_ERROR };
     for (const [id, emb] of this.embeddings) {

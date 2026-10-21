@@ -1,8 +1,10 @@
 import type {
   Message,
   MessageContent,
+  RunMiddlewareContext,
   Tool,
   ToolCall,
+  ToolCallRequest,
   ToolContext,
   ToolResult,
 } from '@cogitator-ai/types';
@@ -13,10 +15,12 @@ import type { SandboxManager } from './initializers';
 type SandboxRunOutput = NonNullable<Awaited<ReturnType<SandboxManager['execute']>>['data']>;
 import type { ConstitutionalAI } from '../constitutional/index';
 import { createLinkedAbortController } from '../utils/abort';
+import { guardrailsMiddleware } from '../middleware/builtins';
+import { MiddlewarePipeline, type ToolArgumentsParser } from '../middleware/pipeline';
+import { isTripwire } from '../middleware/tripwire';
 import {
   DEFAULT_TOOL_RESULT_MAX_LENGTH,
   toolPartsToMessageContent,
-  toolPartsToText,
   toolResultParts,
   truncateToolResultText,
 } from '../tool-content';
@@ -28,20 +32,31 @@ type ExtraToolContext = Record<string, unknown> & {
   channelId?: string;
 };
 
-export async function executeTool(
-  registry: ToolRegistry,
-  toolCall: ToolCall,
-  runId: string,
-  agentId: string,
-  sandboxManager: SandboxManager | undefined,
-  constitutionalAI: ConstitutionalAI | undefined,
-  filterToolCalls: boolean,
-  initializeSandbox: () => Promise<SandboxManager | undefined>,
-  signal?: AbortSignal,
-  extraContext?: ExtraToolContext,
-  approvedByUser = false,
-  allowNativeFallback = true
-): Promise<ToolResult> {
+/** One tool call of a run, or of `invokeTool()`, and what it runs with. */
+export interface ToolCallExecution {
+  registry: ToolRegistry;
+  toolCall: ToolCall;
+  runId: string;
+  agentId: string;
+  sandboxManager: SandboxManager | undefined;
+  initializeSandbox: () => Promise<SandboxManager | undefined>;
+  signal?: AbortSignal;
+  extraContext?: ExtraToolContext;
+  /** Whether a person approved the call */
+  approved: boolean;
+  allowNativeFallback: boolean;
+  /** The `wrapToolCall` hooks the call goes through, and what they are told */
+  middleware: MiddlewarePipeline;
+  context: RunMiddlewareContext;
+}
+
+/**
+ * Runs one tool call: the tool looked up and its arguments checked against its schema, then
+ * through the `wrapToolCall` hooks of `middleware` (the guardrails among them) to the tool,
+ * natively or in its sandbox.
+ */
+export async function runToolCall(execution: ToolCallExecution): Promise<ToolResult> {
+  const { registry, toolCall } = execution;
   const tool = registry.get(toolCall.name);
 
   if (!tool) {
@@ -62,79 +77,125 @@ export async function executeTool(
     };
   }
 
-  const isZod = typeof tool.parameters.safeParse === 'function';
-  let validatedArgs: unknown = toolCall.arguments;
-
-  if (isZod) {
-    const parseResult = tool.parameters.safeParse(toolCall.arguments);
-    if (!parseResult.success) {
-      return {
-        callId: toolCall.id,
-        name: toolCall.name,
-        result: null,
-        error: `Invalid arguments: ${parseResult.error.message}`,
-      };
-    }
-    validatedArgs = parseResult.data;
-  }
-
-  if (constitutionalAI && filterToolCalls) {
-    const context: ToolContext = {
-      agentId,
-      runId,
-      signal: signal ?? new AbortController().signal,
-      ...extraContext,
-    };
-    const guardResult = await constitutionalAI.guardTool(
-      tool,
-      validatedArgs as Record<string, unknown>,
-      context,
-      { approvedByUser }
-    );
-    if (!guardResult.approved) {
-      return {
-        callId: toolCall.id,
-        name: toolCall.name,
-        result: null,
-        error: `Tool blocked: ${guardResult.reason ?? 'Policy violation'}`,
-      };
-    }
-  }
-
-  const result =
-    tool.sandbox?.type === 'docker' || tool.sandbox?.type === 'wasm'
-      ? await executeInSandbox(
-          tool,
-          { ...toolCall, arguments: validatedArgs as Record<string, unknown> },
-          runId,
-          agentId,
-          sandboxManager,
-          initializeSandbox,
-          allowNativeFallback,
-          signal,
-          extraContext
-        )
-      : await executeNatively(tool, toolCall, validatedArgs, runId, agentId, signal, extraContext);
-
-  if (!constitutionalAI || result.error) return result;
-
-  const filtered = await constitutionalAI.filterToolResult(
-    tool.name,
-    toolResultText(result.result)
+  const parsed = parseToolArguments(
+    { toolCall, tool, args: toolCall.arguments, approved: false },
+    false
   );
-  if (filtered.allowed) return result;
-  return {
-    ...result,
-    result: null,
-    error: `Tool result blocked: ${filtered.blockedReason ?? 'Policy violation'}`,
-  };
+  if (!parsed.ok) {
+    return { callId: toolCall.id, name: toolCall.name, result: null, error: parsed.error };
+  }
+
+  return execution.middleware.callTool(
+    { toolCall, tool, args: parsed.args, approved: execution.approved },
+    (call) => runTool(call, execution),
+    execution.context,
+    parseCallArguments
+  );
 }
 
-function toolResultText(value: unknown): string {
-  if (typeof value === 'string') return value;
-  const parts = toolResultParts(value);
-  if (parts) return toolPartsToText(parts);
-  return JSON.stringify(value) ?? String(value);
+/**
+ * Whether a call of `tool` with `args` waits for a person: its `requiresApproval`, or that
+ * function's answer for `args`. A check that throws asks for approval.
+ */
+export function needsApproval(tool: Tool, args: Record<string, unknown>): boolean {
+  const check = tool.requiresApproval;
+  if (typeof check !== 'function') return check === true;
+  try {
+    return check(args);
+  } catch {
+    return true;
+  }
+}
+
+/** The arguments of `call` as its tool's Zod schema reads them, or as they are without one. */
+const parseToolArguments: ToolArgumentsParser = ({ tool, toolCall }) => {
+  if (typeof tool.parameters.safeParse !== 'function') {
+    return { ok: true, args: toolCall.arguments };
+  }
+  const result = tool.parameters.safeParse(toolCall.arguments);
+  return result.success
+    ? { ok: true, args: result.data }
+    : { ok: false, error: `Invalid arguments: ${result.error.message}` };
+};
+
+/**
+ * Arguments of a call as `parseToolArguments` reads them, and refused when a middleware changed
+ * them into ones the tool needs an approval for: nobody approved these arguments.
+ */
+const parseCallArguments: ToolArgumentsParser = (call, changed) => {
+  const parsed = parseToolArguments(call, changed);
+  if (!parsed.ok || !changed || !needsApproval(call.tool, call.toolCall.arguments)) return parsed;
+  return {
+    ok: false,
+    error: `Tool "${call.tool.name}" needs approval for these arguments, and nobody approved them`,
+  };
+};
+
+function runTool(call: ToolCallRequest, execution: ToolCallExecution): Promise<ToolResult> {
+  const { tool, toolCall, args } = call;
+  const { runId, agentId, signal, extraContext } = execution;
+  return tool.sandbox?.type === 'docker' || tool.sandbox?.type === 'wasm'
+    ? executeInSandbox(
+        tool,
+        { ...toolCall, arguments: args as Record<string, unknown> },
+        runId,
+        agentId,
+        execution.sandboxManager,
+        execution.initializeSandbox,
+        execution.allowNativeFallback,
+        signal,
+        extraContext
+      )
+    : executeNatively(tool, toolCall, args, runId, agentId, signal, extraContext);
+}
+
+/**
+ * Runs one tool call with the guardrails of `constitutionalAI` and no other middleware, see
+ * {@link runToolCall}.
+ */
+export async function executeTool(
+  registry: ToolRegistry,
+  toolCall: ToolCall,
+  runId: string,
+  agentId: string,
+  sandboxManager: SandboxManager | undefined,
+  constitutionalAI: ConstitutionalAI | undefined,
+  filterToolCalls: boolean,
+  initializeSandbox: () => Promise<SandboxManager | undefined>,
+  signal?: AbortSignal,
+  extraContext?: ExtraToolContext,
+  approvedByUser = false,
+  allowNativeFallback = true
+): Promise<ToolResult> {
+  const abortSignal = signal ?? new AbortController().signal;
+  return runToolCall({
+    registry,
+    toolCall,
+    runId,
+    agentId,
+    sandboxManager,
+    initializeSandbox,
+    signal,
+    extraContext,
+    approved: approvedByUser,
+    allowNativeFallback,
+    middleware: new MiddlewarePipeline(
+      constitutionalAI ? [guardrailsMiddleware(constitutionalAI, { filterToolCalls })] : []
+    ),
+    context: {
+      runId,
+      agentId,
+      agentName: agentId,
+      iteration: 0,
+      signal: abortSignal,
+      state: new Map(),
+      ...(extraContext?.threadId !== undefined && { threadId: extraContext.threadId }),
+      ...(extraContext?.userId !== undefined && { userId: extraContext.userId }),
+      ...(extraContext?.channelType !== undefined && { channelType: extraContext.channelType }),
+      ...(extraContext?.channelId !== undefined && { channelId: extraContext.channelId }),
+      ...(extraContext?.deps !== undefined && { deps: extraContext.deps }),
+    },
+  });
 }
 
 async function executeNatively(
@@ -171,6 +232,7 @@ async function executeNatively(
       result,
     };
   } catch (error) {
+    if (isTripwire(error)) throw error;
     return {
       callId: toolCall.id,
       name: toolCall.name,

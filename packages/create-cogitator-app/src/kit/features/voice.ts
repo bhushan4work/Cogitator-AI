@@ -9,28 +9,17 @@ import type { FeatureModule } from './types.js';
 export const VOICE_PORT = 3000;
 
 const REALTIME_TOOLS_TS = code`
-  import { type Cogitator, type Tool, toolToSchema } from '@cogitator-ai/core';
-  import type { RealtimeTool } from '@cogitator-ai/voice';
+  import type { Cogitator, Tool } from '@cogitator-ai/core';
+  import { createRealtimeTools, type RealtimeTool } from '@cogitator-ai/voice';
 
   /**
    * The assistant's tools in the shape a realtime session takes. Each call runs
-   * through \`cogitator.invokeTool\`, so arguments are validated and timeouts kept
-   * the way an agent run does it. Tools that need approval are left out: a voice
-   * session has nobody to click Approve.
+   * through \`cogitator.invokeTool\`, so arguments are validated, the guardrails
+   * applied and timeouts kept the way an agent run does it. Tools that need
+   * approval are left out: a voice session has nobody to click Approve.
    */
   export function realtimeTools(runtime: Cogitator, tools: readonly Tool[]): RealtimeTool[] {
-    return tools
-      .filter((tool) => !tool.requiresApproval)
-      .map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        parameters: toolToSchema(tool).parameters,
-        ...(tool.maxResultLength !== undefined && { maxResultLength: tool.maxResultLength }),
-        execute: async (args) => {
-          const result = await runtime.invokeTool(tool, args, { agentId: 'voice' });
-          return result.error ? { error: result.error } : result.result;
-        },
-      }));
+    return createRealtimeTools(runtime, tools.filter((tool) => !tool.requiresApproval));
   }
 `;
 
@@ -265,8 +254,9 @@ const VOICE_TEST_TS = code`
     it('runs a call through the runtime and validates its arguments', async () => {
       const { cogitator } = mockCogitator();
       const calculator = realtimeTools(cogitator, tools).find((tool) => tool.name === 'calculator');
-      expect(await calculator?.execute({ expression: '6 * 7' })).toEqual({ expression: '6 * 7', result: 42 });
-      expect(await calculator?.execute({ expression: 42 })).toMatchObject({ error: expect.any(String) });
+      const call = { callId: 'call_1', signal: new AbortController().signal };
+      expect(await calculator?.execute({ expression: '6 * 7' }, call)).toEqual({ expression: '6 * 7', result: 42 });
+      await expect(calculator?.execute({ expression: 42 }, call)).rejects.toThrow();
       await cogitator.close();
     });
   });

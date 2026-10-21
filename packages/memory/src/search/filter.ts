@@ -1,6 +1,18 @@
 import type { Embedding, EmbeddingDeleteFilter, SearchFilter } from '@cogitator-ai/types';
 
 /**
+ * The source types a filter allows from `sourceType` and `sourceTypes` together, undefined when
+ * it allows every type. Empty when the two allow no type in common.
+ */
+export function filterSourceTypes(
+  filter: Pick<SearchFilter, 'sourceType' | 'sourceTypes'> | undefined
+): Embedding['sourceType'][] | undefined {
+  const { sourceType, sourceTypes } = filter ?? {};
+  if (sourceTypes === undefined) return sourceType === undefined ? undefined : [sourceType];
+  return sourceType === undefined ? sourceTypes : sourceTypes.filter((t) => t === sourceType);
+}
+
+/**
  * Whether an embedding passes a search filter. Agent and thread scoping use `metadata.agentId` /
  * `metadata.threadId`, a user filter also lets through embeddings of no user, and `metadata`
  * conditions match values exactly.
@@ -11,7 +23,8 @@ export function matchesSearchFilter(
 ): boolean {
   if (!filter) return true;
   const metadata = embedding.metadata;
-  if (filter.sourceType && embedding.sourceType !== filter.sourceType) return false;
+  const types = filterSourceTypes(filter);
+  if (types && !types.includes(embedding.sourceType)) return false;
   if (filter.agentId && metadata?.agentId !== filter.agentId) return false;
   if (filter.threadId && metadata?.threadId !== filter.threadId) return false;
   if (filter.userId) {
@@ -29,7 +42,7 @@ export function matchesSearchFilter(
 /** Whether a delete filter names at least one condition, so it cannot wipe a whole store. */
 export function hasDeleteCondition(filter: EmbeddingDeleteFilter): boolean {
   return Boolean(
-    filter.sourceType ||
+    filterSourceTypes(filter) !== undefined ||
     filter.agentId ||
     filter.threadId ||
     (filter.metadata && Object.keys(filter.metadata).length > 0)

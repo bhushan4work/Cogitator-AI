@@ -11,7 +11,14 @@ import type {
   FilePurpose,
   ResponseFormat,
 } from '../types/openai-types';
-import { type ThreadStorage, type StoredFile, InMemoryThreadStorage } from './storage';
+import {
+  type ThreadStorage,
+  type StoredFile,
+  type ListStoredThreadsOptions,
+  type StoredThreadPage,
+  InMemoryThreadStorage,
+} from './storage';
+import { cursorWindow } from './pagination';
 
 export interface LLMThreadMessage {
   role: 'user' | 'assistant';
@@ -41,9 +48,49 @@ const ASSISTANT_UPDATABLE_FIELDS = [
   'response_format',
 ] as const;
 
+export interface AssistantMessageParams {
+  threadId: string;
+  content: string;
+  assistantId: string;
+  runId: string;
+  /** Default: a new `msg_` id */
+  messageId?: string;
+  /** Set for an answer the model did not finish: the message is then `incomplete` */
+  incompleteReason?: MessageIncompleteReason;
+  /** Unix seconds, default: now */
+  createdAt?: number;
+}
+
+/** The assistant message of a run, `completed`, or `incomplete` with `incompleteReason`. */
+export function assistantMessage(params: AssistantMessageParams): Message {
+  const now = Math.floor(Date.now() / 1000);
+  const { incompleteReason } = params;
+  return {
+    id: params.messageId ?? `msg_${nanoid()}`,
+    object: 'thread.message',
+    created_at: params.createdAt ?? now,
+    thread_id: params.threadId,
+    status: incompleteReason ? 'incomplete' : 'completed',
+    ...(incompleteReason && { incomplete_details: { reason: incompleteReason } }),
+    completed_at: incompleteReason ? null : now,
+    incomplete_at: incompleteReason ? now : null,
+    role: 'assistant',
+    content: [{ type: 'text', text: { value: params.content, annotations: [] } }],
+    assistant_id: params.assistantId,
+    run_id: params.runId,
+    attachments: null,
+    metadata: {},
+  };
+}
+
 export interface StoredThread {
   thread: Thread;
   messages: Message[];
+  /**
+   * Who may reach the thread: a digest of the API key that created it. Absent when the server
+   * has no API keys, and on threads stored before key scoping, which every key reaches.
+   */
+  owner?: string;
 }
 
 export interface StoredAssistant {
@@ -191,7 +238,8 @@ export class ThreadManager {
     return this.storage.listAssistants();
   }
 
-  async createThread(metadata?: Record<string, string>): Promise<Thread> {
+  /** Create a thread, reachable only by `owner` when one is given (see {@link StoredThread.owner}). */
+  async createThread(metadata?: Record<string, string>, owner?: string): Promise<Thread> {
     const id = `thread_${nanoid()}`;
     const thread: Thread = {
       id,
@@ -200,7 +248,7 @@ export class ThreadManager {
       metadata: metadata ?? {},
     };
 
-    const stored: StoredThread = { thread, messages: [] };
+    const stored: StoredThread = { thread, messages: [], ...(owner !== undefined && { owner }) };
     await this.storage.saveThread(id, stored);
     return thread;
   }
@@ -210,9 +258,15 @@ export class ThreadManager {
     return stored?.thread;
   }
 
-  private async getStoredThread(id: string): Promise<StoredThread | undefined> {
+  /** The thread with its messages and owner, as storage holds it */
+  async getStoredThread(id: string): Promise<StoredThread | undefined> {
     const stored = await this.storage.loadThread(id);
     return stored ?? undefined;
+  }
+
+  /** A page of stored threads, for operators: the API does not list threads. */
+  async listThreads(options?: ListStoredThreadsOptions): Promise<StoredThreadPage> {
+    return this.storage.listThreads(options);
   }
 
   async updateThread(
@@ -269,6 +323,10 @@ export class ThreadManager {
     return stored?.messages.find((m) => m.id === messageId);
   }
 
+  /**
+   * Messages of a thread, newest first by default. `after` / `before` are message ids: `limit`
+   * then takes the messages right after `after`, or right before `before`, in list order.
+   */
   async listMessages(
     threadId: string,
     options?: {
@@ -288,22 +346,12 @@ export class ThreadManager {
       messages = messages.filter((m) => m.run_id === options.run_id);
     }
 
-    if (options?.after) {
-      const idx = messages.findIndex((m) => m.id === options.after);
-      if (idx !== -1) {
-        messages = messages.slice(idx + 1);
-      }
-    }
-
-    if (options?.before) {
-      const idx = messages.findIndex((m) => m.id === options.before);
-      if (idx !== -1) {
-        messages = messages.slice(0, idx);
-      }
-    }
-
-    if (options?.limit) {
-      messages = messages.slice(0, options.limit);
+    messages = cursorWindow(messages, { after: options?.after, before: options?.before });
+    const limit = options?.limit;
+    if (limit) {
+      messages = options.before
+        ? messages.slice(Math.max(0, messages.length - limit))
+        : messages.slice(0, limit);
     }
 
     return messages;
@@ -341,28 +389,21 @@ export class ThreadManager {
     messageId?: string,
     incompleteReason?: MessageIncompleteReason
   ): Promise<Message | undefined> {
+    return this.appendMessage(
+      threadId,
+      assistantMessage({ threadId, content, assistantId, runId, messageId, incompleteReason })
+    );
+  }
+
+  /**
+   * Append a message built elsewhere (see {@link assistantMessage}). Writes to one thread keep
+   * the order of the calls, so a caller that does not await one still stores it before the next.
+   * Undefined when the thread does not exist.
+   */
+  async appendMessage(threadId: string, message: Message): Promise<Message | undefined> {
     return this.withLock(`thread:${threadId}`, async () => {
       const stored = await this.getStoredThread(threadId);
       if (!stored) return undefined;
-
-      const now = Math.floor(Date.now() / 1000);
-      const message: Message = {
-        id: messageId ?? `msg_${nanoid()}`,
-        object: 'thread.message',
-        created_at: now,
-        thread_id: threadId,
-        status: incompleteReason ? 'incomplete' : 'completed',
-        ...(incompleteReason && { incomplete_details: { reason: incompleteReason } }),
-        completed_at: incompleteReason ? null : now,
-        incomplete_at: incompleteReason ? now : null,
-        role: 'assistant',
-        content: [{ type: 'text', text: { value: content, annotations: [] } }],
-        assistant_id: assistantId,
-        run_id: runId,
-        attachments: null,
-        metadata: {},
-      };
-
       stored.messages.push(message);
       await this.storage.saveThread(threadId, stored);
       return message;

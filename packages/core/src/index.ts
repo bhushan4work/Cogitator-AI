@@ -24,7 +24,7 @@ export {
 export type { ToAgentWireOptions, AgentWireRuntime } from './agent-wire';
 export { isPausedRun, AgentRunPausedError, findAgentRunPausedError } from './run-pause';
 export type { PausableRun, PausedRun, PausedRunInfo } from './run-pause';
-export { tool, toolset, toolToSchema } from './tool';
+export { tool, toolset, toolToSchema, withParsedArguments } from './tool';
 export { toToolParameters } from './tool-schema';
 export {
   TOOL_NAME_MAX_LENGTH,
@@ -332,6 +332,15 @@ export {
   withPiiMasking,
   PII_TYPES,
 } from './security/pii';
+export {
+  tripwire,
+  isTripwire,
+  piiMiddleware,
+  promptInjectionMiddleware,
+  guardrailsMiddleware,
+  compactionMiddleware,
+  type TripwireDetails,
+} from './middleware/index';
 export type { PromptTarget, StartABTestOptions, PromptResolution } from './cogitator/prompts';
 export { InMemoryInstructionVersionStore, InMemoryABTestStore } from './learning/prompt-stores';
 
@@ -371,11 +380,14 @@ export type { ErrorDetails, CogitatorErrorOptions } from '@cogitator-ai/types';
 
 export type {
   AgentConfig,
+  FallbackModel,
   ResponseFormat,
   Tool,
   ApprovalCheck,
+  ToolAnnotations,
   ToolConfig,
   ToolContext,
+  BaseToolContext,
   ToolSchema,
   Message,
   MessageRole,
@@ -391,7 +403,25 @@ export type {
   FinishReason,
   CogitatorConfig,
   RunOptions,
+  RunDeps,
+  ModelFallbackEvent,
+  KeptModelTurn,
+  ModelCircuitBreakerConfig,
   RunObserver,
+  TraceParent,
+  TelemetryConfig,
+  RunMiddleware,
+  RunMiddlewareContext,
+  RunInputEvent,
+  ModelTurnEvent,
+  ModelTurnUpdate,
+  ModelCallRequest,
+  ModelCallHandler,
+  ModelStreamSink,
+  ModelResponseEvent,
+  ModelResponseUpdate,
+  ToolCallRequest,
+  ToolCallHandler,
   RunResult,
   RunBlockReason,
   RunCheckpoint,
@@ -563,6 +593,17 @@ export {
   createLangfuseExporter,
   OTLPExporter,
   createOTLPExporter,
+  registerTelemetry,
+  currentTraceContext,
+  formatTraceparent,
+  newSpanId,
+  newTraceId,
+  parseTraceparent,
+  withTraceContext,
+  GEN_AI,
+  errorType,
+  genAiProviderName,
+  genAiSpanName,
 } from './observability/index';
 export type { LangfuseConfig, OTLPExporterConfig } from './observability/index';
 
@@ -612,7 +653,7 @@ export type {
 } from '@cogitator-ai/types';
 export { DEFAULT_INJECTION_CONFIG } from '@cogitator-ai/types';
 
-export { ContextManager } from './context/index';
+export { ContextManager, modelContextWindow } from './context/index';
 export {
   TruncateStrategy,
   SlidingWindowStrategy,

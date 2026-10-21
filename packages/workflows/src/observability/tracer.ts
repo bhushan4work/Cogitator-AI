@@ -81,6 +81,8 @@ function formatBaggage(baggage: Baggage): string {
 
 export interface SpanScope {
   span: WorkflowSpan;
+  /** Whether the span is recorded and exported */
+  sampled: boolean;
   end: (status?: SpanStatus, message?: string) => void;
   addEvent: (name: string, attributes?: Record<string, unknown>) => void;
   setAttribute: (key: string, value: unknown) => void;
@@ -96,7 +98,9 @@ export class WorkflowTracer {
   private config: TracingConfig;
   private exporter: SpanExporterInstance;
   private completedSpans: WorkflowSpan[] = [];
-  private currentTraceContext: TraceContext | null = null;
+  /** The context of the caller that started this work, from `setContextFromHeaders` */
+  private incomingContext: TraceContext | null = null;
+  private readonly sampledSpans = new WeakMap<WorkflowSpan, boolean>();
   private baggage: Baggage = {};
   private sampleRate: number;
   private asyncLocalStorage = new AsyncLocalStorage<AsyncSpanContext>();
@@ -143,12 +147,12 @@ export class WorkflowTracer {
   setContextFromHeaders(headers: Record<string, string>): void {
     const traceparent = headers[TRACE_PARENT_HEADER];
     if (traceparent) {
-      this.currentTraceContext = parseTraceParent(traceparent);
+      this.incomingContext = parseTraceParent(traceparent);
     }
 
     const tracestate = headers[TRACE_STATE_HEADER];
-    if (tracestate && this.currentTraceContext) {
-      this.currentTraceContext.traceState = tracestate;
+    if (tracestate && this.incomingContext) {
+      this.incomingContext.traceState = tracestate;
     }
 
     const baggageHeader = headers[BAGGAGE_HEADER];
@@ -160,11 +164,12 @@ export class WorkflowTracer {
   getContextHeaders(): Record<string, string> {
     const headers: Record<string, string> = {};
 
-    if (this.currentTraceContext && this.config.propagateContext) {
-      headers[TRACE_PARENT_HEADER] = formatTraceParent(this.currentTraceContext);
+    const context = this.getTraceContext();
+    if (context && this.config.propagateContext) {
+      headers[TRACE_PARENT_HEADER] = formatTraceParent(context);
 
-      if (this.currentTraceContext.traceState) {
-        headers[TRACE_STATE_HEADER] = this.currentTraceContext.traceState;
+      if (context.traceState) {
+        headers[TRACE_STATE_HEADER] = context.traceState;
       }
     }
 
@@ -183,20 +188,57 @@ export class WorkflowTracer {
     return this.baggage[key];
   }
 
+  /**
+   * The context work started now belongs to: the innermost open span of this async context, else
+   * the incoming context from `setContextFromHeaders`.
+   */
   getTraceContext(): TraceContext | null {
-    return this.currentTraceContext;
+    const current = this.getCurrentSpan();
+    if (current) {
+      return {
+        traceId: current.traceId,
+        spanId: current.spanId,
+        traceFlags: this.isSpanSampled(current) ? 1 : 0,
+        ...(this.incomingContext?.traceState && { traceState: this.incomingContext.traceState }),
+      };
+    }
+    return this.incomingContext;
   }
 
+  private isSpanSampled(span: WorkflowSpan): boolean {
+    return this.sampledSpans.get(span) ?? true;
+  }
+
+  /** Whether a child of the innermost open span is sampled: as its parent is, else yes. */
+  private childSampled(): boolean {
+    const parent = this.getCurrentSpan();
+    if (parent) return this.isSpanSampled(parent);
+    return this.incomingContext ? ((this.incomingContext.traceFlags ?? 1) & 1) === 1 : true;
+  }
+
+  /**
+   * Starts the span of a workflow run. Its parent is the innermost open span of this async
+   * context (a workflow inside a node), else `parent`, the trace the caller is part of right now,
+   * else the incoming context from `setContextFromHeaders`.
+   */
   startWorkflowSpan(
     workflowName: string,
     workflowId: string,
     runId: string,
-    attributes?: Record<string, unknown>
+    attributes?: Record<string, unknown>,
+    parent?: { traceId: string; spanId?: string }
   ): SpanScope {
-    const sampled = Math.random() < this.sampleRate;
-    const traceId = this.currentTraceContext?.traceId ?? generateTraceId();
+    const enclosing = this.getCurrentSpan();
+    const caller = enclosing ? undefined : parent;
+    const incoming = enclosing || caller ? null : this.incomingContext;
+    const sampled = enclosing
+      ? this.isSpanSampled(enclosing)
+      : incoming
+        ? ((incoming.traceFlags ?? 1) & 1) === 1
+        : Math.random() < this.sampleRate;
+    const traceId = enclosing?.traceId ?? caller?.traceId ?? incoming?.traceId ?? generateTraceId();
     const spanId = generateSpanId();
-    const parentSpanId = this.currentTraceContext?.spanId;
+    const parentSpanId = enclosing?.spanId ?? caller?.spanId ?? incoming?.spanId;
 
     const span: WorkflowSpan = {
       traceId,
@@ -219,12 +261,6 @@ export class WorkflowTracer {
       status: 'unset',
     };
 
-    this.currentTraceContext = {
-      traceId,
-      spanId,
-      traceFlags: sampled ? 1 : 0,
-    };
-
     const spanStack = this.getSpanStack();
     spanStack.push(span);
 
@@ -240,9 +276,7 @@ export class WorkflowTracer {
     const parentSpan = spanStack[spanStack.length - 1];
     const traceId = parentSpan?.traceId ?? generateTraceId();
     const spanId = generateSpanId();
-    const sampled = this.currentTraceContext
-      ? (this.currentTraceContext.traceFlags ?? 0) & 1
-      : true;
+    const sampled = this.childSampled();
 
     const span: WorkflowSpan = {
       traceId,
@@ -261,12 +295,6 @@ export class WorkflowTracer {
       status: 'unset',
     };
 
-    this.currentTraceContext = {
-      traceId,
-      spanId,
-      traceFlags: sampled ? 1 : 0,
-    };
-
     spanStack.push(span);
 
     return this.createSpanScope(span, Boolean(sampled));
@@ -277,9 +305,7 @@ export class WorkflowTracer {
     const parentSpan = spanStack[spanStack.length - 1];
     const traceId = parentSpan?.traceId ?? generateTraceId();
     const spanId = generateSpanId();
-    const sampled = this.currentTraceContext
-      ? (this.currentTraceContext.traceFlags ?? 0) & 1
-      : true;
+    const sampled = this.childSampled();
 
     const span: WorkflowSpan = {
       traceId,
@@ -297,12 +323,6 @@ export class WorkflowTracer {
       status: 'unset',
     };
 
-    this.currentTraceContext = {
-      traceId,
-      spanId,
-      traceFlags: sampled ? 1 : 0,
-    };
-
     spanStack.push(span);
 
     return this.createSpanScope(span, Boolean(sampled));
@@ -317,9 +337,7 @@ export class WorkflowTracer {
     const parentSpan = spanStack[spanStack.length - 1];
     const traceId = parentSpan?.traceId ?? generateTraceId();
     const spanId = generateSpanId();
-    const sampled = this.currentTraceContext
-      ? (this.currentTraceContext.traceFlags ?? 0) & 1
-      : true;
+    const sampled = this.childSampled();
 
     const span: WorkflowSpan = {
       traceId,
@@ -353,8 +371,10 @@ export class WorkflowTracer {
   }
 
   private createSpanScope(span: WorkflowSpan, sampled: boolean): SpanScope {
+    this.sampledSpans.set(span, sampled);
     return {
       span,
+      sampled,
 
       end: (status: SpanStatus = 'ok', message?: string) => {
         span.endTime = Date.now();
@@ -367,15 +387,6 @@ export class WorkflowTracer {
         const idx = spanStack.indexOf(span);
         if (idx !== -1) {
           spanStack.splice(idx, 1);
-        }
-
-        const parentSpan = spanStack[spanStack.length - 1];
-        if (parentSpan) {
-          this.currentTraceContext = {
-            traceId: parentSpan.traceId,
-            spanId: parentSpan.spanId,
-            traceFlags: sampled ? 1 : 0,
-          };
         }
 
         if (sampled) {

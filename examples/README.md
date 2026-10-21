@@ -42,6 +42,10 @@ Programmatically scaffold new Cogitator projects using the `create-cogitator-app
 
 Scaffold projects, manage Docker services, run agents from the terminal.
 
+### [`config/`](./config/) — Configuration
+
+YAML configuration loading, environment variable overrides, and Cogitator runtime initialization.
+
 ### [`core/`](./core/) — Core Runtime Features
 
 Agent creation, tools, streaming, caching, reasoning, reflection, optimization, security, and more.

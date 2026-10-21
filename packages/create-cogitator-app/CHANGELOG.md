@@ -1,5 +1,44 @@
 # create-cogitator-app
 
+## 0.8.6
+
+### Patch Changes
+
+- [#223](https://github.com/cogitator-ai/Cogitator-AI/pull/223) [`db16bbc`](https://github.com/cogitator-ai/Cogitator-AI/commit/db16bbc5f7c49b052382ea8dd4c0ba597216d913) - Generated projects pin Biome to an exact version, as Biome recommends. Its formatting changes between releases and the scaffolder formats the project it writes, so a new release, or one published without its binaries, no longer breaks or changes scaffolding.
+- Updated dependencies []:
+  - @cogitator-ai/config@0.17.4
+  - @cogitator-ai/deploy@0.6.13
+
+## 0.8.5
+
+### Patch Changes
+
+- [#214](https://github.com/cogitator-ai/Cogitator-AI/pull/214) [`f903fc1`](https://github.com/cogitator-ai/Cogitator-AI/commit/f903fc15fca7e29f5187f1fc60e099a8a9b28a03) - Require `tar` 7.5.22 or later. Earlier versions are open to hardlink and symlink path traversal and to several denial of service bugs, and the scaffolder extracts template archives downloaded from GitHub.
+
+## 0.8.4
+
+### Patch Changes
+
+- Updated dependencies [[`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b)]:
+  - @cogitator-ai/config@0.17.0
+  - @cogitator-ai/deploy@0.6.9
+
+## 0.8.3
+
+### Patch Changes
+
+- [#207](https://github.com/cogitator-ai/Cogitator-AI/pull/207) [`b5c11eb`](https://github.com/cogitator-ai/Cogitator-AI/commit/b5c11eb5368f52169273527c2ea6f16e83ab8b22) - Realtime tools can run through the Cogitator tool invoker. `createRealtimeTools(cogitator, tools, options)` turns Cogitator tools into realtime tools whose calls go through `cogitator.invokeTool`, the way an agent run executes them: arguments checked against the tool's schema, approval asked for calls that need it, the guardrails applied, sandboxed tools run in the sandbox and `tool.timeout` kept. A call that needs approval goes to `options.onApproval`, then to `guardrails.onToolApproval`, and one nobody approves does not run: the model gets an error saying it needs approval. Realtime sessions used to call `execute` directly, so a tool marked `requiresApproval` ran without anyone approving it. The options also set the `agentId`, `userId` and `threadId` (default `voice:<sessionId>`) the tools see.
+
+  `RealtimeTool.execute(args, context)` gets the provider's `callId`, the session's `sessionId` (a `VoiceAgent` sets the client id, a `RealtimeSession` takes `sessionId` in its config) and a `signal` that aborts when the session closes or loses its connection. With Gemini it also aborts when Gemini cancels the call (`toolCallCancellation`, sent when the user interrupts), and the cancelled call gets no answer.
+
+  The voice project of the scaffolder uses `createRealtimeTools`.
+
+  **Migration:** tools written as `execute: async (args) => ...` keep working. Code that calls a `RealtimeTool`'s `execute` itself, such as a test, now passes a context: `{ callId, signal }`.
+
+- Updated dependencies []:
+  - @cogitator-ai/config@0.16.1
+  - @cogitator-ai/deploy@0.6.8
+
 ## 0.8.2
 
 ### Patch Changes

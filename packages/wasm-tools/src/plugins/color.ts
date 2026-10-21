@@ -382,10 +382,10 @@ function calculateContrast(c1: RgbColor, c2: RgbColor) {
   const rawRatio = (lighter + 0.05) / (darker + 0.05);
   const ratio = Math.round(rawRatio * 100) / 100;
 
-  const normalAA = ratio >= 4.5;
-  const normalAAA = ratio >= 7.0;
-  const largeAA = ratio >= 3.0;
-  const largeAAA = ratio >= 4.5;
+  const normalAA = rawRatio >= 4.5;
+  const normalAAA = rawRatio >= 7.0;
+  const largeAA = rawRatio >= 3.0;
+  const largeAAA = rawRatio >= 4.5;
 
   return {
     ratio,

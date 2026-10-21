@@ -6,8 +6,13 @@ import type { Tool } from './tool';
 import type { Skill } from './skill';
 import type { ZodType } from 'zod';
 import type { ReasoningConfig } from './llm';
+import type { RunMiddleware } from './middleware';
 
-export interface AgentConfig {
+/**
+ * An agent's configuration. `TDeps` is the type of the `deps` its runs pass (`RunOptions.deps`):
+ * with it set, runs must pass them and tools with an unrelated deps type are refused.
+ */
+export interface AgentConfig<TDeps = unknown> {
   id?: string;
   name: string;
   description?: string;
@@ -15,8 +20,20 @@ export interface AgentConfig {
   provider?: string;
   /** `provider/model`. Falls back to `llm.defaultModel` of the Cogitator that runs the agent. */
   model?: string;
+  /**
+   * Models a turn moves to, in order, when `model` fails in a way another model may not: the
+   * provider is down, overloaded or timing out once its retries are spent (`llm.retry`), the
+   * account is out of quota, the key is rejected, the model is gone, the prompt does not fit
+   * its context window, or its answer could not be read. A request the provider refuses as such
+   * (`content_filter`, `invalid_request`) and an aborted run do not move. A model that keeps
+   * failing is skipped for a while (`llm.modelCircuitBreaker`). Each turn starts again from
+   * `model`, `RunOptions.onModelFallback` reports every move, and a run whose models all failed
+   * ends with `LLM_UNAVAILABLE` (or the error code every model failed with), the failures in
+   * `details.attempts`.
+   */
+  fallbackModels?: FallbackModel[];
   instructions: string;
-  tools?: Tool[];
+  tools?: Tool<unknown, unknown, TDeps>[];
   skills?: Skill[];
   temperature?: number;
   topP?: number;
@@ -40,7 +57,16 @@ export interface AgentConfig {
    */
   onIterationLimit?: 'answer' | 'stop';
   timeout?: number;
+  /**
+   * Hooks around this agent's model and tool calls, after the Cogitator's middleware and
+   * before the run's (see `RunMiddleware`). After a handoff, the agent the run went on as
+   * brings its own.
+   */
+  middleware?: RunMiddleware<TDeps>[];
 }
+
+/** A model to fall back to: `provider/model`, or a model name with the provider to run it on. */
+export type FallbackModel = string | { model: string; provider?: string };
 
 export interface Handoff {
   agent: Agent;
@@ -53,17 +79,17 @@ export interface Handoff {
 export type ResponseFormat =
   { type: 'text' } | { type: 'json' } | { type: 'json_schema'; schema: ZodType };
 
-export interface Agent {
+export interface Agent<TDeps = unknown> {
   readonly id: string;
   readonly name: string;
-  readonly config: AgentConfig;
+  readonly config: AgentConfig<TDeps>;
   /** Model accessor (shortcut to config.model) */
   readonly model: string | undefined;
   /** Instructions accessor (shortcut to config.instructions) */
   readonly instructions: string;
   /** Tools accessor (shortcut to config.tools) */
-  readonly tools: Tool[];
-  clone(overrides: Partial<AgentConfig>): Agent;
+  readonly tools: Tool<unknown, unknown, TDeps>[];
+  clone(overrides: Partial<AgentConfig<TDeps>>): Agent<TDeps>;
   serialize(): AgentSnapshot;
 }
 
@@ -84,6 +110,7 @@ export interface AgentSnapshotMetadata {
 export interface SerializedAgentConfig {
   model?: string;
   provider?: string;
+  fallbackModels?: FallbackModel[];
   instructions: string;
   tools: string[];
   description?: string;

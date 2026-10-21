@@ -13,6 +13,8 @@ import {
   createJsonTool,
   createBase64Tool,
   createSlugTool,
+  createTextcaseTool,
+  createUnitsTool,
   createValidationTool,
   createDiffTool,
   createRegexTool,
@@ -28,6 +30,8 @@ import {
   hashToolSchema,
   base64ToolSchema,
   slugToolSchema,
+  textcaseToolSchema,
+  unitsToolSchema,
   validationToolSchema,
   diffToolSchema,
   regexToolSchema,
@@ -148,6 +152,8 @@ describe('defineWasmTool', () => {
       createJsonTool(),
       createBase64Tool(),
       createSlugTool(),
+      createTextcaseTool(),
+      createUnitsTool(),
       createValidationTool(),
       createDiffTool(),
       createRegexTool(),
@@ -256,7 +262,7 @@ describe('getWasmPath', () => {
     expect(path).toMatch(/calc\.wasm$/);
   });
 
-  it('works for all 14 plugin names', () => {
+  it('works for all 16 plugin names', () => {
     const names = [
       'base64',
       'calc',
@@ -270,6 +276,8 @@ describe('getWasmPath', () => {
       'regex',
       'signing',
       'slug',
+      'textcase',
+      'units',
       'validation',
       'xml',
     ];
@@ -287,6 +295,8 @@ describe('tool factory functions', () => {
     { fn: createJsonTool, name: 'process_json', func: 'process' },
     { fn: createBase64Tool, name: 'base64', func: 'base64' },
     { fn: createSlugTool, name: 'slug', func: 'slug' },
+    { fn: createTextcaseTool, name: 'textcase', func: 'textcase' },
+    { fn: createUnitsTool, name: 'units', func: 'units' },
     { fn: createValidationTool, name: 'validate', func: 'validate' },
     { fn: createDiffTool, name: 'diff', func: 'diff' },
     { fn: createRegexTool, name: 'regex', func: 'regex' },
@@ -449,6 +459,23 @@ describe('schema validation', () => {
         maxLength: 50,
       }).success
     ).toBe(true);
+  });
+
+  it('textcaseToolSchema accepts text and supported case options', () => {
+    for (const to of ['camel', 'pascal', 'snake', 'kebab', 'constant', 'title', 'sentence']) {
+      expect(textcaseToolSchema.safeParse({ text: 'hello world', to }).success).toBe(true);
+    }
+    expect(textcaseToolSchema.safeParse({ text: 'hello world', to: 'unsupported' }).success).toBe(
+      false
+    );
+    expect(textcaseToolSchema.safeParse({ text: 123, to: 'camel' }).success).toBe(false);
+    expect(textcaseToolSchema.safeParse({}).success).toBe(false);
+  });
+
+  it('unitsToolSchema accepts value, from, and to', () => {
+    expect(unitsToolSchema.safeParse({ value: 100, from: 'C', to: 'F' }).success).toBe(true);
+    expect(unitsToolSchema.safeParse({ value: '100', from: 'C', to: 'F' }).success).toBe(false);
+    expect(unitsToolSchema.safeParse({ value: 100, from: 'C' }).success).toBe(false);
   });
 
   it('colorToolSchema validates convert and contrast inputs', () => {

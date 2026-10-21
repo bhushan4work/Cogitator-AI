@@ -10,7 +10,7 @@ import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node
 import type { StreamableHTTPServerTransport as StreamableHTTPServerTransportType } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { Cogitator } from '@cogitator-ai/core';
+import { Cogitator, withParsedArguments } from '@cogitator-ai/core';
 import type { Tool, ToolInvoker } from '@cogitator-ai/types';
 import { ElicitResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
@@ -27,7 +27,7 @@ import type {
   MCPPromptMessage,
   MCPToolContent,
 } from '../types';
-import { resultToMCPContent } from '../adapter/tool-adapter';
+import { mcpOutputSchema, resultToMCPContent } from '../adapter/tool-adapter';
 import { elicitApproval } from './approval';
 import { z } from 'zod';
 
@@ -85,31 +85,6 @@ function errorMessageOf(error: unknown): string {
 
 const PERMISSIVE_INPUT_SCHEMA = z.looseObject({});
 
-/** Arguments the MCP SDK already parsed with the tool's own schema: taken as they are. */
-const SDK_PARSED_ARGUMENTS = z.custom<unknown>(() => true);
-
-/**
- * The tool as the invoker runs it once the MCP SDK validated the call's arguments against the
- * tool's schema: everything that decides how it runs (approval, sandbox, timeout, side effects)
- * stays, and the arguments are not parsed a second time, so transforms apply exactly once.
- */
-function withSdkParsedArguments(tool: Tool): Tool {
-  return {
-    name: tool.name,
-    description: tool.description,
-    ...(tool.category !== undefined && { category: tool.category }),
-    ...(tool.tags !== undefined && { tags: tool.tags }),
-    parameters: SDK_PARSED_ARGUMENTS,
-    execute: (params, context) => tool.execute(params, context),
-    ...(tool.sideEffects !== undefined && { sideEffects: tool.sideEffects }),
-    ...(tool.requiresApproval !== undefined && { requiresApproval: tool.requiresApproval }),
-    ...(tool.timeout !== undefined && { timeout: tool.timeout }),
-    ...(tool.sandbox !== undefined && { sandbox: tool.sandbox }),
-    ...(tool.maxResultLength !== undefined && { maxResultLength: tool.maxResultLength }),
-    toJSON: () => tool.toJSON(),
-  };
-}
-
 /**
  * MCP Server for exposing Cogitator tools
  *
@@ -161,6 +136,12 @@ export class MCPServer {
       throw new Error('Cannot register tools after server has started');
     }
 
+    if (tool.outputSchema && !mcpOutputSchema(tool)) {
+      console.warn(
+        `[MCPServer] The outputSchema of tool "${tool.name}" is not a z.object() schema, which MCP ` +
+          'needs: it is not advertised and results go out as content only'
+      );
+    }
     this.tools.set(tool.name, tool);
   }
 
@@ -300,14 +281,18 @@ export class MCPServer {
    * Register a tool with the MCP server
    */
   private registerMCPTool(server: McpServer, tool: Tool, caller?: MCPCaller): void {
+    const outputSchema = mcpOutputSchema(tool);
     server.registerTool(
       tool.name,
       {
+        ...(tool.title !== undefined && { title: tool.title }),
         description: tool.description,
         inputSchema: this.buildInputSchema(tool),
+        ...(outputSchema && { outputSchema }),
+        ...(tool.annotations && { annotations: { ...tool.annotations } }),
       },
       async (args: unknown, extra: ToolHandlerExtra): Promise<MCPCallToolResult> => {
-        return this.executeTool(tool, args, extra, caller);
+        return this.executeTool(tool, args, extra, caller, outputSchema);
       }
     );
   }
@@ -342,14 +327,15 @@ export class MCPServer {
     tool: Tool,
     args: unknown,
     extra: ToolHandlerExtra,
-    caller?: MCPCaller
+    caller: MCPCaller | undefined,
+    outputSchema: z.ZodObject | undefined
   ): Promise<MCPCallToolResult> {
     const elicit: MCPToolContext['elicit'] = this.canElicit()
       ? (request) => this.elicit(extra, request)
       : undefined;
 
     try {
-      const result = await this.invoker().invokeTool(withSdkParsedArguments(tool), args ?? {}, {
+      const result = await this.invoker().invokeTool(withParsedArguments(tool), args ?? {}, {
         runId: `mcp_${randomUUID()}`,
         agentId: 'mcp-server',
         signal: extra.signal,
@@ -367,10 +353,44 @@ export class MCPServer {
         );
       }
       if (result.error !== undefined) return this.toolError(tool, result.error);
+      if (outputSchema) return await this.structuredResult(tool, outputSchema, result.result);
       return { content: resultToMCPContent(result.result).map(toServerContent) };
     } catch (error) {
       return this.toolError(tool, errorMessageOf(error));
     }
+  }
+
+  /**
+   * The result of a tool with an output schema: `structuredContent`, with its JSON as text for
+   * clients that read only `content`. It is the result as the schema parses it, so defaults are
+   * filled in and unknown keys dropped the way the advertised JSON Schema expects. A result the
+   * schema rejects is a tool error that says why, since MCP requires structured content to match
+   * the advertised schema.
+   */
+  private async structuredResult(
+    tool: Tool,
+    outputSchema: z.ZodObject,
+    value: unknown
+  ): Promise<MCPCallToolResult> {
+    const parsed = await outputSchema.safeParseAsync(value);
+    if (!parsed.success) {
+      return this.toolError(
+        tool,
+        `The result does not match the tool's outputSchema: ${z.prettifyError(parsed.error)}`
+      );
+    }
+    const reparsed = await outputSchema.safeParseAsync(parsed.data);
+    if (!reparsed.success) {
+      return this.toolError(
+        tool,
+        "The tool's outputSchema rejects what it parses itself (a transform changes the value), " +
+          'and MCP checks structured content against it again: use an output schema without transforms'
+      );
+    }
+    return {
+      content: resultToMCPContent(parsed.data).map(toServerContent),
+      structuredContent: parsed.data,
+    };
   }
 
   private toolError(tool: Tool, message: string): MCPCallToolResult {

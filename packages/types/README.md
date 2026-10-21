@@ -130,15 +130,22 @@ const calculatorConfig: ToolConfig<{ expression: string }, number> = {
 };
 
 // Tool context available during execution
-interface ToolContext {
+interface BaseToolContext<TDeps = unknown> {
   agentId: string;
   runId: string;
   signal: AbortSignal; // aborted on run cancel or tool timeout
+  toolCallId?: string;
   threadId?: string;
   userId?: string;
   channelType?: string;
   channelId?: string;
+  deps?: TDeps; // RunOptions.deps, never sent to the model
 }
+
+// ToolContext<AppDeps> has deps present and typed
+type ToolContext<TDeps = unknown> = unknown extends TDeps
+  ? BaseToolContext
+  : BaseToolContext<TDeps> & { deps: TDeps };
 ```
 
 ### Tool Interfaces
@@ -147,7 +154,7 @@ interface ToolContext {
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
 | `ToolConfig<TParams, TResult>` | Tool definition with execute function                                                                                         |
 | `Tool<TParams, TResult>`       | Full tool with toJSON() method                                                                                                |
-| `ToolContext`                  | Execution context with agentId, runId, signal, threadId, userId, channel                                                      |
+| `ToolContext`                  | Execution context with agentId, runId, signal, threadId, userId, channel and the run's `deps`                                 |
 | `SideEffectType`               | `'filesystem' \| 'network' \| 'database' \| 'process' \| 'external'`                                                          |
 | `ApprovalCheck`                | `(params) => boolean` form of `requiresApproval`                                                                              |
 | `ToolSchema`                   | JSON Schema representation for LLM                                                                                            |
@@ -245,7 +252,7 @@ const schemaFormat: ResponseFormat = {
 };
 ```
 
-`AgentConfig` also takes `id`, `provider` (an explicit backend name) and `skills` (`Skill` bundles of tools and instructions). `AgentSnapshot` / `SerializedAgentConfig` describe the JSON form of `agent.serialize()`.
+`AgentConfig` also takes `id`, `provider` (an explicit backend name), `skills` (`Skill` bundles of tools and instructions) and `fallbackModels` (`FallbackModel`: models a turn moves to when `model` fails). `AgentConfig<TDeps>` with a deps type refuses tools whose deps type is unrelated to it, and `RunOptions<TDeps>.deps` carries them to the tools (`RunDeps<TDeps>` makes them required). `AgentSnapshot` / `SerializedAgentConfig` describe the JSON form of `agent.serialize()`.
 
 ---
 
@@ -435,6 +442,20 @@ const runOptions: RunOptions = {
 | `RunPrompt`            | The instruction version or A/B variant a run used                                                       |
 | `PiiConfig`            | `mode` (`mask` \| `redact` \| `block`), `detect`, `custom`, `onDetect`                                  |
 
+### Run Middleware
+
+`RunMiddleware` hooks around a run's model and tool calls, given in `middleware` of `CogitatorConfig`, `AgentConfig` or `RunOptions` (see the core README).
+
+| Type                   | Description                                                                                                      |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `RunMiddleware`        | `name`, `holdsStream?` and the hooks `beforeRun`, `beforeModel`, `wrapModelCall`, `afterModel`, `wrapToolCall`   |
+| `RunMiddlewareContext` | `runId`, `threadId`, `agentId`, `agentName`, `userId`, channel, `iteration`, `signal`, `deps` and shared `state` |
+| `RunInputEvent`        | A new run's `input` and the `messages` its first turn starts from                                                |
+| `ModelTurnEvent`       | The `messages` and `model` of the next turn, `ModelTurnUpdate` returns new `messages`                            |
+| `ModelCallRequest`     | The `ChatRequest`, the `provider/model` it goes to and, when streaming, its `ModelStreamSink`                    |
+| `ModelResponseEvent`   | A turn's `response`, `ModelResponseUpdate` replaces its `content` or `toolCalls`                                 |
+| `ToolCallRequest`      | The `toolCall`, the `tool`, the schema-parsed `args` and whether a person `approved` it                          |
+
 ### RunResult
 
 ```typescript
@@ -519,7 +540,7 @@ console.log(ERROR_STATUS_CODES[ErrorCode.LLM_RATE_LIMITED]); // 429
 | Agent    | `AGENT_NOT_FOUND`, `AGENT_ALREADY_RUNNING`, `AGENT_MAX_ITERATIONS`, `RUN_TOKEN_LIMIT_EXCEEDED`, `RUN_NOT_PAUSED`, `RUN_TIMEOUT`, `BUDGET_EXCEEDED`        |
 | Workflow | `WORKFLOW_NOT_FOUND`, `WORKFLOW_STEP_FAILED`, `WORKFLOW_CYCLE_DETECTED`                                                                                   |
 | Swarm    | `SWARM_NO_WORKERS`, `SWARM_CONSENSUS_FAILED`                                                                                                              |
-| Security | `PROMPT_INJECTION_DETECTED`, `PII_DETECTED`                                                                                                               |
+| Security | `PROMPT_INJECTION_DETECTED`, `PII_DETECTED`, `GUARDRAIL_TRIPPED`                                                                                          |
 | General  | `VALIDATION_ERROR`, `CONFIGURATION_ERROR`, `INTERNAL_ERROR`, `NOT_IMPLEMENTED`, `CIRCUIT_OPEN`                                                            |
 
 `LLMErrorKind` says why a model provider call failed, finer than the code: `rate_limit`, `quota`, `authentication`, `permission`, `not_found`, `invalid_request`, `context_overflow`, `content_filter`, `overloaded`, `server_error`, `timeout`, `network` or `invalid_response`. An `LLMError` of `@cogitator-ai/core` carries it as `kind` and `details.kind`. `LLM_QUOTA_EXCEEDED` (HTTP 402) is an account out of credits or over a quota that waiting a moment will not lift, and is never retried.
@@ -999,7 +1020,7 @@ Every module below is exported from the package root; the owning package documen
 
 | Module                               | Main types                                                                                                                                                                                                                                                                                                                                           | Used by                                                                                    |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Memory                               | `MemoryAdapter`, `MemoryResult`, `Thread`, `MemoryEntry`, `Fact`, `Embedding`, `EmbeddingService`, `ContextBuilderConfig`, `MemoryConfig`                                                                                                                                                                                                            | [@cogitator-ai/memory](https://www.npmjs.com/package/@cogitator-ai/memory)                 |
+| Memory                               | `MemoryAdapter`, `MemoryResult`, `Thread`, `MemoryEntry`, `Fact`, `Embedding`, `EmbeddingService`, `ContextBuilderConfig`, `BuiltContext`, `DroppedContext`, `MemoryConfig`                                                                                                                                                                          | [@cogitator-ai/memory](https://www.npmjs.com/package/@cogitator-ai/memory)                 |
 | Sandbox                              | `SandboxConfig`, `SandboxManagerConfig` (`allowNativeFallback`, default `true`: Docker-sandboxed commands run on the host when Docker is unavailable), `SandboxPoolConfig` (`reuseContainers`, default `false`: every execution gets a fresh container), `SandboxWasmConfig` (`memoryPages` caps the module's own memory), `SandboxExecutionRequest` | [@cogitator-ai/sandbox](https://www.npmjs.com/package/@cogitator-ai/sandbox)               |
 | Workflow                             | `WorkflowState`, `Workflow`, `CheckpointStore`, `RunStore`, `ApprovalStore`, `TimerStore` (optional `claimTtl`, `renew`, `release`), `WorkflowRunStats`                                                                                                                                                                                              | [@cogitator-ai/workflows](https://www.npmjs.com/package/@cogitator-ai/workflows)           |
 | Swarm, negotiation                   | `SwarmConfig`, `SwarmStrategy`, `SwarmResult`, negotiation types                                                                                                                                                                                                                                                                                     | [@cogitator-ai/swarms](https://www.npmjs.com/package/@cogitator-ai/swarms)                 |

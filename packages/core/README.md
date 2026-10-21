@@ -78,7 +78,8 @@ console.log(result.output);
 - **Causal Reasoning** - Pearl's do-calculus, counterfactuals, d-separation
 - **Resilience** - Retry, circuit breaker, and fallback patterns
 - **PII Masking** - Personal data and secrets replaced with placeholders before they reach the provider
-- **Observability** - Full tracing with spans and callbacks
+- **Run Middleware** - Hooks around every model and tool call, tripwire guards that stop a run
+- **Observability** - OpenTelemetry GenAI spans, one trace across runs, workflows and swarms, OTLP and Langfuse exporters
 
 ---
 
@@ -258,6 +259,30 @@ try {
 
 A call the caller aborts fails with the abort reason (`signal.reason`) instead of a retryable LLM error, on every backend and also for a stream that already began, including the OpenAI and Bedrock streams whose SDKs used to end quietly. `abortReason(signal)` returns that error.
 
+### Fallback Models
+
+An agent with `fallbackModels` keeps answering when its model cannot. A turn moves to the next model, in order, when `model` is down, overloaded or timing out after its retries, out of quota, rejects the key or no longer exists. `content_filter` and `invalid_request` failures and an aborted run never move:
+
+```typescript
+const agent = new Agent({
+  name: 'support',
+  model: 'anthropic/claude-sonnet-5-5',
+  fallbackModels: [
+    'openai/gpt-6.1-sol',
+    { model: 'deepseek/deepseek-v4-pro', provider: 'openrouter' },
+  ],
+  instructions: 'Answer support questions.',
+});
+
+const result = await cog.run(agent, {
+  input,
+  onModelFallback: ({ from, to, error }) => console.warn(`${from} -> ${to}: ${error.message}`),
+});
+result.modelUsed; // 'openai/gpt-6.1-sol' when a fallback gave the final answer
+```
+
+Every turn starts from `model` again. Each model has a circuit breaker shared by the runtime's runs (`llm.modelCircuitBreaker`, default 5 failures in a row, 30 s), which opens at once on a lasting failure such as an exhausted quota. A stream moves only before its first token, a fallback turn is priced at the model that answered it and leaves an `llm.fallback` span, and when every model fails the run ends with `LLM_UNAVAILABLE` (or the error code every model failed with), the failures in `details.attempts`. Agents without `fallbackModels` behave as before.
+
 `llmUnavailable`, `llmTimeout`, `llmInvalidResponse`, `llmConfigError` and `wrapSDKError` build these errors in your own backends, and `providerErrorIn` reads the error a router such as OpenRouter puts in the body of a successful response; `withLLMRetry(backend, options)` / `RetryingBackend` add retries with `Retry-After` support to any backend.
 
 ---
@@ -272,6 +297,7 @@ const agent = new Agent({
   name: 'research-assistant',
   instructions: 'You research topics thoroughly',
   model: 'openai/gpt-6.1-sol',
+  fallbackModels: ['anthropic/claude-sonnet-5-5'], // see Fallback Models
   tools: [webSearch, calculator],
 
   temperature: 0.7,
@@ -400,7 +426,7 @@ const weatherTool = tool({
 });
 ```
 
-`tool()` also takes `category`, `tags`, `sideEffects`, `requiresApproval`, `timeout`, `sandbox` and `maxResultLength`.
+`tool()` also takes `category`, `tags`, `sideEffects`, `requiresApproval`, `timeout`, `sandbox` and `maxResultLength`, plus `title`, `outputSchema` and MCP `annotations` (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), which an MCP server sends to its clients. `withParsedArguments(tool)` keeps a tool's approval, sandbox, timeout and limits with a pass-through schema, for `cogitator.invokeTool()` calls whose arguments were already parsed with the tool's schema (by the MCP SDK or the AI SDK).
 
 The name must be one every provider accepts: letters, digits, `_` and `-`, starting with a letter or `_`, at most 64 characters (the strictest of the OpenAI, Anthropic, Gemini and Bedrock rules). `tool()` throws a `TypeError` for any other name, with a name that fits, instead of the run failing later with a provider error. `normalizeToolName('weather.get')` gives `weather_get` for names built from data, `normalizeToolNames(names)` keeps a whole set distinct, `isProviderSafeToolName(name)` checks one, and `assertToolName(name)` throws the same error for tools you build without `tool()`. A parameter with `.default()` is optional in the JSON Schema the model sees, and `execute` receives the default when the model leaves it out. Tools passed to `new Agent({ tools })` lose their individual parameter types in a plain array, while `toolset(...tools)` keeps them as a typed tuple that agents still accept:
 
@@ -509,7 +535,7 @@ Nothing of the paused turn runs until every call in it is decided. Paused runs l
 
 A paused run's `output` is not the agent's answer. `isPausedRun(result)` tells the two apart, the run result wire format (`toAgentWireRunResult`) keeps `status`, `pendingApprovals` and `checkpoint` across processes, and `AgentRunPausedError` (code `RUN_PAUSED`) reports a pause where the caller cannot wait for a decision.
 
-To run a single tool call outside a run with the same checks (schema, approval, guardrails, sandbox, `tool.timeout`), use `cog.invokeTool(tool, args, { onApproval })`. A call nobody approves is refused with `pendingApproval` set, since there is no run to pause.
+To run a single tool call outside a run with the same checks (schema, approval, guardrails, sandbox, `tool.timeout`, the Cogitator's `wrapToolCall` middleware), use `cog.invokeTool(tool, args, { onApproval })`. A call nobody approves is refused with `pendingApproval` set, since there is no run to pause.
 
 ### PII Masking
 
@@ -527,7 +553,7 @@ const cog = new Cogitator({
 });
 ```
 
-In `mask` mode the answer, its stream and tool call arguments get the real values back, so `send_email({ to: '[EMAIL_1]' })` reaches the tool as the real address. `detect` limits the built-in kinds (`PII_TYPES`: `email`, `phone`, `credit_card`, `iban`, `ssn`, `ip_address`, `api_key`). `PiiMasker`, `PiiVault` and `withPiiMasking` work outside a run too. See [Security](https://cogitator.app/docs/advanced/security).
+In `mask` mode the answer, its stream and tool call arguments get the real values back, so `send_email({ to: '[EMAIL_1]' })` reaches the tool as the real address. `detect` limits the built-in kinds (`PII_TYPES`: `email`, `phone`, `credit_card`, `iban`, `ssn`, `ip_address`, `api_key`). In a run the masking is middleware closest to the model, so it also masks what your [middleware](#run-middleware) adds. `piiMiddleware(config)` masks the runs of one agent only, and `PiiMasker`, `PiiVault` and `withPiiMasking` work outside a run. See [Security](https://cogitator.app/docs/advanced/security).
 
 ### Tool Context
 
@@ -538,12 +564,41 @@ interface ToolContext {
   agentId: string;
   runId: string;
   signal: AbortSignal; // aborted on run cancel or tool timeout
+  toolCallId?: string;
   threadId?: string;
   userId?: string; // the run's userId
   channelType?: string;
   channelId?: string;
+  deps?: unknown; // the run's deps, typed with ToolContext<YourDeps>
 }
 ```
+
+### Tool Dependencies
+
+Give tools a database client, an API key or the signed-in user without putting them in the prompt: pass them as `deps`, and annotate the tool's context with their type.
+
+```typescript
+import { Agent, tool, type ToolContext } from '@cogitator-ai/core';
+
+interface AppDeps {
+  db: Database;
+  userId: string;
+}
+
+const listOrders = tool({
+  name: 'list_orders',
+  description: "List the signed-in user's orders",
+  parameters: z.object({ limit: z.number().default(10) }),
+  execute: async ({ limit }, { deps }: ToolContext<AppDeps>) =>
+    deps.db.orders.findMany({ where: { userId: deps.userId }, take: limit }),
+});
+
+const agent = new Agent<AppDeps>({ name: 'support', instructions: '...', tools: [listOrders] });
+
+await cog.run(agent, { input: 'Where is my order?', deps: { db, userId: session.userId } });
+```
+
+`deps` reach every tool of the run, handed-over agents, agents run as tools and `cog.invokeTool(tool, args, { deps })`, and never the model, memory, spans, the result or a paused run's checkpoint: pass them again to `resume()`. `new Agent<AppDeps>` makes `deps` required in `run()` and `resume()` and refuses tools whose deps type is unrelated to `AppDeps`. Declare every field the tools read in it: tool methods are compared loosely, so a tool reading a field `AppDeps` lacks still compiles. Server adapters, channels, swarms, workflows and the worker start runs without `deps` for now.
 
 ### Sandboxed Tools
 
@@ -838,6 +893,7 @@ const result = await cog.run(agent, {
   userId: 'user_456', // owns the thread, scopes memory, reaches tools as context.userId
   threadAccess: 'owner', // default; 'shared' lets any user continue the thread
   context: { task: 'analysis' }, // extra values for the system prompt
+  deps: { db }, // values for the tools (context.deps), never sent to the model
 
   timeout: 60000,
   signal: controller.signal,
@@ -854,6 +910,7 @@ const result = await cog.run(agent, {
 
   onApproval: (request) => ({ approved: request.toolName !== 'delete_account' }),
   onHandoff: (handoff) => console.log(`${handoff.from} -> ${handoff.to}`),
+  onModelFallback: ({ from, to }) => console.warn(`${from} failed, using ${to}`),
   onToolCall: (call) => console.log('Tool:', call.name),
   onToolResult: (result) => console.log('Result:', result.result),
   onSpan: (span) => console.log('Span:', span.name),
@@ -877,7 +934,7 @@ interface RunResult {
   runId: string;
   agentId: string;
   threadId: string;
-  modelUsed?: string; // differs from agent.model when cost routing picked another
+  modelUsed?: string; // the model of the final answer, when cost routing or a fallback picked it
   usage: {
     inputTokens: number;
     outputTokens: number;
@@ -934,6 +991,47 @@ await cogitator.close(); // flushes the OTLP exporter
 
 An observer that throws is logged without failing the run. `createLangfuseExporter(...).observer()` traces every run in Langfuse the same way.
 
+### Run Middleware
+
+Observers only watch. Middleware changes what a run does: it wraps each model call and each tool call, so masking, guards, caching, argument rewriting and logging live in one place instead of in every tool. Give middleware to the Cogitator (every run), the agent or the run:
+
+```typescript
+import { Agent, Cogitator, tripwire, type RunMiddleware } from '@cogitator-ai/core';
+
+const timing: RunMiddleware = {
+  name: 'timing',
+  async wrapModelCall(call, next) {
+    const started = Date.now();
+    const response = await next(call);
+    metrics.record(call.model, Date.now() - started);
+    return response;
+  },
+};
+
+const refundGuard: RunMiddleware = {
+  name: 'refund-guard',
+  beforeRun({ input }) {
+    if (/refund/i.test(input)) tripwire('Refunds go to a person', { queue: 'billing' });
+  },
+};
+
+const cog = new Cogitator({ middleware: [timing] });
+const agent = new Agent({ name: 'support', instructions: '...', middleware: [refundGuard] });
+await cog.run(agent, { input, middleware: [auditFor(userId)] });
+```
+
+| Hook            | When                                          | What it can do                                                                  |
+| --------------- | --------------------------------------------- | ------------------------------------------------------------------------------- |
+| `beforeRun`     | A new run's input, before it is saved or sent | Check it. Not called on `resume()`                                              |
+| `beforeModel`   | Before each model turn                        | Return `{ messages }` to change the conversation from then on                   |
+| `wrapModelCall` | Around each call, once per model a turn tries | Change the request or the stream sink, call `next` again, or answer without it  |
+| `afterModel`    | After each answer, before the run uses it     | Return `{ content }` or `{ toolCalls }` to replace them                         |
+| `wrapToolCall`  | Around each tool call that passed approval    | Change the arguments (checked against the schema again), or answer for the tool |
+
+Every hook gets the run's context: `runId`, `threadId`, the agent, `userId`, the channel, `iteration`, `signal`, `deps` and a `state` map the run's middleware share. The Cogitator's middleware runs first, then the agent's, then the run's, then the built-in ones: PII masking (`security.pii`), prompt injection (`security.promptInjection`), guardrails (`guardrails`) and compaction (`context`), closest to the model. `before*` hooks run in that order, `wrap*` hooks nest with the first outermost, `afterModel` runs in reverse. After a handoff the agent the run went on as brings its own middleware. To see each turn as the run keeps it, after every layer, pass `onModelTurn` in the run options: it gets `{ content, toolCalls, model }` before the turn's tools run.
+
+`tripwire(reason, info?)` stops the run as a guard that tripped: it fails with `GUARDRAIL_TRIPPED` (HTTP 400), the middleware, the reason and `info` in `details`, and `isTripwire(error)` tells it apart. Any other error a hook throws fails the run as it is, and a hook still running when the run is cancelled or times out is no longer waited for. Arguments a `wrapToolCall` hook changes are checked against the tool's schema and `requiresApproval` again, and an approval never carries over to them. Every call a `wrapModelCall` hook sends counts toward usage and budgets, an answer it gives without the model counts nothing and still reaches `onToken` in a streamed run. A middleware with `holdsStream: true` makes a streamed run hold each turn's text until the turn is done, so text a hook retries, blocks or replaces never reaches `onToken`. A tripwire raised inside a tool, such as a nested `agentAsTool()` run, stops the outer run too. The Cogitator's `wrapToolCall` hooks also wrap `invokeTool()`, which throws an error they throw (a tripwire among them) while a failing tool still comes back in `error`. `toAgentWire()` does not carry middleware and warns when an agent has some. `piiMiddleware`, `promptInjectionMiddleware`, `guardrailsMiddleware` and `compactionMiddleware` build the built-in ones, to give a feature to one agent only.
+
 ---
 
 ## Memory Integration
@@ -949,7 +1047,7 @@ const cog = new Cogitator({
       keyPrefix: 'cogitator:',
     },
     contextBuilder: {
-      maxTokens: 4000,
+      maxTokens: 4000, // optional: without it the history gets what the run's model has room for
       strategy: 'recent',
     },
   },
@@ -2048,7 +2146,15 @@ const result = await cog.run(agent, {
 });
 ```
 
-Both exporters do nothing unless `enabled: true` is set, so you can build them unconditionally and switch them per environment. They are not attached automatically; wire them to the run callbacks as above. See [Observability](https://cogitator.app/docs/deployment/observability).
+Both exporters do nothing unless `enabled: true` is set, so you can build them unconditionally and switch them per environment. They are not attached automatically: wire them to the run callbacks as above, pass them in `observers`, or register them for every runtime of the process:
+
+```typescript
+import { registerTelemetry } from '@cogitator-ai/core';
+
+const unregister = registerTelemetry(otlp.observer());
+```
+
+Spans follow the OpenTelemetry GenAI semantic conventions (`invoke_agent`, `chat`, `execute_tool` with `gen_ai.*` attributes, next to the older `llm.*`, `tool.*` and `run.*` ones), streamed model calls record their time to first chunk, and the OTLP exporter sends the convention's span names. Runs that belong together share one trace: a run started inside a tool joins the run that called the tool, workflows and swarms put their agents under their own span, and `trace` in the run options (with `parseTraceparent` for an incoming `traceparent` header) puts a run under any parent. Prompts and answers go on the spans only when asked for, with `telemetry: { captureContent: true }` or `captureContent` on an observer. See [Observability](https://cogitator.app/docs/deployment/observability).
 
 ---
 

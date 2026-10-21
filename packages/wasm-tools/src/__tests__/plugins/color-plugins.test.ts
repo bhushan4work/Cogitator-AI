@@ -341,6 +341,23 @@ describe('color plugin: contrast', () => {
     expect(res.output.largeText).toEqual({ aa: true, aaa: true });
   });
 
+  it('compares unrounded contrast against AA threshold: #6363f8 on #ffffff rounds to 4.5 but fails normal-text AA', () => {
+    const res = runPlugin<ContrastOutput>('color', 'color', {
+      operation: 'contrast',
+      color: '#6363f8',
+      color2: '#ffffff',
+    });
+    expect(res.code).toBe(0);
+    // Raw ratio is ~4.4961 which rounds to 4.5, but unrounded < 4.5 so normal-text AA fails
+    expect(res.output.ratio).toBe(4.5);
+    expect(res.output.contrastRatio).toBe(4.5);
+    expect(res.output.normalText?.aa).toBe(false);
+    expect(res.output.aa?.normal).toBe(false);
+    // Large-text AA requires 3.0, which passes
+    expect(res.output.largeText?.aa).toBe(true);
+    expect(res.output.aa?.large).toBe(true);
+  });
+
   it('tests WCAG AAA threshold with #595959 on white (ratio ~ 7.00:1)', () => {
     const res = runPlugin<ContrastOutput>('color', 'color', {
       operation: 'contrast',

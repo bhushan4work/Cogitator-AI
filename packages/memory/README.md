@@ -141,7 +141,7 @@ await memory.connect();
 memory.vectorStatus(); // { available: true, dimensions: 1536 } or { available: false, reason }
 ```
 
-On `connect()` the adapter creates its tables and an HNSW cosine index on the embeddings, which works from the first row on (no training data needed). An `ivfflat` index left by an earlier version is replaced on the first connect after upgrading, see the [adapters docs](https://cogitator.app/docs/memory/adapters) for building the new index ahead of time on a large table. `search()` raises `hnsw.ef_search` to the requested limit and, on pgvector 0.8+, uses iterative scans, so large limits and filters still get every matching row. Messages, tool calls, tool results and metadata are stored as `jsonb`.
+On `connect()` the adapter creates its tables and an HNSW cosine index on the embeddings, which works from the first row on (no training data needed). An `ivfflat` index left by an earlier version is replaced on the first connect after upgrading, see the [adapters docs](https://cogitator.app/docs/memory/adapters) for building the new index ahead of time on a large table. `search()` raises `hnsw.ef_search` to the requested limit and, on pgvector 0.8+, uses iterative scans, so large limits and filters still get every matching row. Vectors of 2001 to 4000 dimensions are indexed as `halfvec` (pgvector 0.7+), larger ones are searched without an index. The schema version is kept in `<schema>.cogitator_schema_migrations`, so a `connect()` changes tables only after an upgrade. Messages, tool calls, tool results and metadata are stored as `jsonb`.
 
 pgvector is only needed for embeddings. Without it, `connect()` still succeeds and threads, entries and facts work, while embedding operations return a failed result naming the reason (also logged at connect). An existing `embeddings` table keeps its vector size: an adapter without `dimensions` adopts it, one configured for another size reports the mismatch through `vectorStatus()` and the failed results instead of failing each search with a Postgres error.
 
@@ -242,6 +242,7 @@ interface MemoryAdapter {
   getThread(threadId: string): Promise<MemoryResult<Thread | null>>;
   updateThread(threadId: string, metadata: Record<string, unknown>): Promise<MemoryResult<Thread>>;
   deleteThread(threadId: string): Promise<MemoryResult<void>>;
+  listThreads(options?: ListThreadsOptions): Promise<MemoryResult<ThreadPage>>;
 
   addEntry(entry: Omit<MemoryEntry, 'id' | 'createdAt'>): Promise<MemoryResult<MemoryEntry>>;
   getEntries(options: MemoryQueryOptions): Promise<MemoryResult<MemoryEntry[]>>;
@@ -272,6 +273,19 @@ await memory.updateThread(thread.id, {
 await memory.deleteThread(thread.id);
 ```
 
+`listThreads` pages through threads, the most recently updated first, filtered by agent, metadata values (compared by type) and update time. Pass `nextCursor` back for the next page:
+
+```typescript
+const page = unwrap(
+  await memory.listThreads({ agentId: 'agent-1', metadata: { user: 'user-123' }, limit: 20 })
+);
+const next = page.nextCursor
+  ? unwrap(await memory.listThreads({ agentId: 'agent-1', cursor: page.nextCursor }))
+  : undefined;
+```
+
+A thread's `updatedAt` changes when it is created or its metadata is updated. Every adapter keeps the same contract: `addEntry` into a missing thread fails, `updateThread` is atomic, entries with one `createdAt` keep the order they were added in, fields never set come back absent rather than `null`, and returned objects are copies. `memoryAdapterConformanceCases` in `@cogitator-ai/test-utils` checks it, also for adapters of your own.
+
 ### Entry Operations
 
 ```typescript
@@ -286,7 +300,7 @@ const entry = unwrap(
 const entries = unwrap(
   await memory.getEntries({
     threadId: thread.id,
-    limit: 50, // the most recent 50, oldest first
+    limit: 50, // the most recent 50, oldest first, 0 for all
     includeToolCalls: true,
     // before / after: Date bounds
   })
@@ -309,8 +323,8 @@ Build token-aware conversation context from memory.
 
 ```typescript
 interface ContextBuilderConfig {
-  maxTokens: number;
-  reserveTokens?: number;
+  maxTokens?: number; // without it, build() takes maxTokens from its options
+  reserveTokens?: number; // default 10% of the budget (at least 100)
   strategy: 'recent' | 'relevant' | 'hybrid';
   includeSystemPrompt?: boolean;
   includeFacts?: boolean;
@@ -326,7 +340,21 @@ Strategies:
 - `relevant` - messages ranked by embedding similarity to `currentInput` (requires `embeddingService`; falls back to `recent` without input), returned in chronological order
 - `hybrid` - always keeps the latest messages and fills the remaining budget with the most relevant older ones
 
-The system prompt is always kept and counted: history gets what it leaves of `maxTokens - reserveTokens`, and a prompt larger than that is still sent whole, with a note in `warnings`. Entries are counted by their text, tool call arguments and images rather than only by their saved `tokenCount`. `relevant` and `hybrid` score the newest 200 entries and embed each entry once per builder (vectors are cached by entry id).
+The system prompt is always kept and counted: history gets what it leaves of `maxTokens - reserveTokens`, and a prompt larger than that is still sent whole, with a note in `warnings`. Entries are counted by their text, tool call arguments and images rather than only by their saved `tokenCount`. `relevant` and `hybrid` score the newest 200 entries and embed each entry once per builder (vectors are cached by entry id). Give the builder a `messageIndex` to keep those vectors in an embedding store instead: each entry is embedded once, in the background, and older entries of the thread are found by a search of the store.
+
+```typescript
+import { MessageIndex } from '@cogitator-ai/memory';
+
+const index = new MessageIndex({ store: postgres, embedding: embeddings });
+index.attach(memory); // background embedding of new entries, vectors deleted with their entries
+
+const builder = new ContextBuilder(
+  { maxTokens: 8000, strategy: 'relevant' },
+  { memoryAdapter: memory, embeddingService: embeddings, messageIndex: index }
+);
+```
+
+Every built-in adapter reports its changes through `onChange(listener)` (`entry-added`, `entry-deleted`, `thread-cleared`, `thread-deleted`), which is what `attach` listens to, and every built-in embedding store reads vectors by source with `getBySources(ids)`. An adapter of your own reports its changes by extending `ChangeReportingMemoryAdapter` and passing each write's result through `reported()`. Vectors carry `metadata.index: 'messages'` and the thread's `agentId` and `userId`.
 
 ### Basic Usage
 
@@ -352,7 +380,24 @@ const context = await builder.build({
 console.log(context.messages);
 console.log(context.tokenCount);
 console.log(context.truncated);
+console.log(context.dropped); // what was left out: entries, facts, semanticResults, graphNodes, tokenCount
 ```
+
+### Budget per Build
+
+Leave `maxTokens` out of the config and pass it to `build()` instead, so one builder serves models of different sizes. A Cogitator run does this with the context window of the model it runs on when `memory.contextBuilder.maxTokens` is not set:
+
+```typescript
+const builder = new ContextBuilder({ strategy: 'recent' }, { memoryAdapter: memory });
+
+const context = await builder.build({
+  threadId: 'thread_123',
+  agentId: 'agent-1',
+  maxTokens: 128_000, // e.g. the model's context window
+});
+```
+
+A build without a budget from either side throws. `reserveTokens` defaults to 10% of the budget used (at least 100).
 
 ### With Facts and Semantic Search
 
@@ -396,7 +441,8 @@ interface BuiltContext {
   semanticResults: (Embedding & { score: number })[];
   graphContext?: GraphContext; // with includeGraphContext and a graph adapter
   tokenCount: number;
-  truncated: boolean;
+  truncated: boolean; // history entries were left out
+  dropped: DroppedContext; // what was left out of the context
   errors?: ContextBuildError[]; // parts that failed to load and were left out
   warnings?: string[]; // budget problems, such as a system prompt over budget
   metadata: {
@@ -405,6 +451,14 @@ interface BuiltContext {
     factsIncluded: number;
     semanticResultsIncluded: number;
   };
+}
+
+interface DroppedContext {
+  entries: MemoryEntry[]; // history left out, in conversation order (relevant/hybrid: also entries not selected)
+  facts: Fact[]; // facts visible to the user that did not fit
+  semanticResults: (Embedding & { score: number })[]; // search results that did not fit
+  graphNodes: GraphNode[]; // graph nodes cut from the graph context
+  tokenCount: number; // tokens of all of the above
 }
 
 interface ContextBuildError {

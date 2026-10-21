@@ -13,6 +13,7 @@ import { Agent } from '../agent';
 import { Cogitator } from '../cogitator';
 import { tool } from '../tool';
 import { defineSkill } from '../skill';
+import { getLogger } from '../logger';
 import {
   AGENT_CONFIG_WIRE_FIELDS,
   AgentWireError,
@@ -90,6 +91,8 @@ function project(key: keyof AgentConfig, config: AgentConfig): unknown {
       return config.tools?.map((t) => t.toJSON());
     case 'skills':
       return AGENT_CONFIG_WIRE_FIELDS.skills;
+    case 'middleware':
+      return AGENT_CONFIG_WIRE_FIELDS.middleware;
     case 'responseFormat': {
       const format = config.responseFormat;
       return format?.type === 'json_schema'
@@ -104,6 +107,25 @@ function project(key: keyof AgentConfig, config: AgentConfig): unknown {
 }
 
 describe('agent wire format', () => {
+  it('warns that middleware stays behind', () => {
+    const warn = vi.spyOn(getLogger(), 'warn');
+    const guarded = new Agent({
+      name: 'guarded',
+      model: 'openai/gpt-6-luna',
+      instructions: 'Help.',
+      middleware: [{ name: 'guard', beforeRun: () => undefined }],
+    });
+
+    const wire = toAgentWire(guarded);
+
+    expect(JSON.stringify(wire)).not.toContain('guard"');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('does not carry middleware'), {
+      agent: 'guarded',
+      middleware: ['guard'],
+    });
+    warn.mockRestore();
+  });
+
   it('carries every AgentConfig field', () => {
     const escalation = new Agent({
       name: 'escalation',
@@ -117,6 +139,10 @@ describe('agent wire format', () => {
       description: 'Decides what runs',
       provider: 'openrouter',
       model: 'openai/gpt-6-luna',
+      fallbackModels: [
+        'anthropic/claude-sonnet-5-5',
+        { model: 'deepseek/deepseek-v4-pro', provider: 'openrouter' },
+      ],
       instructions: 'Decide whether the pitch runs.',
       tools: [search],
       skills: [
@@ -138,6 +164,7 @@ describe('agent wire format', () => {
       maxIterations: 7,
       onIterationLimit: 'stop',
       timeout: 600000,
+      middleware: [{ name: 'audit', afterModel: () => undefined }],
     };
     const original = new Agent(full);
 

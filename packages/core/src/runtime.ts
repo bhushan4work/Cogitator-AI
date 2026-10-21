@@ -25,6 +25,7 @@ import type {
   HandoffEvent,
   ResumeOptions,
   RunCheckpoint,
+  RunDeps,
   RunCheckpointStore,
   RunPrompt,
   Tool,
@@ -33,16 +34,32 @@ import type {
   ToolInvocationOptions,
   ToolInvocationResult,
   ToolInvoker,
+  ChatRequest,
+  RunMiddlewareContext,
+  ModelCallRequest,
+  RunMiddleware,
 } from '@cogitator-ai/types';
 import { type Agent } from './agent';
 import { ToolRegistry } from './registry';
 import { createLLMBackend } from './llm/index';
-import { llmInvalidResponse } from './llm/errors';
+import { LLMError, llmInvalidResponse } from './llm/errors';
 import { isLLMProvider } from './llm/providers';
 import { createLLMBackendFromPlugin, hasLLMPlugin } from './llm/plugin';
 import { withLLMRetry } from './llm/retry';
+import { ModelFallbackChain, type ModelCandidate } from './llm/model-fallback';
+import { modelContextWindow } from './context/model-window';
+import { countMessagesTokens, countTokens } from '@cogitator-ai/memory';
+import { TruncateStrategy } from './context/strategies/index';
+import { sanitizeToolHistory } from './utils/tool-history';
 import { normalizeTurn } from './llm/turn';
-import { PiiMasker, withPiiDecisions, withPiiMasking } from './security/pii';
+import { withPiiDecisions, withPiiMasking } from './security/pii';
+import { MiddlewarePipeline } from './middleware/pipeline';
+import {
+  compactionMiddleware,
+  guardrailsMiddleware,
+  piiMiddleware,
+  promptInjectionMiddleware,
+} from './middleware/builtins';
 import { createLoggerFromConfig, getLogger, setLogger } from './logger';
 import { CallPricer, RunCostMeter } from './cogitator/run-cost';
 import { isDecisionModel } from '@cogitator-ai/models';
@@ -74,9 +91,30 @@ import {
   addContextToMessages,
 } from './cogitator/message-builder';
 import { createSpan, getTextContent } from './cogitator/span-factory';
-import { executeTool, createToolMessage } from './cogitator/tool-executor';
+import { runToolCall, createToolMessage, needsApproval } from './cogitator/tool-executor';
 import { DEFAULT_TOOL_RESULT_MAX_LENGTH, toolResultLengthError } from './tool-content';
-import { streamChat } from './cogitator/streaming';
+import { streamChatRequest, type StreamTiming } from './cogitator/streaming';
+import {
+  chatContentAttributes,
+  chatRequestAttributes,
+  chatResponseAttributes,
+  errorType,
+  GEN_AI,
+  genAiProviderName,
+  invokeAgentAttributes,
+  safeJson,
+  TOOL_ERROR_TYPE,
+  toolResultContent,
+  withoutContent,
+} from './observability/genai';
+import {
+  currentTraceContext,
+  newSpanId,
+  newTraceId,
+  normalizeTraceParent,
+  withTraceContext,
+} from './observability/trace-context';
+import { telemetryObservers } from './observability/telemetry';
 import { RunLimiter } from './cogitator/run-limiter';
 import { findHandoffAgent, handoffTools } from './cogitator/handoffs';
 import { PromptRegistry } from './cogitator/prompts';
@@ -192,6 +230,10 @@ export class Cogitator implements ToolInvoker {
   /** Prices model calls whose provider reports no cost: by `llm.pricing`, then by the model registry. */
   readonly pricer: CallPricer;
   private backends = new Map<string, LLMBackend>();
+  /** Backends of agent turns: PII masking runs as middleware there, not in the backend */
+  private turnBackends = new Map<string, LLMBackend>();
+  private piiLayer?: RunMiddleware;
+  private modelChain?: ModelFallbackChain;
   private readonly decisionBackends = new Map<string, DecisionBackend>();
   private processCheckpoints?: InMemoryRunCheckpointStore;
   private promptRegistry?: PromptRegistry;
@@ -213,6 +255,7 @@ export class Cogitator implements ToolInvoker {
   private initPromise?: Promise<void>;
   private memoryInit?: Promise<void>;
   private runLimiter?: RunLimiter;
+  private warnedGuardrailsWithoutModel = false;
   private constitution?: Constitution;
 
   /**
@@ -257,6 +300,7 @@ export class Cogitator implements ToolInvoker {
    * @param options.input - User input/prompt for the agent
    * @param options.threadId - Thread ID for memory persistence
    * @param options.context - Additional context to include in system prompt
+   * @param options.deps - Values for the agent's tools (`context.deps`), kept out of the prompt
    * @param options.stream - Enable streaming responses
    * @param options.onToken - Callback for each streamed token
    * @param options.onToolCall - Callback when a tool is called
@@ -280,7 +324,10 @@ export class Cogitator implements ToolInvoker {
    * console.log('Cost:', result.usage.cost);
    * ```
    */
-  async run(agent: Agent, options: RunOptions): Promise<RunResult> {
+  async run<TDeps = unknown>(
+    agent: Agent<TDeps>,
+    options: RunOptions<TDeps> & RunDeps<TDeps>
+  ): Promise<RunResult> {
     return this.execute(agent, options);
   }
 
@@ -301,10 +348,10 @@ export class Cogitator implements ToolInvoker {
    * }
    * ```
    */
-  async resume(
-    agent: Agent,
+  async resume<TDeps = unknown>(
+    agent: Agent<TDeps>,
     target: RunCheckpoint | string,
-    options: ResumeOptions = {}
+    ...[options = {}]: ResumeArgs<TDeps>
   ): Promise<RunResult> {
     if (typeof target !== 'string' && target.version !== 1) {
       throw new CogitatorError({
@@ -331,7 +378,8 @@ export class Cogitator implements ToolInvoker {
    * against the tool's schema, approval asked for a call that needs it (`options.onApproval`,
    * else `guardrails.onToolApproval`), the guardrails applied, sandboxed tools run in this
    * runtime's sandbox and `tool.timeout` kept. A call that needs approval nobody gives does not
-   * run: there is no run to pause, so it is refused with the request in `pendingApproval`.
+   * run: there is no run to pause, so it is refused with the request in `pendingApproval`. A call
+   * whose `signal` aborts, even while its approval is being decided, does not run either.
    *
    * @example
    * ```ts
@@ -341,10 +389,10 @@ export class Cogitator implements ToolInvoker {
    * if (result.error) console.error(result.error);
    * ```
    */
-  async invokeTool(
-    tool: Tool,
+  async invokeTool<TParams, TResult, TDeps = unknown>(
+    tool: Tool<TParams, TResult, TDeps>,
     args: unknown,
-    options: ToolInvocationOptions = {}
+    ...[options = {}]: InvocationArgs<TDeps>
   ): Promise<ToolInvocationResult> {
     const toolCall: ToolCall = {
       id: options.toolCallId ?? `call_${nanoid(12)}`,
@@ -353,6 +401,15 @@ export class Cogitator implements ToolInvoker {
     };
     this.ensureGuardrails();
     const constitutionalAI = this.state.constitutionalAI;
+    if (!constitutionalAI) this.warnGuardrailsWithoutModel();
+    const signal = options.signal;
+    const aborted = (): ToolInvocationResult => ({
+      callId: toolCall.id,
+      name: tool.name,
+      result: null,
+      error: toAbortError(signal?.reason, `Tool "${tool.name}" aborted`).message,
+    });
+    if (signal?.aborted) return aborted();
 
     let approvedByUser = false;
     if (
@@ -366,7 +423,15 @@ export class Cogitator implements ToolInvoker {
         description: tool.description,
         ...(tool.sideEffects && { sideEffects: [...tool.sideEffects] }),
       };
-      const decision = await this.decideApproval(request, options.onApproval);
+      const deciding = this.decideApproval(request, options.onApproval);
+      let decision: Awaited<typeof deciding>;
+      try {
+        decision = await (signal ? waitForAbortable(deciding, signal) : deciding);
+      } catch (error) {
+        if (signal?.aborted) return aborted();
+        throw error;
+      }
+      if (signal?.aborted) return aborted();
       if (decision === 'pause') {
         return {
           callId: toolCall.id,
@@ -389,26 +454,61 @@ export class Cogitator implements ToolInvoker {
 
     const registry = new ToolRegistry();
     registry.register(tool);
-    return executeTool(
+    const runId = options.runId ?? `run_${nanoid(12)}`;
+    const agentId = options.agentId ?? 'tool-invoker';
+    return runToolCall({
       registry,
       toolCall,
-      options.runId ?? `run_${nanoid(12)}`,
-      options.agentId ?? 'tool-invoker',
-      this.state.sandboxManager,
-      constitutionalAI,
-      constitutionalAI?.config.filterToolCalls ?? false,
-      () => initializeSandbox(this.config, this.state),
-      options.signal,
-      {
+      runId,
+      agentId,
+      sandboxManager: this.state.sandboxManager,
+      initializeSandbox: () => initializeSandbox(this.config, this.state),
+      signal,
+      extraContext: {
         ...options.context,
         ...(options.threadId !== undefined && { threadId: options.threadId }),
         ...(options.userId !== undefined && { userId: options.userId }),
         ...(options.channelType !== undefined && { channelType: options.channelType }),
         ...(options.channelId !== undefined && { channelId: options.channelId }),
+        ...(options.deps !== undefined && { deps: options.deps }),
       },
-      approvedByUser,
-      this.config.sandbox?.allowNativeFallback !== false
-    );
+      approved: approvedByUser,
+      allowNativeFallback: this.config.sandbox?.allowNativeFallback !== false,
+      middleware: new MiddlewarePipeline([
+        ...(this.config.middleware ?? []),
+        ...this.builtinMiddleware(),
+      ]),
+      context: {
+        runId,
+        agentId,
+        agentName: agentId,
+        iteration: 0,
+        signal: signal ?? new AbortController().signal,
+        state: new Map(),
+        ...(options.threadId !== undefined && { threadId: options.threadId }),
+        ...(options.userId !== undefined && { userId: options.userId }),
+        ...(options.channelType !== undefined && { channelType: options.channelType }),
+        ...(options.channelId !== undefined && { channelId: options.channelId }),
+        ...(options.deps !== undefined && { deps: options.deps }),
+      },
+    });
+  }
+
+  /**
+   * The middleware the runtime's own features become, closest to the model, in this order:
+   * PII masking (`security.pii`), prompt injection (`security.promptInjection`), guardrails
+   * (`guardrails`) and compaction (`context`). Each is there once its feature is set up.
+   */
+  private builtinMiddleware(): RunMiddleware[] {
+    const pii = this.config.security?.pii;
+    if (pii) this.piiLayer ??= piiMiddleware(pii);
+    const { injectionDetector, constitutionalAI, contextManager } = this.state;
+    return [
+      ...(this.piiLayer ? [this.piiLayer] : []),
+      ...(injectionDetector ? [promptInjectionMiddleware(injectionDetector)] : []),
+      ...(constitutionalAI ? [guardrailsMiddleware(constitutionalAI)] : []),
+      ...(contextManager ? [compactionMiddleware(contextManager)] : []),
+    ];
   }
 
   /**
@@ -423,6 +523,44 @@ export class Cogitator implements ToolInvoker {
       const index = this.observers.indexOf(observer);
       if (index !== -1) this.observers.splice(index, 1);
     };
+  }
+
+  /**
+   * Everything watching this runtime's runs: its observers (`config.observers` and `observe()`)
+   * and those registered process-wide with `registerTelemetry`, each once.
+   */
+  private watchers(): RunObserver[] {
+    return [...new Set([...this.observers, ...telemetryObservers()])];
+  }
+
+  /** Whether runs record model and tool content on their spans, see `TelemetryConfig`. */
+  private capturesContent(): boolean {
+    return (
+      this.config.telemetry?.captureContent === true ||
+      this.watchers().some((observer) => observer.captureContent === true)
+    );
+  }
+
+  /**
+   * Reports a span that is not part of a run of this runtime (the root span of a swarm, a
+   * workflow's span) to everything watching its runs, as `onSpan` of the run `runId`, so the
+   * spans of an orchestration reach the same place as the runs inside it. Content attributes
+   * reach only the observers that asked for them.
+   */
+  recordSpan(span: Span, run: { runId: string }): void {
+    const contentForAll = this.config.telemetry?.captureContent === true;
+    for (const observer of this.watchers()) {
+      try {
+        observer.onSpan?.(
+          contentForAll || observer.captureContent ? span : withoutContent(span),
+          run
+        );
+      } catch (error) {
+        getLogger().warn('Run observer onSpan failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 
   /** Lets every observer send what it buffered; one that fails is logged, the others still close. */
@@ -445,8 +583,9 @@ export class Cogitator implements ToolInvoker {
    * throws is logged and the run goes on.
    */
   private withObservers(options: RunOptions, agent: Agent, runId: () => string): RunOptions {
-    const observers = [...this.observers];
+    const observers = this.watchers();
     if (observers.length === 0) return options;
+    const contentForAll = this.config.telemetry?.captureContent === true;
 
     const notify = (hook: keyof RunObserver, call: (observer: RunObserver) => void) => {
       for (const observer of observers) {
@@ -469,8 +608,13 @@ export class Cogitator implements ToolInvoker {
         );
       },
       onSpan: (span) => {
-        options.onSpan?.(span);
-        notify('onSpan', (observer) => observer.onSpan?.(span, { runId: runId() }));
+        options.onSpan?.(contentForAll ? span : withoutContent(span));
+        notify('onSpan', (observer) =>
+          observer.onSpan?.(
+            contentForAll || observer.captureContent ? span : withoutContent(span),
+            { runId: runId() }
+          )
+        );
       },
       onRunComplete: (result) => {
         options.onRunComplete?.(result);
@@ -497,7 +641,14 @@ export class Cogitator implements ToolInvoker {
     let prompt: RunPrompt | undefined;
     let runId = checkpoint?.runId ?? `run_${nanoid(12)}`;
     const threadId = options.threadId ?? `thread_${nanoid(12)}`;
-    const traceId = `trace_${nanoid(16)}`;
+    const explicitTrace = normalizeTraceParent(options.trace);
+    const parentTrace = explicitTrace ?? currentTraceContext();
+    let traceId = parentTrace?.traceId ?? newTraceId();
+    let parentSpanId = parentTrace?.parentSpanId;
+    const conversationId = options.threadId;
+    const captureContent = this.capturesContent();
+    const publicSpans = () =>
+      this.config.telemetry?.captureContent === true ? spans : spans.map(withoutContent);
     const startTime = Date.now();
     const spans: Span[] = [];
 
@@ -539,7 +690,7 @@ export class Cogitator implements ToolInvoker {
       }, timeout);
     }
 
-    const rootSpanId = `span_${nanoid(12)}`;
+    const rootSpanId = newSpanId();
     let releaseRunSlot: (() => void) | undefined;
     options = this.withObservers(options, agent, () => runId);
 
@@ -569,6 +720,10 @@ export class Cogitator implements ToolInvoker {
         }
         runId = checkpoint.runId;
         options = { ...options, userId: checkpoint.userId };
+        if (!explicitTrace && checkpoint.trace) {
+          traceId = checkpoint.trace.traceId;
+          parentSpanId = checkpoint.trace.rootSpanId;
+        }
       }
 
       prompt = checkpoint?.prompt;
@@ -592,6 +747,31 @@ export class Cogitator implements ToolInvoker {
         active = found;
       }
       const handoffs: HandoffEvent[] = [...(checkpoint?.handoffs ?? [])];
+      let iterations = checkpoint?.iterations ?? 0;
+
+      const builtins = this.builtinMiddleware();
+      const pipelineFor = (owner: Agent) =>
+        new MiddlewarePipeline([
+          ...(this.config.middleware ?? []),
+          ...(owner.config.middleware ?? []),
+          ...(options.middleware ?? []),
+          ...builtins,
+        ]);
+      let pipeline = pipelineFor(active);
+      const middlewareState = new Map<string, unknown>();
+      const middlewareContext = (): RunMiddlewareContext => ({
+        runId,
+        threadId,
+        agentId: active.id,
+        agentName: active.name,
+        iteration: iterations,
+        signal: abortController.signal,
+        state: middlewareState,
+        ...(options.userId !== undefined && { userId: options.userId }),
+        ...(options.channelType !== undefined && { channelType: options.channelType }),
+        ...(options.channelId !== undefined && { channelId: options.channelId }),
+        ...(options.deps !== undefined && { deps: options.deps }),
+      });
 
       const buildRegistry = (owner: Agent) => {
         const ownerRegistry = new ToolRegistry();
@@ -625,7 +805,7 @@ export class Cogitator implements ToolInvoker {
         input = checkpoint.input;
         effectiveModel = checkpoint.model;
         routeProvider = checkpoint.provider;
-        ({ backend, model } = this.route(effectiveModel, routeProvider));
+        ({ backend, model } = this.turnRoute(effectiveModel, routeProvider));
         messages = [...checkpoint.messages];
       } else {
         input = await buildInputWithAudio(options.input, options.audio, {
@@ -648,7 +828,7 @@ export class Cogitator implements ToolInvoker {
           effectiveModel = `${recommendation.provider}/${recommendation.modelId}`;
           routeProvider = undefined;
         }
-        ({ backend, model } = this.route(effectiveModel, routeProvider));
+        ({ backend, model } = this.turnRoute(effectiveModel, routeProvider));
 
         if (costRouter) {
           const budgetCheck = recommendation
@@ -663,9 +843,24 @@ export class Cogitator implements ToolInvoker {
         }
 
         await this.abandonPausedRun(agent, runOptions, threadId);
-        messages = await this.prepareMessages(agent, runOptions, input, threadId);
+        messages = await this.prepareMessages(
+          agent,
+          runOptions,
+          threadId,
+          this.historyBudget(agent, effectiveModel, routeProvider, registry, input),
+          (initial) =>
+            waitForAbortable(
+              pipeline.beforeRun({ input, messages: initial }, middlewareContext()),
+              abortController.signal
+            )
+        );
       }
 
+      let candidates = this.modelCandidates(active, effectiveModel, routeProvider, {
+        backend,
+        model,
+      });
+      let fellBackTo: string | undefined;
       const allToolCalls: ToolCall[] = [...(checkpoint?.toolCalls ?? [])];
       let totalInputTokens = checkpoint?.usage.inputTokens ?? 0;
       let totalOutputTokens = checkpoint?.usage.outputTokens ?? 0;
@@ -687,7 +882,6 @@ export class Cogitator implements ToolInvoker {
       const reasoningParts: string[] = [...(checkpoint?.reasoning ?? [])];
       let reasoning = options.reasoning ?? active.config.reasoning;
       const promptCache = this.config.llm?.promptCache ?? {};
-      let iterations = checkpoint?.iterations ?? 0;
       const maxIterations = agent.config?.maxIterations ?? 10;
       const answerAtLimit = (agent.config?.onIterationLimit ?? 'answer') === 'answer';
       const limit = { reached: false, closingTurn: false };
@@ -743,10 +937,15 @@ export class Cogitator implements ToolInvoker {
           )
         );
         active = target;
+        pipeline = pipelineFor(target);
         ({ registry, targets: handoffTargets } = buildRegistry(target));
         effectiveModel = this.resolveModel(target);
         routeProvider = target.config.provider;
-        ({ backend, model } = this.route(effectiveModel, routeProvider));
+        ({ backend, model } = this.turnRoute(effectiveModel, routeProvider));
+        candidates = this.modelCandidates(target, effectiveModel, routeProvider, {
+          backend,
+          model,
+        });
         reasoning = options.reasoning ?? target.config.reasoning;
         responseFormat = toLLMResponseFormat(target.config.responseFormat);
         lastToolCallSig = '';
@@ -774,6 +973,8 @@ export class Cogitator implements ToolInvoker {
                 result: null,
                 error: 'Duplicate tool call detected. Try a different approach.',
               };
+              options.onToolCall?.(tc);
+              options.onToolResult?.(errorResult);
               const duplicateMessage = createToolMessage(tc, errorResult);
               messages.push(duplicateMessage);
               if (
@@ -838,6 +1039,7 @@ export class Cogitator implements ToolInvoker {
 
         const executeToolCall = async (toolCall: ToolCall) => {
           const toolSpanStart = Date.now();
+          const toolSpanId = newSpanId();
           const decision = decisions.get(toolCall.id);
           if (decision?.approved === false) {
             const declined: ToolResult = {
@@ -846,32 +1048,41 @@ export class Cogitator implements ToolInvoker {
               result: null,
               error: `The user declined this tool call${decision.reason ? `: ${decision.reason}` : ''}`,
             };
-            return { toolCall, result: declined, toolSpanStart, toolSpanEnd: Date.now() };
+            return {
+              toolCall,
+              result: declined,
+              toolSpanId,
+              toolSpanStart,
+              toolSpanEnd: Date.now(),
+            };
           }
           const result = await waitForAbortable(
-            executeTool(
-              registry,
-              toolCall,
-              runId,
-              active.id,
-              this.state.sandboxManager,
-              this.state.constitutionalAI,
-              this.state.constitutionalAI?.config.filterToolCalls ?? false,
-              () => initializeSandbox(this.config, this.state),
-              abortController.signal,
-              {
-                threadId,
-                userId: options.userId,
-                channelType: options.channelType,
-                channelId: options.channelId,
-              },
-              decision?.approved === true,
-              this.config.sandbox?.allowNativeFallback !== false
+            withTraceContext({ traceId, parentSpanId: toolSpanId }, () =>
+              runToolCall({
+                registry,
+                toolCall,
+                runId,
+                agentId: active.id,
+                sandboxManager: this.state.sandboxManager,
+                initializeSandbox: () => initializeSandbox(this.config, this.state),
+                signal: abortController.signal,
+                extraContext: {
+                  threadId,
+                  userId: options.userId,
+                  channelType: options.channelType,
+                  channelId: options.channelId,
+                  ...(options.deps !== undefined && { deps: options.deps }),
+                },
+                approved: decision?.approved === true,
+                allowNativeFallback: this.config.sandbox?.allowNativeFallback !== false,
+                middleware: pipeline,
+                context: middlewareContext(),
+              })
             ),
             abortController.signal
           );
           const toolSpanEnd = Date.now();
-          return { toolCall, result, toolSpanStart, toolSpanEnd };
+          return { toolCall, result, toolSpanId, toolSpanStart, toolSpanEnd };
         };
 
         const toolResults = options.parallelToolCalls
@@ -886,7 +1097,7 @@ export class Cogitator implements ToolInvoker {
 
         const reflectionMessages: Message[] = [];
 
-        for (const { toolCall, result, toolSpanStart, toolSpanEnd } of toolResults) {
+        for (const { toolCall, result, toolSpanId, toolSpanStart, toolSpanEnd } of toolResults) {
           const toolSpan = createSpan(
             `tool.${toolCall.name}`,
             traceId,
@@ -899,10 +1110,29 @@ export class Cogitator implements ToolInvoker {
               'tool.arguments': JSON.stringify(toolCall.arguments),
               'tool.success': !result.error,
               'tool.error': result.error,
+              [GEN_AI.operationName]: 'execute_tool',
+              [GEN_AI.toolName]: toolCall.name,
+              [GEN_AI.toolCallId]: toolCall.id,
+              [GEN_AI.toolType]: 'function',
+              [GEN_AI.agentName]: active.name,
+              ...(conversationId && { [GEN_AI.conversationId]: conversationId }),
+              ...(result.error && { [GEN_AI.errorType]: TOOL_ERROR_TYPE }),
+              ...(captureContent && {
+                [GEN_AI.toolCallArguments]: safeJson(toolCall.arguments),
+                ...(!result.error && {
+                  [GEN_AI.toolCallResult]: toolResultContent(
+                    result.result,
+                    registry.get(toolCall.name)?.maxResultLength ??
+                      this.config.limits?.maxToolResultLength ??
+                      DEFAULT_TOOL_RESULT_MAX_LENGTH
+                  ),
+                }),
+              }),
             },
             result.error ? 'error' : 'ok',
             'internal',
-            options.onSpan
+            options.onSpan,
+            toolSpanId
           );
           spans.push(toolSpan);
 
@@ -1000,8 +1230,6 @@ export class Cogitator implements ToolInvoker {
       let lastFinishReason: ChatResponse['finishReason'] | undefined;
       const streaming = Boolean(options.stream && (options.onToken ?? options.onReasoning));
       const onToken = options.onToken ?? (() => undefined);
-      const holdsTokensForOutputFilter = streaming && this.filtersOutput();
-      const turnTokens = holdsTokensForOutputFilter ? () => undefined : onToken;
       let structuredRepaired = false;
       let emptyAnswerRetries = 0;
 
@@ -1010,125 +1238,258 @@ export class Cogitator implements ToolInvoker {
         this.assertTokenBudget(totalInputTokens + totalOutputTokens);
         this.assertCostBudget(costMeter.total(costModel));
 
-        if (this.state.contextManager?.shouldCompress(messages, effectiveModel)) {
-          const compressionResult = await this.state.contextManager.compress(
-            messages,
-            effectiveModel
-          );
+        iterations++;
+        const changed = await waitForAbortable(
+          pipeline.beforeModel({ messages, model: effectiveModel }, middlewareContext()),
+          abortController.signal
+        );
+        if (changed) {
           messages.length = 0;
-          messages.push(...compressionResult.messages);
+          messages.push(...changed);
         }
 
-        iterations++;
         agentContext.iterationIndex = iterations - 1;
         agentContext.previousActions = [...allActions];
 
-        const llmSpanStart = Date.now();
+        const recordFailedCall = (
+          error: unknown,
+          candidate: ModelCandidate,
+          sentRequest: ChatRequest,
+          startedAt: number,
+          timing?: StreamTiming
+        ): void => {
+          const cause = abortController.signal.aborted ? abortController.signal.reason : error;
+          spans.push(
+            createSpan(
+              'llm.chat',
+              traceId,
+              rootSpanId,
+              startedAt,
+              Date.now(),
+              {
+                'llm.model': sentRequest.model,
+                'llm.iteration': iterations,
+                'llm.failure': cause instanceof Error ? failureReason(cause) : '_OTHER',
+                [GEN_AI.operationName]: 'chat',
+                [GEN_AI.providerName]: genAiProviderName(candidate.backend.provider),
+                ...chatRequestAttributes(sentRequest),
+                ...(timing && { [GEN_AI.requestStream]: true }),
+                ...(conversationId && { [GEN_AI.conversationId]: conversationId }),
+                [GEN_AI.errorType]: errorType(cause),
+              },
+              'error',
+              'client',
+              options.onSpan
+            )
+          );
+        };
+
+        const recordCall = (
+          answer: ChatResponse,
+          candidate: ModelCandidate,
+          sentRequest: ChatRequest,
+          startedAt: number,
+          timing?: StreamTiming
+        ): void => {
+          const sentModel = sentRequest.model;
+          const rerouted = sentModel !== candidate.model;
+          const priced = rerouted ? sentModelName(candidate, sentModel) : candidate.name;
+          const spentBefore = costMeter.total(costModel);
+          costMeter.add(answer.usage, priced);
+          const callCost = costMeter.total(costModel) - spentBefore;
+          if (!abortController.signal.aborted)
+            spans.push(
+              createSpan(
+                'llm.chat',
+                traceId,
+                rootSpanId,
+                startedAt,
+                Date.now(),
+                {
+                  'llm.model': sentModel,
+                  'llm.iteration': iterations,
+                  'llm.input_tokens': answer.usage.inputTokens,
+                  'llm.output_tokens': answer.usage.outputTokens,
+                  'llm.cost': callCost,
+                  ...(answer.usage.cachedInputTokens && {
+                    'llm.cached_input_tokens': answer.usage.cachedInputTokens,
+                  }),
+                  ...(answer.usage.reasoningTokens && {
+                    'llm.reasoning_tokens': answer.usage.reasoningTokens,
+                  }),
+                  'llm.finish_reason': answer.finishReason,
+                  [GEN_AI.operationName]: 'chat',
+                  [GEN_AI.providerName]: genAiProviderName(candidate.backend.provider),
+                  ...chatRequestAttributes(sentRequest),
+                  ...(timing && { [GEN_AI.requestStream]: true }),
+                  ...chatResponseAttributes(answer),
+                  ...(conversationId && { [GEN_AI.conversationId]: conversationId }),
+                  ...(answer.finishReason === 'error' && {
+                    [GEN_AI.errorType]: ErrorCode.LLM_INVALID_RESPONSE,
+                  }),
+                  ...(timing?.firstChunkAt !== undefined && {
+                    [GEN_AI.responseTimeToFirstChunk]: (timing.firstChunkAt - startedAt) / 1000,
+                  }),
+                  ...(captureContent && chatContentAttributes(sentRequest, answer)),
+                },
+                answer.finishReason === 'error' ? 'error' : 'ok',
+                'client',
+                options.onSpan
+              )
+            );
+          totalInputTokens += answer.usage.inputTokens;
+          totalOutputTokens += answer.usage.outputTokens;
+          cachedInputTokens += answer.usage.cachedInputTokens ?? 0;
+          cacheWriteTokens += answer.usage.cacheWriteTokens ?? 0;
+          reasoningTokens += answer.usage.reasoningTokens ?? 0;
+          if (answer.usage.cost === undefined) this.pricer.noteUnpriced(priced);
+          this.state.costRouter?.recordCost({
+            runId,
+            agentId: agent.id,
+            threadId,
+            model: candidate === candidates[0] && !rerouted ? effectiveModel : priced,
+            inputTokens: answer.usage.inputTokens,
+            outputTokens: answer.usage.outputTokens,
+            cost: callCost,
+          });
+        };
         const turnToolChoice = limit.closingTurn
           ? 'none'
           : toolChoiceForTurn(requestedToolChoice, allToolCalls.length > 0, registry);
 
-        let response: ChatResponse;
-        if (streaming) {
-          response = await waitForAbortable(
-            streamChat(
-              backend,
-              model,
-              messages,
-              registry,
-              active,
-              turnTokens,
-              abortController.signal,
-              responseFormat,
-              {
+        const holdsStream = streaming && pipeline.holdsStream;
+        let streamed = false;
+        let streamedText = false;
+        let reachedModel = false;
+        const turnStream = holdsStream
+          ? () => undefined
+          : (token: string) => {
+              streamed = true;
+              streamedText = true;
+              onToken(token);
+            };
+        const onReasoning = options.onReasoning;
+        const turnPipeline = pipeline;
+        const turn = await waitForAbortable(
+          this.fallbackChain().run<ChatResponse>(
+            candidates,
+            async (candidate) => {
+              reachedModel = false;
+              const turnMessages =
+                candidate === candidates[0]
+                  ? messages
+                  : await this.fitToModel(messages, candidate.name, active, registry);
+              const request: ChatRequest = {
+                model: candidate.model,
+                messages: turnMessages,
+                tools: registry.getSchemas(),
+                ...(turnToolChoice && { toolChoice: turnToolChoice }),
+                temperature: active.config.temperature,
+                topP: active.config.topP,
+                maxTokens: active.config.maxTokens,
+                stop: active.config.stopSequences,
+                responseFormat,
                 reasoning,
                 cache: promptCache,
                 cachePrefix: active.instructions,
-                onReasoning: options.onReasoning,
-                ...(turnToolChoice && { toolChoice: turnToolChoice }),
-              }
-            ),
-            abortController.signal
-          );
-        } else {
-          response = await waitForAbortable(
-            backend.chat({
-              model,
-              messages,
-              tools: registry.getSchemas(),
-              ...(turnToolChoice && { toolChoice: turnToolChoice }),
-              temperature: active.config.temperature,
-              topP: active.config.topP,
-              maxTokens: active.config.maxTokens,
-              stop: active.config.stopSequences,
-              responseFormat,
-              reasoning,
-              cache: promptCache,
-              cachePrefix: active.instructions,
+                signal: abortController.signal,
+              };
+              const call: ModelCallRequest = {
+                request,
+                model: candidate.name,
+                ...(streaming && {
+                  stream: {
+                    onToken: turnStream,
+                    ...(onReasoning && {
+                      onReasoning: (delta: string) => {
+                        streamed = true;
+                        onReasoning(delta);
+                      },
+                    }),
+                  },
+                }),
+              };
+              const answer = normalizeTurn(
+                await turnPipeline.callModel(
+                  call,
+                  async (sent) => {
+                    const startedAt = Date.now();
+                    const timing: StreamTiming | undefined = sent.stream ? {} : undefined;
+                    let sentAnswer: ChatResponse;
+                    try {
+                      sentAnswer = normalizeTurn(
+                        sent.stream
+                          ? await streamChatRequest(
+                              candidate.backend,
+                              sent.request,
+                              sent.stream,
+                              timing
+                            )
+                          : await candidate.backend.chat(sent.request)
+                      );
+                    } catch (error) {
+                      recordFailedCall(error, candidate, sent.request, startedAt, timing);
+                      throw error;
+                    }
+                    reachedModel = true;
+                    recordCall(sentAnswer, candidate, sent.request, startedAt, timing);
+                    return sentAnswer;
+                  },
+                  middlewareContext()
+                )
+              );
+              if (answer.finishReason !== 'error') return answer;
+              throw llmInvalidResponse(
+                { provider: candidate.backend.provider, model: candidate.model },
+                `The model ended its turn with an error${answer.finishMessage ? `: ${answer.finishMessage}` : ''}`
+              );
+            },
+            {
               signal: abortController.signal,
-            }),
-            abortController.signal
-          );
-        }
-        response = normalizeTurn(response);
-
-        const spentBefore = costMeter.total(costModel);
-        const callModel = this.pricedModel(effectiveModel, routeProvider);
-        costMeter.add(response.usage, callModel);
-        const callCost = costMeter.total(costModel) - spentBefore;
-
-        const llmSpan = createSpan(
-          'llm.chat',
-          traceId,
-          rootSpanId,
-          llmSpanStart,
-          Date.now(),
-          {
-            'llm.model': model,
-            'llm.iteration': iterations,
-            'llm.input_tokens': response.usage.inputTokens,
-            'llm.output_tokens': response.usage.outputTokens,
-            'llm.cost': callCost,
-            ...(response.usage.cachedInputTokens && {
-              'llm.cached_input_tokens': response.usage.cachedInputTokens,
-            }),
-            ...(response.usage.reasoningTokens && {
-              'llm.reasoning_tokens': response.usage.reasoningTokens,
-            }),
-            'llm.finish_reason': response.finishReason,
-          },
-          'ok',
-          'client',
-          options.onSpan
+              canSwitch: () => !streamed,
+              onFallback: (event) => {
+                const reason = failureReason(event.error);
+                getLogger().warn('Model failed, falling back to the next model', {
+                  from: event.from,
+                  to: event.to,
+                  reason,
+                });
+                spans.push(
+                  createSpan(
+                    'llm.fallback',
+                    traceId,
+                    rootSpanId,
+                    Date.now(),
+                    Date.now(),
+                    {
+                      'llm.fallback.from': event.from,
+                      'llm.fallback.to': event.to,
+                      'llm.fallback.reason': reason,
+                    },
+                    'error',
+                    'internal',
+                    options.onSpan
+                  )
+                );
+                options.onModelFallback?.(event);
+              },
+            }
+          ),
+          abortController.signal
         );
-        spans.push(llmSpan);
-
-        totalInputTokens += response.usage.inputTokens;
-        totalOutputTokens += response.usage.outputTokens;
-        cachedInputTokens += response.usage.cachedInputTokens ?? 0;
-        cacheWriteTokens += response.usage.cacheWriteTokens ?? 0;
-        reasoningTokens += response.usage.reasoningTokens ?? 0;
+        const answeredBy = turn.candidate;
+        fellBackTo = answeredBy === candidates[0] ? undefined : answeredBy.name;
+        let response = turn.result;
         lastFinishReason = response.finishReason;
-        if (response.usage.cost === undefined) {
-          this.pricer.noteUnpriced(callModel);
-        }
-        this.state.costRouter?.recordCost({
-          runId,
-          agentId: agent.id,
-          threadId,
-          model: effectiveModel,
-          inputTokens: response.usage.inputTokens,
-          outputTokens: response.usage.outputTokens,
-          cost: callCost,
-        });
         if (response.reasoning) reasoningParts.push(response.reasoning);
 
-        if (response.finishReason === 'error') {
-          throw llmInvalidResponse(
-            { provider: backend.provider, model },
-            `The model ended its turn with an error${response.finishMessage ? `: ${response.finishMessage}` : ''}`
-          );
-        }
+        response = await waitForAbortable(
+          turnPipeline.afterModel(
+            { response, messages, model: answeredBy.name },
+            middlewareContext()
+          ),
+          abortController.signal
+        );
 
         if (
           isEmptyAnswer(response) &&
@@ -1137,33 +1498,16 @@ export class Cogitator implements ToolInvoker {
         ) {
           emptyAnswerRetries++;
           getLogger().warn('Model returned an empty answer, asking again', {
-            model,
+            model: answeredBy.model,
             iteration: iterations,
             attempt: emptyAnswerRetries,
           });
           continue;
         }
 
-        let outputContent = response.content;
-
-        if (this.state.constitutionalAI?.config.filterOutput) {
-          const outputResult = await this.state.constitutionalAI.filterOutput(
-            outputContent,
-            messages
-          );
-          if (!outputResult.allowed) {
-            if (outputResult.suggestedRevision) {
-              outputContent = outputResult.suggestedRevision;
-            } else {
-              throw new CogitatorError({
-                message: `Output blocked: ${outputResult.blockedReason ?? 'Policy violation'}`,
-                code: ErrorCode.LLM_CONTENT_FILTERED,
-                details: { harmScores: outputResult.harmScores },
-              });
-            }
-          }
-        }
-        if (holdsTokensForOutputFilter && outputContent) onToken(outputContent);
+        const outputContent = response.content;
+        const answeredAlone = !reachedModel && !streamedText;
+        if (streaming && outputContent && (holdsStream || answeredAlone)) onToken(outputContent);
 
         const requestsTools = !limit.closingTurn && Boolean(response.toolCalls?.length);
         const assistantMessage = requestsTools
@@ -1193,6 +1537,12 @@ export class Cogitator implements ToolInvoker {
           });
           continue;
         }
+
+        options.onModelTurn?.({
+          content: outputContent,
+          toolCalls: requestsTools ? (response.toolCalls ?? []) : [],
+          model: answeredBy.name,
+        });
 
         if (
           this.state.memoryAdapter &&
@@ -1245,7 +1595,37 @@ export class Cogitator implements ToolInvoker {
           },
           reasoning: reasoningParts,
           startedAt: checkpoint?.startedAt ?? startTime,
+          trace: { traceId, rootSpanId },
         };
+        await this.runCheckpointStore().save(pausedCheckpoint);
+        spans.unshift(
+          createSpan(
+            'agent.run',
+            traceId,
+            parentSpanId,
+            startTime,
+            Date.now(),
+            {
+              'agent.id': agent.id,
+              'agent.name': agent.name,
+              'agent.model': effectiveModel,
+              'run.id': runId,
+              'run.thread_id': threadId,
+              'run.status': 'paused',
+              'run.iterations': iterations,
+              'run.tool_calls': allToolCalls.length,
+              'run.input_tokens': totalInputTokens,
+              'run.output_tokens': totalOutputTokens,
+              ...invokeAgentAttributes(agent, conversationId, effectiveModel),
+              [GEN_AI.usageInputTokens]: totalInputTokens,
+              [GEN_AI.usageOutputTokens]: totalOutputTokens,
+            },
+            'unset',
+            'internal',
+            options.onSpan,
+            rootSpanId
+          )
+        );
         const paused: RunResult = {
           output: getTextContent(messages[messages.length - 1]?.content ?? ''),
           runId,
@@ -1265,9 +1645,8 @@ export class Cogitator implements ToolInvoker {
           ...(reasoningParts.length > 0 && { reasoning: reasoningParts.join('\n\n') }),
           toolCalls: allToolCalls,
           messages,
-          trace: { traceId, spans },
+          trace: { traceId, spans: publicSpans() },
         };
-        await this.runCheckpointStore().save(pausedCheckpoint);
         options.onRunComplete?.(paused);
         return paused;
       }
@@ -1305,7 +1684,7 @@ export class Cogitator implements ToolInvoker {
       const rootSpan = createSpan(
         'agent.run',
         traceId,
-        undefined,
+        parentSpanId,
         startTime,
         endTime,
         {
@@ -1318,9 +1697,15 @@ export class Cogitator implements ToolInvoker {
           'run.tool_calls': allToolCalls.length,
           'run.input_tokens': totalInputTokens,
           'run.output_tokens': totalOutputTokens,
+          ...invokeAgentAttributes(agent, conversationId, agentModel),
+          [GEN_AI.usageInputTokens]: totalInputTokens,
+          [GEN_AI.usageOutputTokens]: totalOutputTokens,
+          ...(cachedInputTokens > 0 && { [GEN_AI.usageCacheReadInputTokens]: cachedInputTokens }),
+          ...(cacheWriteTokens > 0 && { [GEN_AI.usageCacheWriteInputTokens]: cacheWriteTokens }),
+          ...(reasoningTokens > 0 && { [GEN_AI.usageReasoningOutputTokens]: reasoningTokens }),
         },
         'ok',
-        'server',
+        'internal',
         options.onSpan,
         rootSpanId
       );
@@ -1340,7 +1725,7 @@ export class Cogitator implements ToolInvoker {
         runId,
         agentId: agent.id,
         threadId,
-        modelUsed: this.config.costRouting?.enabled ? effectiveModel : undefined,
+        modelUsed: fellBackTo ?? (this.config.costRouting?.enabled ? effectiveModel : undefined),
         usage: {
           inputTokens: totalInputTokens,
           outputTokens: totalOutputTokens,
@@ -1358,7 +1743,7 @@ export class Cogitator implements ToolInvoker {
         messages,
         trace: {
           traceId,
-          spans,
+          spans: publicSpans(),
         },
         reflections: allReflections.length > 0 ? allReflections : undefined,
         reflectionSummary: this.state.reflectionEngine
@@ -1378,7 +1763,7 @@ export class Cogitator implements ToolInvoker {
       const errorSpan = createSpan(
         'agent.run',
         traceId,
-        undefined,
+        parentSpanId,
         startTime,
         endTime,
         {
@@ -1386,10 +1771,21 @@ export class Cogitator implements ToolInvoker {
           'agent.name': agent.name,
           'agent.model': agent.model ?? this.config.llm?.defaultModel,
           'run.id': runId,
-          error: error instanceof Error ? error.message : String(error),
+          error:
+            error instanceof LLMError
+              ? failureReason(error)
+              : error instanceof Error
+                ? error.message
+                : String(error),
+          ...invokeAgentAttributes(
+            agent,
+            conversationId,
+            agent.model ?? this.config.llm?.defaultModel
+          ),
+          [GEN_AI.errorType]: errorType(error),
         },
         'error',
-        'server',
+        'internal',
         options.onSpan,
         rootSpanId
       );
@@ -1413,57 +1809,27 @@ export class Cogitator implements ToolInvoker {
 
   /**
    * The messages a new run starts with: the thread's history and the input,
-   * once the input passed the injection and constitutional checks, with the
-   * input saved to memory.
+   * once the input passed `checkInput` (the `beforeRun` hooks), with the
+   * input saved to memory. `historyBudget` is the context builder's budget
+   * for this run, when `memory.contextBuilder.maxTokens` sets none.
    */
   private async prepareMessages(
     agent: Agent,
     options: RunOptions,
-    input: string,
-    threadId: string
+    threadId: string,
+    historyBudget: number | undefined,
+    checkInput: (messages: readonly Message[]) => Promise<void>
   ): Promise<Message[]> {
     const messages = await buildInitialMessages(
       agent,
       options,
       threadId,
       this.state.memoryAdapter,
-      this.state.contextBuilder
+      this.state.contextBuilder,
+      historyBudget
     );
 
-    const pii = this.config.security?.pii;
-    if (pii?.mode === 'block') {
-      const found = new PiiMasker(pii).find(input);
-      if (found.length > 0) {
-        throw new CogitatorError({
-          message: `The input contains personal data: ${[...new Set(found.map((f) => f.type))].join(', ')}`,
-          code: ErrorCode.PII_DETECTED,
-          details: { types: [...new Set(found.map((f) => f.type))] },
-        });
-      }
-    }
-
-    if (this.state.injectionDetector) {
-      const injectionResult = await this.state.injectionDetector.analyze(input);
-      if (injectionResult.action === 'blocked') {
-        const threatTypes = injectionResult.threats.map((t) => t.type).join(', ');
-        throw new CogitatorError({
-          message: `Prompt injection detected: ${threatTypes}`,
-          code: ErrorCode.PROMPT_INJECTION_DETECTED,
-          details: { threats: injectionResult.threats },
-        });
-      }
-    }
-
-    if (this.state.constitutionalAI?.config.filterInput) {
-      const inputResult = await this.state.constitutionalAI.filterInput(input);
-      if (!inputResult.allowed) {
-        throw new CogitatorError({
-          message: `Input blocked: ${inputResult.blockedReason ?? 'Policy violation'}`,
-          code: ErrorCode.LLM_CONTENT_FILTERED,
-          details: { harmScores: inputResult.harmScores },
-        });
-      }
-    }
+    await checkInput(messages);
 
     if (options.context) {
       addContextToMessages(messages, options.context);
@@ -1676,6 +2042,20 @@ export class Cogitator implements ToolInvoker {
   }
 
   /**
+   * Guardrails need a model, which a run takes from its agent. `invokeTool` has no agent, so
+   * without `guardrails.model` or `llm.defaultModel`, and before a run built them with its agent's
+   * model, its calls skip the guardrails: say so once.
+   */
+  private warnGuardrailsWithoutModel(): void {
+    if (this.warnedGuardrailsWithoutModel) return;
+    if (!this.config.guardrails || this.config.guardrails.enabled === false) return;
+    this.warnedGuardrailsWithoutModel = true;
+    getLogger().warn(
+      'Guardrails are enabled but tool calls made with invokeTool skip them: set guardrails.model or llm.defaultModel'
+    );
+  }
+
+  /**
    * Builds the guardrails once their model is known: `guardrails.model`, else
    * the model of the agent being run, else `llm.defaultModel` — so they exist
    * before the first run whenever one of the configured models names them.
@@ -1693,20 +2073,122 @@ export class Cogitator implements ToolInvoker {
     );
   }
 
-  /**
-   * True when the guardrails check every answer before it is used. A streamed run then holds
-   * the tokens of each turn back and hands `onToken` the checked text (or its revision) in one
-   * chunk, so nothing the filter blocks reaches a listener.
-   */
-  private filtersOutput(): boolean {
-    const config = this.state.constitutionalAI?.config;
-    return Boolean(config?.enabled && config.filterOutput);
-  }
-
   private ensureCostRouting(): void {
     if (this.config.costRouting?.enabled && !this.state.costRoutingInitialized) {
       initializeCostRouting(this.config, this.state, (model) => this.pricer.pricing(model));
     }
+  }
+
+  /**
+   * The context builder's budget for a run of `agent` on `modelString`, when
+   * `memory.contextBuilder.maxTokens` sets none: the model's context window,
+   * minus room for the answer (`agent.maxTokens`, else 15% of the window, at
+   * most half of it), the tool schemas and the input, and no more than the
+   * context manager lets a turn grow before it compresses. A model on Ollama
+   * gets at most the 4096 tokens Ollama serves by default, unless it runs on
+   * Ollama Cloud.
+   */
+  private historyBudget(
+    agent: Agent,
+    modelString: string,
+    explicitProvider: string | undefined,
+    registry: ToolRegistry,
+    input: string
+  ): number | undefined {
+    if (!this.state.contextBuilder || this.config.memory?.contextBuilder?.maxTokens !== undefined) {
+      return undefined;
+    }
+    const window = this.servedWindow(modelString, explicitProvider);
+    const answer = answerRoom(agent, window);
+    const fixed = countTokens(JSON.stringify(registry.getSchemas())) + countTokens(input);
+    const compressAt = this.state.contextManager?.compressionThreshold(modelString);
+    const budget = Math.floor(Math.min(window - answer, compressAt ?? Infinity) - fixed);
+    if (budget > MIN_HISTORY_BUDGET) return budget;
+    getLogger().warn(
+      'No room for conversation history: the answer, the tools and the input take the context ' +
+        'window. Set memory.contextBuilder.maxTokens, or lower the agent maxTokens.',
+      { agent: agent.name, model: modelString, window, answer, fixed }
+    );
+    return MIN_HISTORY_BUDGET;
+  }
+
+  /** The context window `modelString` runs with: its own, or Ollama's default context. */
+  private servedWindow(modelString: string, explicitProvider?: string): number {
+    const known = modelContextWindow(modelString);
+    return this.servesFullWindow(modelString, explicitProvider)
+      ? known
+      : Math.min(known, OLLAMA_DEFAULT_CONTEXT);
+  }
+
+  /**
+   * `messages` cut to what a fallback model has room for, its context window minus the answer
+   * and the tool schemas, when they are more: the system prompt and the newest messages stay,
+   * and no tool result is left without its call. A turn that falls back to a model with a
+   * smaller window than the agent's model, whose history was sized to the latter, still fits.
+   */
+  private async fitToModel(
+    messages: Message[],
+    modelString: string,
+    agent: Agent,
+    registry: ToolRegistry
+  ): Promise<Message[]> {
+    const window = this.servedWindow(modelString);
+    const room =
+      window - answerRoom(agent, window) - countTokens(JSON.stringify(registry.getSchemas()));
+    const current = countMessagesTokens(messages);
+    if (current <= room) return messages;
+    const cut = await new TruncateStrategy().compress({
+      messages,
+      targetTokens: Math.max(room, 1),
+      currentTokens: current,
+      windowSize: window,
+    });
+    return sanitizeToolHistory(cut.messages);
+  }
+
+  /**
+   * Whether `modelString` runs with its whole context window: anything but a model on Ollama,
+   * which serves a model with its default context, except Ollama Cloud (`https://ollama.com` as
+   * `llm.providers.ollama.baseUrl`, or a model tagged `cloud`).
+   */
+  private servesFullWindow(modelString: string, explicitProvider: string | undefined): boolean {
+    const { provider, model } = this.resolveRoute(modelString, explicitProvider);
+    const custom = Object.hasOwn(this.config.llm?.backends ?? {}, provider)
+      ? this.config.llm?.backends?.[provider]
+      : undefined;
+    if ((custom?.provider ?? provider) !== 'ollama' || model.endsWith('cloud')) return true;
+    if (custom) return false;
+    const baseUrl = this.config.llm?.providers?.ollama?.baseUrl;
+    return baseUrl !== undefined && isOllamaCloud(baseUrl);
+  }
+
+  /**
+   * The models a turn of `owner` runs on: its model as already routed, then its
+   * `fallbackModels`, each once. Every fallback is routed here, so a misconfigured
+   * one fails the run at its start rather than in the middle of an outage.
+   */
+  private modelCandidates(
+    owner: Agent,
+    modelString: string,
+    explicitProvider: string | undefined,
+    primary: ModelRoute
+  ): ModelCandidate[] {
+    const candidates: ModelCandidate[] = [
+      { name: this.pricedModel(modelString, explicitProvider), ...primary },
+    ];
+    for (const fallback of owner.config.fallbackModels ?? []) {
+      const [fallbackModel, fallbackProvider] =
+        typeof fallback === 'string' ? [fallback, undefined] : [fallback.model, fallback.provider];
+      const name = this.pricedModel(fallbackModel, fallbackProvider);
+      if (candidates.some((candidate) => candidate.name === name)) continue;
+      candidates.push({ name, ...this.turnRoute(fallbackModel, fallbackProvider) });
+    }
+    return candidates;
+  }
+
+  private fallbackChain(): ModelFallbackChain {
+    this.modelChain ??= new ModelFallbackChain(this.config.llm?.modelCircuitBreaker);
+    return this.modelChain;
   }
 
   private getBackend(modelString: string, explicitProvider?: string): LLMBackend {
@@ -1722,14 +2204,31 @@ export class Cogitator implements ToolInvoker {
    * An explicit provider keeps the model string as it is.
    */
   route(modelString: string, explicitProvider?: string): ModelRoute {
-    const { provider, model } = this.resolveRoute(modelString, explicitProvider);
-    if (isDecisionModel(`${provider}/${model}`)) {
+    const { provider, model } = this.chatRoute(modelString, explicitProvider);
+    return { backend: this.backendFor(provider), model };
+  }
+
+  /**
+   * The route of an agent turn on `modelString`: as {@link route}, on a backend without PII
+   * masking, which the turn's middleware does instead.
+   */
+  private turnRoute(modelString: string, explicitProvider?: string): ModelRoute {
+    const { provider, model } = this.chatRoute(modelString, explicitProvider);
+    return { backend: this.turnBackendFor(provider), model };
+  }
+
+  private chatRoute(
+    modelString: string,
+    explicitProvider?: string
+  ): { provider: string; model: string } {
+    const route = this.resolveRoute(modelString, explicitProvider);
+    if (isDecisionModel(`${route.provider}/${route.model}`)) {
       throw new CogitatorError({
-        message: `${provider}/${model} is a decision model: it answers typed questions through cog.decide(), not chat`,
+        message: `${route.provider}/${route.model} is a decision model: it answers typed questions through cog.decide(), not chat`,
         code: ErrorCode.CONFIGURATION_ERROR,
       });
     }
-    return { backend: this.backendFor(provider), model };
+    return route;
   }
 
   /**
@@ -1754,7 +2253,7 @@ export class Cogitator implements ToolInvoker {
         provider,
         model,
         retry: this.config.llm?.retry,
-        observers: [...this.observers],
+        observers: this.watchers(),
         recordCost: (record) => this.getCostRouter()?.recordCost(record),
         price: (qualified, usage) => this.pricer.costOrNull(qualified, usage),
         checkBudget: (estimatedCost) => this.assertDecisionBudget(estimatedCost),
@@ -1855,11 +2354,16 @@ export class Cogitator implements ToolInvoker {
   private backendFor(name: string): LLMBackend {
     const cached = this.backends.get(name);
     if (cached) return cached;
-    const backend = withPiiMasking(
-      withLLMRetry(this.createBackend(name), this.config.llm?.retry),
-      this.config.security?.pii
-    );
+    const backend = withPiiMasking(this.turnBackendFor(name), this.config.security?.pii);
     this.backends.set(name, backend);
+    return backend;
+  }
+
+  private turnBackendFor(name: string): LLMBackend {
+    const cached = this.turnBackends.get(name);
+    if (cached) return cached;
+    const backend = withLLMRetry(this.createBackend(name), this.config.llm?.retry);
+    this.turnBackends.set(name, backend);
     return backend;
   }
 
@@ -2070,6 +2574,7 @@ export class Cogitator implements ToolInvoker {
     await this.closeObservers();
     await cleanupState(this.state);
     this.backends.clear();
+    this.turnBackends.clear();
     this.initPromise = undefined;
   }
 }
@@ -2090,8 +2595,20 @@ function throwIfAborted(signal: AbortSignal): void {
   }
 }
 
+/**
+ * `provider/model` of a call a middleware sent to `model` instead of `candidate`'s model, on the
+ * candidate's provider: `candidate.name` is `provider/model` of the candidate.
+ */
+function sentModelName(candidate: ModelCandidate, model: string): string {
+  const suffix = `/${candidate.model}`;
+  return candidate.name.endsWith(suffix)
+    ? `${candidate.name.slice(0, -suffix.length)}/${model}`
+    : model;
+}
+
 function waitForAbortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) {
+    promise.catch(() => undefined);
     return Promise.reject(toAbortError(signal.reason, 'Run aborted'));
   }
 
@@ -2108,6 +2625,48 @@ function waitForAbortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<
   });
 }
 
+/**
+ * The options of `resume()`: optional, unless the agent declares its deps type, whose runs must
+ * pass `deps` again (a checkpoint never holds them).
+ */
+type ResumeArgs<TDeps> = unknown extends TDeps
+  ? [options?: ResumeOptions]
+  : [options: ResumeOptions<TDeps> & { deps: TDeps }];
+
+/** The options of `invokeTool()`: optional, unless the tool reads typed `deps`. */
+type InvocationArgs<TDeps> = unknown extends TDeps
+  ? [options?: ToolInvocationOptions]
+  : [options: ToolInvocationOptions & { deps: TDeps }];
+
+/**
+ * Why a model failed, for logs and spans: its error kind or code, never the error's text, which
+ * may carry what a backend put in it.
+ */
+function failureReason(error: Error): string {
+  if (error instanceof LLMError && error.kind) return error.kind;
+  return error instanceof CogitatorError ? error.code : error.name;
+}
+
+/** The context Ollama serves a model with unless its server is told otherwise (`OLLAMA_CONTEXT_LENGTH`). */
+const OLLAMA_DEFAULT_CONTEXT = 4096;
+
+/** The smallest history budget a run hands the context builder, which keeps the instructions anyway. */
+const MIN_HISTORY_BUDGET = 256;
+
+/** Tokens of a context window kept for the answer: the agent's `maxTokens`, else 15%, at most half. */
+function answerRoom(agent: Agent, window: number): number {
+  return Math.min(agent.config.maxTokens ?? Math.floor(window * 0.15), window / 2);
+}
+
+function isOllamaCloud(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname;
+    return host === 'ollama.com' || host.endsWith('.ollama.com');
+  } catch {
+    return false;
+  }
+}
+
 interface PausedTurn {
   toolCalls: ToolCall[];
   decisions: Record<string, ToolApprovalDecision>;
@@ -2116,15 +2675,4 @@ interface PausedTurn {
 
 function isArgumentRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** Whether a call to `tool` with `args` needs approval; a check that throws counts as yes. */
-function needsApproval(tool: Tool, args: Record<string, unknown>): boolean {
-  const check = tool.requiresApproval;
-  if (typeof check !== 'function') return check === true;
-  try {
-    return check(args);
-  } catch {
-    return true;
-  }
 }

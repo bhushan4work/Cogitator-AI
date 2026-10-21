@@ -3,6 +3,7 @@ import type { Agent } from './agent';
 import type { Cogitator } from './runtime';
 import { tool } from './tool';
 import { z } from 'zod';
+import { isTripwire } from './middleware/tripwire';
 
 export interface AgentAsToolOptions {
   name: string;
@@ -42,11 +43,12 @@ const DEFAULT_SCHEMA = z.object({
   task: z.string().describe('The task to delegate to the agent'),
 });
 
-export function agentAsTool(
+export function agentAsTool<TDeps = unknown>(
   cogitator: Cogitator,
-  agent: Agent,
+  agent: Agent<TDeps>,
   options: AgentAsToolOptions
-): Tool<{ task: string }, AgentToolResult> {
+): Tool<{ task: string }, AgentToolResult, TDeps> {
+  const delegate: Agent = agent;
   const {
     name,
     description,
@@ -56,22 +58,26 @@ export function agentAsTool(
     onApproval,
   } = options;
 
-  return tool({
+  return tool<{ task: string }, AgentToolResult, TDeps>({
     name,
     description,
     parameters: DEFAULT_SCHEMA,
     timeout,
     sideEffects: ['external'],
 
-    execute: async (params: { task: string }, context: ToolContext): Promise<AgentToolResult> => {
+    execute: async (
+      params: { task: string },
+      context: ToolContext<TDeps>
+    ): Promise<AgentToolResult> => {
       try {
         const effectiveTimeout = timeout ?? agent.config.timeout;
 
-        const result = await cogitator.run(agent, {
+        const result = await cogitator.run(delegate, {
           input: params.task,
           timeout: effectiveTimeout,
           signal: context.signal,
           ...(context.userId !== undefined && { userId: context.userId }),
+          ...(context.deps !== undefined && { deps: context.deps }),
           onApproval: async (request) => {
             const decision = onApproval ? await onApproval(request) : 'pause';
             return decision === 'pause' ? DELEGATED_DECLINE : decision;
@@ -98,6 +104,7 @@ export function agentAsTool(
           }),
         };
       } catch (error) {
+        if (isTripwire(error)) throw error;
         return {
           output: '',
           success: false,

@@ -4,6 +4,7 @@ import type {
   Constitution,
   EmbeddingAdapter,
   EmbeddingService,
+  EmbeddingServiceConfig,
   FactAdapter,
   MemoryAdapter,
   MemoryConfig,
@@ -18,6 +19,7 @@ import {
   MongoDBAdapter,
   QdrantAdapter,
   ContextBuilder,
+  MessageIndex,
   createEmbeddingService,
   type ContextBuilderDeps,
 } from '@cogitator-ai/memory';
@@ -66,6 +68,7 @@ export interface InitializerState {
   memoryAdapter?: MemoryAdapter;
   embeddingStore?: QdrantAdapter;
   contextBuilder?: ContextBuilder;
+  messageIndex?: MessageIndex;
   memoryInitialized: boolean;
   sandboxManager?: SandboxManager;
   sandboxInitialized: boolean;
@@ -89,7 +92,12 @@ export async function initializeMemory(
   const memory = config.memory;
   if (state.memoryInitialized || !memory?.adapter) return;
 
-  const embeddingService = memory.embedding ? createEmbeddingService(memory.embedding) : undefined;
+  const embedding = memory.embedding;
+  const embeddingService = !embedding
+    ? undefined
+    : isEmbeddingService(embedding)
+      ? embedding
+      : createEmbeddingService(embedding);
   const adapter = createConfiguredAdapter(memory, embeddingService);
   if (!adapter) return;
 
@@ -105,18 +113,23 @@ export async function initializeMemory(
   if (memory.contextBuilder) {
     const embeddingAdapter =
       (await connectEmbeddingStore(memory, embeddingService, state)) ?? embeddingStoreOf(adapter);
+    const contextConfig = {
+      ...memory.contextBuilder,
+      strategy: memory.contextBuilder.strategy ?? 'recent',
+      includeSystemPrompt: true,
+    } as const;
+    const messageIndex =
+      contextConfig.strategy !== 'recent' && embeddingService
+        ? indexFor(adapter, embeddingAdapter, embeddingService)
+        : undefined;
+    state.messageIndex = messageIndex;
     const deps: ContextBuilderDeps = {
       memoryAdapter: adapter,
       ...(isFactAdapter(adapter) && { factAdapter: adapter }),
       ...(embeddingAdapter && { embeddingAdapter }),
       ...(embeddingService && { embeddingService }),
+      ...(messageIndex && { messageIndex }),
     };
-    const contextConfig = {
-      ...memory.contextBuilder,
-      maxTokens: memory.contextBuilder.maxTokens ?? 4000,
-      strategy: memory.contextBuilder.strategy ?? 'recent',
-      includeSystemPrompt: true,
-    } as const;
     warnAboutMissingContextParts(memory.contextBuilder, deps);
     state.contextBuilder = new ContextBuilder(contextConfig, deps);
   } else if (memory.qdrant) {
@@ -126,6 +139,41 @@ export async function initializeMemory(
   }
 
   state.memoryInitialized = true;
+}
+
+/**
+ * The index keeping a vector per history entry for the `relevant` and `hybrid` strategies, in
+ * the embedding store. The in-process `memory` adapter gets none: its entries live as long as the
+ * process, and the context builder keeps their vectors in process too, while a store outside
+ * would keep vectors of entries a restart forgot. Background failures are logged, as no run
+ * waits on them.
+ */
+function indexFor(
+  adapter: MemoryAdapter,
+  store: EmbeddingAdapter | undefined,
+  embedding: EmbeddingService
+): MessageIndex | undefined {
+  if (!store || adapter instanceof InMemoryAdapter) return undefined;
+  const logger = getLogger();
+  const index = new MessageIndex({
+    store,
+    embedding,
+    onError: (error) =>
+      logger.warn('Indexing memory entries failed', { operation: 'index', error: error.message }),
+  });
+  if (!index.attach(adapter)) {
+    logger.warn(
+      `The ${adapter.provider} memory adapter does not report its changes (onChange): its ` +
+        'entries are embedded only when a context needs them, and the vectors of deleted ' +
+        'entries stay in the embedding store'
+    );
+  }
+  if (!store.deleteByFilter) {
+    logger.warn(
+      'The embedding store has no deleteByFilter: vectors of cleared and deleted threads stay in it'
+    );
+  }
+  return index;
 }
 
 /**
@@ -389,6 +437,10 @@ export function initializeContextManager(
 }
 
 export async function cleanupState(state: InitializerState): Promise<void> {
+  if (state.messageIndex) {
+    await state.messageIndex.close();
+    state.messageIndex = undefined;
+  }
   if (state.memoryAdapter) {
     await state.memoryAdapter.disconnect();
     state.memoryAdapter = undefined;
@@ -452,4 +504,11 @@ async function releaseAdapter(adapter: { disconnect(): Promise<unknown> }): Prom
 function isEmbeddingAdapter(adapter: MemoryAdapter): adapter is MemoryAdapter & EmbeddingAdapter {
   const candidate = adapter as Partial<EmbeddingAdapter>;
   return typeof candidate.search === 'function' && typeof candidate.addEmbedding === 'function';
+}
+
+/** Whether `embedding` is a service of your own rather than a provider's config. */
+function isEmbeddingService(
+  embedding: EmbeddingServiceConfig | EmbeddingService
+): embedding is EmbeddingService {
+  return typeof (embedding as Partial<EmbeddingService>).embed === 'function';
 }

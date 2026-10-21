@@ -1,5 +1,80 @@
 # @cogitator-ai/openai-compat
 
+## 21.3.1
+
+### Patch Changes
+
+- Updated dependencies [[`92bcc11`](https://github.com/cogitator-ai/Cogitator-AI/commit/92bcc119e71742eaf2a4a3bffdeceaa18b153e5d)]:
+  - @cogitator-ai/types@0.50.0
+  - @cogitator-ai/core@0.48.0
+  - @cogitator-ai/server-shared@0.5.15
+
+## 21.3.0
+
+### Minor Changes
+
+- [#223](https://github.com/cogitator-ai/Cogitator-AI/pull/223) [`db16bbc`](https://github.com/cogitator-ai/Cogitator-AI/commit/db16bbc5f7c49b052382ea8dd4c0ba597216d913) - Run steps and threads scoped to the API key.
+
+  - Runs record their steps as the Assistants API does: a `tool_calls` step per model turn that called tools, with each call's output once known, and a `message_creation` step for the message the run wrote, with usage and the run's error when it stops early. `GET /v1/threads/:thread_id/runs/:run_id/steps` lists them (with `limit`, `order`, `after`, `before`) and `GET .../steps/:step_id` reads one. Streaming runs emit `thread.run.step.created`, `in_progress`, `delta` and `completed` in the order the OpenAI SDK expects.
+  - When the server checks API keys, threads and runs belong to the key that created them, kept as a digest, never the key itself. Another key gets `404` for them, their messages, runs and steps. Threads created before this change stay reachable by every key. Assistants, files and responses stay shared.
+  - `ThreadStorage.listThreads(options)` returns a page (`{ threads, nextCursor? }`) filtered by owner and ordered by creation time, instead of every thread: storage implementations of your own need to follow. Postgres pages in SQL with a new index, Redis reads every thread key per page.
+  - A message a run had begun to stream is kept as `incomplete` when the run is cancelled, expires or fails.
+  - A turn that writes text and calls tools becomes its own message, with the text every middleware left, with or without `stream: true`.
+  - `thread.message.completed` goes out once the message is stored, and the events after it wait for it. A run reaches `requires_action` only once the messages before the pause are stored. A store that fails, or a thread deleted while the run writes to it, fails the run, and the message ends as `incomplete` with a `failed` step instead.
+  - A listener of run events that throws is logged and no longer stops the run.
+
+### Patch Changes
+
+- Updated dependencies [[`db16bbc`](https://github.com/cogitator-ai/Cogitator-AI/commit/db16bbc5f7c49b052382ea8dd4c0ba597216d913), [`db16bbc`](https://github.com/cogitator-ai/Cogitator-AI/commit/db16bbc5f7c49b052382ea8dd4c0ba597216d913)]:
+  - @cogitator-ai/types@0.49.0
+  - @cogitator-ai/core@0.47.0
+  - @cogitator-ai/server-shared@0.5.14
+
+## 21.2.13
+
+### Patch Changes
+
+- Updated dependencies [[`b42f62e`](https://github.com/cogitator-ai/Cogitator-AI/commit/b42f62ecd300cd945c42a91014b1297bc4e10c43)]:
+  - @cogitator-ai/core@0.46.0
+  - @cogitator-ai/types@0.48.0
+  - @cogitator-ai/server-shared@0.5.13
+
+## 21.2.12
+
+### Patch Changes
+
+- Updated dependencies [[`ed48837`](https://github.com/cogitator-ai/Cogitator-AI/commit/ed4883796a82b5f2b832a5bb45ba861fb0b17f45)]:
+  - @cogitator-ai/core@0.45.0
+  - @cogitator-ai/types@0.47.0
+  - @cogitator-ai/server-shared@0.5.12
+
+## 21.2.11
+
+### Patch Changes
+
+- Updated dependencies [[`f68ebd8`](https://github.com/cogitator-ai/Cogitator-AI/commit/f68ebd892ee493279058212105381e8acb73b70e)]:
+  - @cogitator-ai/core@0.44.0
+  - @cogitator-ai/types@0.46.0
+  - @cogitator-ai/server-shared@0.5.11
+
+## 21.2.10
+
+### Patch Changes
+
+- Updated dependencies [[`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b), [`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b), [`c899f39`](https://github.com/cogitator-ai/Cogitator-AI/commit/c899f39352baa90d8b047bb5dea95d9c0279389b)]:
+  - @cogitator-ai/core@0.43.0
+  - @cogitator-ai/types@0.45.0
+  - @cogitator-ai/server-shared@0.5.10
+
+## 21.2.9
+
+### Patch Changes
+
+- Updated dependencies [[`b5c11eb`](https://github.com/cogitator-ai/Cogitator-AI/commit/b5c11eb5368f52169273527c2ea6f16e83ab8b22)]:
+  - @cogitator-ai/types@0.44.0
+  - @cogitator-ai/core@0.42.0
+  - @cogitator-ai/server-shared@0.5.9
+
 ## 21.2.8
 
 ### Patch Changes

@@ -40,6 +40,7 @@
     "@cogitator-ai/server-shared": "workspace:*",
     "@cogitator-ai/studio": "workspace:*",
     "@cogitator-ai/swarms": "workspace:*",
+    "@cogitator-ai/test-utils": "workspace:*",
     "@cogitator-ai/tetsu": "workspace:*",
     "@cogitator-ai/types": "workspace:*",
     "@cogitator-ai/voice": "workspace:*",
@@ -55,6 +56,7 @@
     "fastify": "^5.12.5",
     "hono": "^4.13.12",
     "koa": "^3.2.1",
+    "mongodb": "^7.7.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

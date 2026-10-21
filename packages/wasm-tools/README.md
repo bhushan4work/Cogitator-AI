@@ -4,7 +4,7 @@ WASM-based tools for Cogitator agents. Secure, sandboxed tool execution using We
 
 ## Features
 
-- **15 pre-built tools** - calculator, JSON, hash, Base64, slug, validation, diff, regex, CSV, Markdown, XML, datetime, compression, Ed25519 signing, color
+- **17 pre-built tools** - calculator, JSON, hash, Base64, slug, textcase, units, validation, diff, regex, CSV, Markdown, XML, datetime, compression, Ed25519 signing, color
 - **Isolated execution** - every call runs in an Extism sandbox in a worker thread, without filesystem or network access
 - **Fast startup** - no container to start; compiled modules are cached per file
 - **Custom tool framework** - `defineWasmTool()` for your own WASM modules
@@ -48,6 +48,8 @@ import {
   createHashTool,
   createBase64Tool,
   createSlugTool,
+  createTextcaseTool,
+  createUnitsTool,
   createValidationTool,
   createDiffTool,
   createRegexTool,
@@ -71,6 +73,8 @@ const agent = new Agent({
     createHashTool(),
     createBase64Tool(),
     createSlugTool(),
+    createTextcaseTool(),
+    createUnitsTool(),
     createValidationTool(),
     createDiffTool(),
     createRegexTool(),
@@ -247,6 +251,42 @@ const slug = createSlugTool({ timeout: 10000 });
 ```
 
 Any run of non-alphanumeric characters becomes one separator; apostrophes are dropped; accents are stripped after transliteration. `maxLength` must be a positive integer and cuts at a separator when possible.
+
+### createTextcaseTool(options?)
+
+Convert text between camel, pascal, snake, kebab, constant, title, and sentence cases.
+
+```typescript
+const textcase = createTextcaseTool({ timeout: 5000 });
+
+// Example: { text: "parseHTTPResponse", to: "snake" } → { result: "parse_http_response", words: ["parse", "http", "response"] }
+// Example: { text: "version2Beta", to: "kebab" } → { result: "version-2-beta", words: ["version", "2", "beta"] }
+```
+
+- **Supported cases**: `camel`, `pascal`, `snake`, `kebab`, `constant`, `title`, `sentence`.
+- **Splitting rules**: splits camelCase, PascalCase, acronyms (`parseHTTPResponse` → `["parse", "http", "response"]`, `XMLHttpRequest` → `["xml", "http", "request"]`), and whitespace/`_`/`-`/`.`/`/` separators (including repeated and leading/trailing).
+- **Digit rule**: digit runs are separate tokens, splitting at letter-digit and digit-letter boundaries (`version2Beta` → `["version", "2", "beta"]`, `utf8` → `["utf", "8"]`).
+- **Empty input**: returns `{ result: "", words: [] }` without errors.
+
+### createUnitsTool(options?)
+
+Convert between units of length, mass, temperature, volume, speed and data size.
+
+```typescript
+const units = createUnitsTool({ timeout: 10000 });
+
+// Example: { value: 100, from: "C", to: "F" } → { value: 212, from: "C", to: "F", category: "temperature" }
+// Example: { value: 1, from: "GiB", to: "GB" } → { value: 1.073741824, from: "GiB", to: "GB", category: "data" }
+```
+
+- **length**: `mm`, `cm`, `m`, `km`, `in`, `ft`, `yd`, `mi`
+- **mass**: `mg`, `g`, `kg`, `t`, `oz`, `lb`
+- **temperature**: `C`, `F`, `K` (with offsets)
+- **volume**: `ml`, `l`, `tsp`, `tbsp`, `cup`, `US gallon`, `imperial gallon`
+- **speed**: `m/s`, `km/h`, `mph`, `knot`
+- **data**: `B`, `KB`, `MB`, `GB`, `TB` (powers of 1000) and `KiB`, `MiB`, `GiB`, `TiB` (powers of 1024)
+
+Cross-category conversions and unknown units return an `error` listing the supported units.
 
 ### createValidationTool(options?)
 

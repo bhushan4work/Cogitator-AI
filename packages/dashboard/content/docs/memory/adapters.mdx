@@ -1,6 +1,6 @@
 ---
 title: Memory Adapters
-description: Choose and configure memory adapters for agent persistence — InMemory, Redis, Postgres, SQLite, MongoDB, and Qdrant.
+description: Choose and configure memory adapters for agent persistence (InMemory, Redis, Postgres, SQLite, MongoDB and Qdrant), the contract they share and how to list threads.
 ---
 
 ## Adapter Factory
@@ -14,19 +14,62 @@ const memory = await createMemoryAdapter({ provider: 'sqlite', path: './memory.d
 unwrap(await memory.connect());
 ```
 
-`createMemoryAdapter` handles `memory`, `redis`, `postgres`, `sqlite` and `mongodb` and returns the common `MemoryAdapter` interface. For Qdrant use `createEmbeddingAdapter({ provider: 'qdrant', dimensions })`, which returns a `ConnectableEmbeddingAdapter` (an `EmbeddingAdapter` with `connect()` and `disconnect()`) to connect before use. Construct the class directly (e.g. `new PostgresAdapter(...)`) when you need its extra capabilities — facts, vector or keyword search.
+`createMemoryAdapter` handles `memory`, `redis`, `postgres`, `sqlite` and `mongodb` and returns the common `MemoryAdapter` interface. For Qdrant use `createEmbeddingAdapter({ provider: 'qdrant', dimensions })`, which returns a `ConnectableEmbeddingAdapter` (an `EmbeddingAdapter` with `connect()` and `disconnect()`) to connect before use. Construct the class directly (e.g. `new PostgresAdapter(...)`) when you need its extra capabilities: facts, vector or keyword search.
 
 Database drivers are optional peer dependencies, installed by you and not with `@cogitator-ai/memory` or `@cogitator-ai/core`: each section below names the one its adapter needs, and an adapter whose driver is missing fails `connect()` with the install command.
 
-All conversation adapters share the same `MemoryAdapter` interface: `createThread`, `getThread`, `updateThread`, `deleteThread`, `addEntry`, `getEntries`, `getEntry`, `deleteEntry`, `clearThread`, `connect` and `disconnect`. Some adapters add `FactAdapter`, `EmbeddingAdapter` or `KeywordSearchAdapter`.
+All conversation adapters share the same `MemoryAdapter` interface: `createThread`, `getThread`, `updateThread`, `deleteThread`, `listThreads`, `addEntry`, `getEntries`, `getEntry`, `deleteEntry`, `clearThread`, `connect` and `disconnect`. Some adapters add `FactAdapter`, `EmbeddingAdapter` or `KeywordSearchAdapter`.
 
-Every method — `connect()` included — returns a `MemoryResult` instead of throwing, so a failed connection goes unnoticed unless you check it. Wrap calls in `unwrap()` (throws on failure) or check `result.success`; see [Results and `unwrap()`](/docs/memory#results-and-unwrap).
+Every method, `connect()` included, returns a `MemoryResult` instead of throwing, so a failed connection goes unnoticed unless you check it. Wrap calls in `unwrap()` (throws on failure) or check `result.success`; see [Results and `unwrap()`](/docs/memory#results-and-unwrap).
 
 Calling `createThread` with an existing thread id is an upsert in every adapter: stored entries and the stored `createdAt` are kept, only the agent id and metadata change. `updateThread` merges the given metadata into the existing one.
 
+## The Contract
+
+Every built-in adapter behaves the same way, checked by one conformance suite against live databases:
+
+- `createThread` with an id of your own needs a non-empty one: an empty id fails.
+- `getThread` and `getEntry` give `null` for what does not exist, `updateThread` of a missing thread fails, and `addEntry` into a thread that does not exist fails.
+- `updateThread` is atomic: concurrent updates of different keys all land.
+- `getEntries` returns entries oldest first, entries with the same `createdAt` in the order they were added. `limit` keeps the newest entries, `0` or no limit returns them all, and a negative or fractional limit fails.
+- `toolCalls` and `toolResults` come back only with `includeToolCalls`, and a field that was never set is absent, never `null`.
+- `deleteThread` removes the thread's entries too, `clearThread` keeps the thread.
+- Returned threads and entries are copies: changing them does not change what is stored.
+- `onChange(listener)` reports every change once it is stored: `entry-added`, `entry-deleted` (also for entries InMemory drops at `maxEntries`), `thread-cleared` and `thread-deleted` (also for threads Redis expired, once a later write sweeps them). It returns a function that stops the listener. A listener that throws is logged and does not fail the write. The message index uses it, see [Context Builder](/docs/memory#context-builder). An adapter of your own reports changes by extending `ChangeReportingMemoryAdapter` and passing each write's result through `reported()`, one that extends `BaseMemoryAdapter` has no `onChange`.
+
+The suite ships in `@cogitator-ai/test-utils` as `memoryAdapterConformanceCases`, so an adapter of your own can be checked the same way (see [Test Utils](/docs/testing/test-utils#conformance-suites)).
+
+## Listing Threads
+
+`listThreads` returns threads in pages, the most recently updated first. A thread's `updatedAt` changes when it is created or its metadata is updated, not when an entry is added.
+
+```typescript
+const page = unwrap(
+  await memory.listThreads({
+    agentId: 'support',
+    metadata: { userId: 'u_42', archived: false },
+    updatedAfter: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+    limit: 20,
+  })
+);
+
+for (const thread of page.threads) console.log(thread.id, thread.updatedAt);
+if (page.nextCursor) {
+  const next = unwrap(await memory.listThreads({ agentId: 'support', cursor: page.nextCursor }));
+}
+```
+
+- `metadata` matches top-level keys by equal value and type: `{ n: 1 }` does not match `'1'`.
+- `limit` is 50 by default and at most 500. `order: 'asc'` starts with the oldest update.
+- Pass `nextCursor` with the same filters and order to read the next page. It is absent on the last page.
+
+`SessionManager.list()` finds sessions this way, so it no longer keeps an index thread.
+
+Redis keeps an index of threads by update time for this. Threads written before the index existed are added to it the first time threads are listed. SQLite, Postgres and MongoDB filter and page in the database with an index on agent and update time.
+
 ## InMemory
 
-Zero-dependency in-process storage. Data is lost when the process exits — and when you call `disconnect()`.
+Zero-dependency in-process storage. Data is lost when the process exits, and when you call `disconnect()`.
 
 ```typescript
 import { InMemoryAdapter, unwrap } from '@cogitator-ai/memory';
@@ -47,6 +90,8 @@ console.log(memory.stats); // { threads: 1, entries: 1 }
 | Option       | Type   | Default | Description                                        |
 | ------------ | ------ | ------- | -------------------------------------------------- |
 | `maxEntries` | number | 10000   | Max entries across all threads; oldest are evicted |
+
+It stores copies of what you give it. A value it cannot clone, such as metadata holding a function, is stored as JSON the way the database adapters store it: the function is left out, and a `Date`, `Map` or `Set` in that same value comes back as a string or `{}`.
 
 **When to use:** Unit tests, prototyping, ephemeral agents that don't need persistence.
 
@@ -122,6 +167,10 @@ On `connect()` the adapter creates the schema, the `threads`, `entries`, `facts`
 pgvector is only needed for embeddings. On a database without it (a managed Postgres without the extension, or a role not allowed to run `CREATE EXTENSION`), `connect()` still succeeds and threads, entries and facts work: the `embeddings` table is not created, a warning names the reason, and `addEmbedding`, `search`, `keywordSearch`, `deleteEmbedding` and `deleteBySource` return a failed result with it. `memory.vectorStatus()` returns `{ available: true, dimensions }` or `{ available: false, reason }`, and the `Cogitator` runtime does not use such a store for semantic context.
 
 HNSW needs no training data, so the index built on the empty table finds every row as the table fills up. Earlier versions built an `ivfflat` index there instead, which missed rows for small limits. The first `connect()` after upgrading replaces that index with HNSW, which on a large table takes a while. To avoid the wait, build the index ahead of the deploy with `CREATE INDEX CONCURRENTLY idx_embeddings_vector_new ON <schema>.embeddings USING hnsw (vector vector_cosine_ops)`, then drop the old index and rename the new one to `idx_embeddings_vector`. An existing HNSW index is kept as it is.
+
+Vectors of more than 2000 dimensions (such as the 3072 of `gemini-embedding-001` or `text-embedding-3-large`) are too large for a pgvector index on the column. Up to 4000 dimensions the adapter indexes the column cast to `halfvec` instead (pgvector 0.7 or later), and searches compare the same cast, so the index serves them while the stored vectors keep full precision. Larger vectors have no index and a warning says that searches scan every row.
+
+`connect()` records the layout of threads, entries and facts in `<schema>.cogitator_schema_migrations` and changes the schema only when it is older than the adapter's or its tables are gone. Setup runs in one transaction under a lock on the schema, so processes connecting at once take turns instead of racing on the same `CREATE`, also behind a pooler in transaction mode such as PgBouncer. A schema from before versions were recorded is brought up to date in place.
 
 `search()` sizes each query for the index: it raises `hnsw.ef_search` to the requested `limit` (up to 1000) and, on pgvector 0.8 or later, turns on iterative scans, so a large limit or a filter on agent, thread or user still gets every matching row. Equally similar rows are ordered by id, so the result does not depend on the query plan.
 

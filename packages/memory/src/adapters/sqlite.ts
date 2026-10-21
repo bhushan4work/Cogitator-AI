@@ -1,5 +1,7 @@
 import type {
+  ListThreadsOptions,
   Thread,
+  ThreadPage,
   MemoryEntry,
   MemoryQueryOptions,
   MemoryResult,
@@ -9,12 +11,26 @@ import type {
 } from '@cogitator-ai/types';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { BaseMemoryAdapter } from './base';
+import { ChangeReportingMemoryAdapter } from './base';
 import type { SqliteDatabase } from './sqlite-driver';
+import { threadListing, threadPage, type ThreadListing } from './thread-listing';
 
 /** Whether `path` names a database file on disk rather than an in-memory or temporary database. */
 function isFileDatabase(path: string): boolean {
   return path !== '' && path !== ':memory:' && !path.startsWith('file::memory:');
+}
+
+/** The SQL condition and its parameters that hold when a thread's metadata has `value` under `key`. */
+function metadataCondition(key: string, value: string | number | boolean): [string, unknown[]] {
+  const path = `$."${key}"`;
+  if (typeof value === 'boolean') {
+    return ['json_type(metadata, ?) = ?', [path, value ? 'true' : 'false']];
+  }
+  const types = typeof value === 'number' ? "('integer', 'real')" : "('text')";
+  return [
+    `(json_type(metadata, ?) IN ${types} AND json_extract(metadata, ?) = ?)`,
+    [path, path, value],
+  ];
 }
 
 interface ThreadRow {
@@ -25,7 +41,7 @@ interface ThreadRow {
   updated_at: string;
 }
 
-export class SQLiteAdapter extends BaseMemoryAdapter {
+export class SQLiteAdapter extends ChangeReportingMemoryAdapter {
   readonly provider: MemoryProvider = 'sqlite';
 
   private db: SqliteDatabase | null = null;
@@ -86,6 +102,8 @@ export class SQLiteAdapter extends BaseMemoryAdapter {
         CREATE INDEX IF NOT EXISTS idx_entries_thread ON entries(thread_id);
         CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at);
         CREATE INDEX IF NOT EXISTS idx_threads_agent ON threads(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_threads_agent_updated ON threads(agent_id, updated_at, id);
+        CREATE INDEX IF NOT EXISTS idx_threads_updated ON threads(updated_at, id);
       `);
 
       this.db = db;
@@ -115,6 +133,8 @@ export class SQLiteAdapter extends BaseMemoryAdapter {
     metadata: Record<string, unknown> = {},
     threadId?: string
   ): Promise<MemoryResult<Thread>> {
+    const idProblem = this.threadIdProblem(threadId);
+    if (idProblem) return this.failure(idProblem);
     if (!this.db) return this.failure('Not connected');
 
     const id = threadId ?? this.generateId('thread');
@@ -153,34 +173,106 @@ export class SQLiteAdapter extends BaseMemoryAdapter {
     }
   }
 
+  async listThreads(options?: ListThreadsOptions): Promise<MemoryResult<ThreadPage>> {
+    if (!this.db) return this.failure('Not connected');
+    const listing = threadListing(options);
+    if (typeof listing === 'string') return this.failure(listing);
+
+    try {
+      const [where, params] = this.listingConditions(listing);
+      const direction = listing.order === 'asc' ? 'ASC' : 'DESC';
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM threads ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
+           ORDER BY updated_at ${direction}, id ${direction} LIMIT ?`
+        )
+        .all(...params, listing.limit + 1) as ThreadRow[];
+      return this.success(
+        threadPage(
+          rows.map((row) => this.rowToThread(row)),
+          listing
+        )
+      );
+    } catch (err) {
+      return this.failure((err as Error).message);
+    }
+  }
+
+  /**
+   * The WHERE conditions of `listing` with their parameters. Times are stored as ISO strings of
+   * one length, so they compare as text in time order.
+   */
+  private listingConditions(listing: ThreadListing): [string[], unknown[]] {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (listing.agentId !== undefined) {
+      where.push('agent_id = ?');
+      params.push(listing.agentId);
+    }
+    for (const [key, value] of listing.metadata) {
+      const [condition, values] = metadataCondition(key, value);
+      where.push(condition);
+      params.push(...values);
+    }
+    if (listing.updatedAfter) {
+      where.push('updated_at >= ?');
+      params.push(listing.updatedAfter.toISOString());
+    }
+    if (listing.cursor) {
+      const after = listing.order === 'asc' ? '>' : '<';
+      const time = new Date(listing.cursor.updatedAt).toISOString();
+      where.push(`(updated_at ${after} ? OR (updated_at = ? AND id ${after} ?))`);
+      params.push(time, time, listing.cursor.id);
+    }
+    return [where, params];
+  }
+
   async updateThread(
     threadId: string,
     metadata: Record<string, unknown>
   ): Promise<MemoryResult<Thread>> {
     if (!this.db) return this.failure('Not connected');
-
-    const existing = await this.getThread(threadId);
-    if (!existing.success) return existing;
-    if (!existing.data) return this.failure(`Thread not found: ${threadId}`);
-
-    const updated: Thread = {
-      ...existing.data,
-      metadata: { ...existing.data.metadata, ...metadata },
-      updatedAt: new Date(),
-    };
+    const db = this.db;
 
     try {
-      const stmt = this.db.prepare(`
-        UPDATE threads SET metadata = ?, updated_at = ? WHERE id = ?
-      `);
-      stmt.run(JSON.stringify(updated.metadata), updated.updatedAt.toISOString(), threadId);
-      return this.success(updated);
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const row = db.prepare('SELECT * FROM threads WHERE id = ?').get(threadId) as
+          ThreadRow | undefined;
+        if (!row) {
+          db.exec('ROLLBACK');
+          return this.failure(`Thread not found: ${threadId}`);
+        }
+        const existing = this.rowToThread(row);
+        const updated: Thread = {
+          ...existing,
+          metadata: { ...existing.metadata, ...metadata },
+          updatedAt: new Date(),
+        };
+        db.prepare('UPDATE threads SET metadata = ?, updated_at = ? WHERE id = ?').run(
+          JSON.stringify(updated.metadata),
+          updated.updatedAt.toISOString(),
+          threadId
+        );
+        db.exec('COMMIT');
+        return this.success(updated);
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
     } catch (err) {
       return this.failure((err as Error).message);
     }
   }
 
   async deleteThread(threadId: string): Promise<MemoryResult<void>> {
+    return this.reported(await this.dropThread(threadId), () => ({
+      type: 'thread-deleted',
+      threadId,
+    }));
+  }
+
+  private async dropThread(threadId: string): Promise<MemoryResult<void>> {
     if (!this.db) return this.failure('Not connected');
 
     try {
@@ -192,6 +284,13 @@ export class SQLiteAdapter extends BaseMemoryAdapter {
   }
 
   async addEntry(entry: NewMemoryEntry): Promise<MemoryResult<MemoryEntry>> {
+    return this.reported(await this.storeEntry(entry), (stored) => ({
+      type: 'entry-added',
+      entry: stored,
+    }));
+  }
+
+  private async storeEntry(entry: NewMemoryEntry): Promise<MemoryResult<MemoryEntry>> {
     if (!this.db) return this.failure('Not connected');
 
     const full: MemoryEntry = {
@@ -223,6 +322,8 @@ export class SQLiteAdapter extends BaseMemoryAdapter {
 
   async getEntries(options: MemoryQueryOptions): Promise<MemoryResult<MemoryEntry[]>> {
     if (!this.db) return this.failure('Not connected');
+    const limitProblem = this.entryLimitProblem(options.limit);
+    if (limitProblem) return this.failure(limitProblem);
 
     try {
       const conditions = ['thread_id = ?'];
@@ -313,6 +414,13 @@ export class SQLiteAdapter extends BaseMemoryAdapter {
   }
 
   async deleteEntry(entryId: string): Promise<MemoryResult<void>> {
+    return this.reported(await this.removeEntry(entryId), () => ({
+      type: 'entry-deleted',
+      entryId,
+    }));
+  }
+
+  private async removeEntry(entryId: string): Promise<MemoryResult<void>> {
     if (!this.db) return this.failure('Not connected');
 
     try {
@@ -324,6 +432,13 @@ export class SQLiteAdapter extends BaseMemoryAdapter {
   }
 
   async clearThread(threadId: string): Promise<MemoryResult<void>> {
+    return this.reported(await this.emptyThread(threadId), () => ({
+      type: 'thread-cleared',
+      threadId,
+    }));
+  }
+
+  private async emptyThread(threadId: string): Promise<MemoryResult<void>> {
     if (!this.db) return this.failure('Not connected');
 
     try {
