@@ -14,7 +14,8 @@ describeE2E('Core: one agent, many users', () => {
   let cogitator: Cogitator;
   const agent = createTestAgent({
     instructions:
-      'You have perfect memory. Repeat codes the user told you exactly. Keep answers short.',
+      'You have perfect memory. When the user tells you a code, remember it exactly. When asked, repeat it exactly. Keep answers short.',
+    temperature: 0,
   });
 
   beforeAll(async () => {
@@ -143,6 +144,7 @@ describeE2E('Core: one agent, many users', () => {
         instructions:
           'You answer balance questions. Always call get_my_balance first, then state the balance.',
         tools: await client.getTools(),
+        temperature: 0,
       });
       for (let attempt = 0; attempt < 5 && callers.length === 0; attempt++) {
         await cogitator.run(banker, { input: 'What is my balance?', userId: 'bob' });
