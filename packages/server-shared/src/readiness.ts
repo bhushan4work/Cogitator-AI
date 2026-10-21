@@ -77,7 +77,7 @@ export async function checkReadiness(
     try {
       const memoryStatus = await withTimeout(
         (async (): Promise<ReadinessCheckStatus | undefined> => {
-          const memory = await getMemory();
+          const memory = await getMemory.call(target);
           if (!memory) {
             if (target.memoryConfigured) {
               console.error('[readiness] Configured memory adapter failed to connect');

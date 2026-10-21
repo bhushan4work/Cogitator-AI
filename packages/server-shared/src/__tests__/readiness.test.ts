@@ -319,4 +319,25 @@ describe('checkReadiness', () => {
 
     errorSpy.mockRestore();
   });
+
+  it('preserves target as this context when invoking getMemory', async () => {
+    const memory = {
+      provider: 'memory',
+      healthCheck: vi.fn().mockResolvedValue({ success: true, data: undefined }),
+    } as unknown as MemoryAdapter;
+
+    const target = {
+      underlyingMemory: memory,
+      async getMemory() {
+        return this.underlyingMemory;
+      },
+    };
+
+    const result = await checkReadiness(target);
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toEqual({
+      status: 'ok',
+      checks: { memory: 'ok' },
+    });
+  });
 });
