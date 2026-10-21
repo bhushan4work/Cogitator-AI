@@ -67,6 +67,11 @@ export interface MemoryFileAccess {
   place?: MemoryFilePlace;
   /** Views only: every change fails */
   readOnly?: boolean;
+  /**
+   * Paths only memory itself writes, such as the playbook and the observations: a change of one,
+   * or of a file under one, fails for this access
+   */
+  reserved?: readonly string[];
   author?: MemoryFileAuthor;
   /**
    * Hears of the version of a file a command showed or wrote: its path and SHA-256, null once
@@ -243,8 +248,8 @@ function withoutTrailingSlashes(path: string): string {
   return path.slice(0, end);
 }
 
-/** Text of a memory file as a context shows it, unable to close or open the context's block */
-function inert(text: string): string {
+/** Text as a turn's memory context shows it, unable to close or open the context's block */
+export function inert(text: string): string {
   return text.replace(/<\/?\s*memory_context\s*>/gi, (tag) => tag.replace(/</g, '&lt;'));
 }
 
@@ -428,6 +433,35 @@ export class MemoryFiles {
     return `File created successfully at: ${path}`;
   }
 
+  /**
+   * Writes `text` as the whole file at `path`, creating it when it does not exist, for code that
+   * keeps a file of its own, such as an observation or the playbook. `expectedSha256` names the
+   * version the text was made from, `null` for a file that did not exist then, and the write is
+   * refused when the file stands otherwise. Returns the SHA-256 of the text.
+   */
+  async put(
+    access: MemoryFileAccess,
+    path: string,
+    text: string,
+    expectedSha256?: string | null
+  ): Promise<string> {
+    const target = filePath(path);
+    this.writable(access, path);
+    writableText(text);
+    await this.change(access, [target], async (current) => {
+      const known = current.get(target);
+      if (!known && [...current.keys()].some((other) => under(other, target))) {
+        throw new MemoryFileError(`The path ${path} is not a file.`);
+      }
+      if (expectedSha256 !== undefined && (known?.sha256 ?? null) !== expectedSha256) {
+        throw new MemoryFileError(`The file ${path} changed since it was read.`);
+      }
+      if (!known) fileUnder(current, target, path);
+      return [{ path: target, content: fitting(text, path) }];
+    });
+    return sha256Of(text);
+  }
+
   async strReplace(
     access: MemoryFileAccess,
     path: string,
@@ -525,6 +559,7 @@ export class MemoryFiles {
     const from = memoryPath(oldPath);
     const to = memoryPath(newPath);
     this.writable(access, oldPath);
+    this.writable(access, newPath);
     if (from === MEMORY_ROOT || to === MEMORY_ROOT || under(to, from)) {
       throw new MemoryFileError(`The destination ${newPath} already exists`);
     }
@@ -662,6 +697,13 @@ export class MemoryFiles {
 
   private writable(access: MemoryFileAccess, path: string): void {
     if (access.readOnly) throw new MemoryFileError(`The memory at ${path} is read-only`);
+    const target = memoryPath(path);
+    for (const reserved of access.reserved ?? []) {
+      const root = memoryPath(reserved);
+      if (under(target, root) || under(root, target)) {
+        throw new MemoryFileError(`${reserved} is kept by memory itself and is read-only here`);
+      }
+    }
   }
 
   private fileFor(

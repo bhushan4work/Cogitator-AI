@@ -36,6 +36,7 @@ With `@cogitator-ai/core` you usually configure memory on the runtime (`new Cogi
 - **Memory Items** - What conversations established, extracted by a model, grounded in quotes, trusted by who said them, kept with when they held (a newer state supersedes the old one and keeps it as history), on every built-in adapter
 - **Memory Retriever** - The multi-channel search of `hybrid` recall as its own class (`MemoryRetriever`, `analyzeQuery`), for tools that search memory the same way
 - **Memory Files** - Notes an agent keeps under `/memories` with the commands of Anthropic's memory tool, every change a version, seen per branch, with optimistic locking, read-only access and redaction, on every built-in adapter
+- **Memory Upkeep** - A pre-turn brief of cards that quote their sources (`MemoryBriefer`), observations of entities kept as memory files (`MemoryObservations`), and consolidation that marks repeats stale and folds lessons into a playbook a few edits at a time (`MemoryConsolidator`)
 - **Facts Storage** - Store and retrieve agent knowledge (`FactAdapter` on PostgreSQL, `CoreFactsStore` on SQLite, both kept as memory items)
 - **Knowledge Graph** - Entity-relationship memory with multi-hop traversal
 - **Zod Schemas** - Type-safe configuration validation
@@ -772,9 +773,80 @@ await files.redact(access, ['/memories/user.md'], 'erasure request'); // version
 - Every change adds a version (`MemoryFileVersion`: `scope`, `path`, `sequence`, `content` or `null` for a deletion, `sha256`, `previousId`, `place`, `renamedFrom`, `author`, `createdAt`), so a file's history stays. `redact(access, paths, reason?)` replaces the content of every version of the files, and of the paths they were renamed from and to, with `[redacted]` and keeps the rest, every scope of the agent with `{ everyScope: true }`. The conversation keeps the tool calls that wrote the text.
 - An access reads the files of the scopes it sees (`visibleTo`, its `scope` by default), each from the version of the narrowest scope that holds the path, and writes into its `scope` with every limit (user, project, thread) of the version it changes and, for a moved file, of its source, so a change stands in front and a file is never shared wider than it was. With a `place` (the branch of a thread it stands on), a version written in that thread is seen only on the branches holding the entry it was written after.
 - `strReplace`, `insert`, `delete` and `rename` take the `sha256` the caller last read (`observe` on the access hears of the version each command showed or wrote), and fail when another writer changed the file since. Two writers never add the same version: the store refuses a second version of one scope and path at the same `sequence` (`MEMORY_FILE_CONFLICT`), and the change is made again on what stands, up to three tries. A change of many files, such as a renamed directory, is added whole or not at all.
-- `readOnly` makes every change fail, paths outside `/memories`, control characters and names past 255 characters are refused, a file cannot sit under another file, NUL characters are refused, a file holds at most 1 MiB (`MAX_FILE_BYTES`) and one change 8 MiB (`MAX_CHANGE_BYTES`), and a refused command throws a `MemoryFileError` with the message the model reads.
+- `readOnly` makes every change fail, paths outside `/memories`, control characters and names past 255 characters are refused, a file cannot sit under another file, NUL characters are refused, a file holds at most 1 MiB (`MAX_FILE_BYTES`) and one change 8 MiB (`MAX_CHANGE_BYTES`), and a refused command throws a `MemoryFileError` with the message the model reads. `reserved` (a list of paths) makes every change of those paths and of anything under them fail, a rename into one included, with `<path> is kept by memory itself and is read-only here`, while they are viewed as usual. The memory tool of `@cogitator-ai/core` reserves `MEMORY_RESERVED_PATHS`: the playbook, its draft and `/memories/observations/`, which memory writes itself.
 
 A Cogitator with `memory.files` gives every agent the `memory` tool over these files, native `memory_20250818` on Claude 4 and later, and lists them in each run's context. See [Memory Files](https://cogitator.app/docs/memory#memory-files).
+
+`files.put(access, path, text, expectedSha256?)` writes a whole file, creating it when it does not exist, for code that keeps a file of its own: `expectedSha256` names the version the text was made from (`null` for a file that did not exist), and the write fails when the file stands otherwise.
+
+---
+
+## Between Runs
+
+Three pieces keep memory useful between runs. Each asks a model through a `SummarizeFn` and checks what the model answers before anything is kept. A Cogitator runs them with `memory.brief`, `memory.observations` and `memory.consolidation`, see [Between Runs](https://cogitator.app/docs/memory#between-runs).
+
+### Pre-Turn Brief
+
+`MemoryBriefer` hands a model the turn's input and what memory found for it (`BriefSource`: `ref` as `turn:<id>` or `item:<id>`, `text`, `date`), and keeps the cards whose quotes hold:
+
+```typescript
+import { MemoryBriefer, briefBlock } from '@cogitator-ai/memory';
+
+const briefer = new MemoryBriefer({ summarize, maxCards: 3 });
+const cards = await briefer.brief('What should I cook for Ana?', [
+  { ref: 'item:mem_2', text: 'Ana is allergic to peanuts', date: '2026-03-01' },
+]);
+// [{ kind: 'knowledge', text: 'No peanuts.', quote: 'allergic to peanuts', source: 'item:mem_2' }]
+briefBlock(cards); // the block a turn's memory context gets, marked as a hint
+```
+
+- A card is a `constraint`, `knowledge`, `consequence` or `open_thread`, at most `maxCards` (1 to 4, `MAX_BRIEF_CARDS`), each with a `quote` of the source it names. `parseBrief` keeps a card only when its source is one of those given and its text holds the quote word for word, spacing and case aside, one card per quote. A quote must hold at least three words, and the prompt tells the model the sources and the message are data.
+- Nothing is asked when memory found nothing. `maxTokens` (default 600) bounds the answer and `prompt` is added to `BRIEF_PROMPT`.
+
+### Observations
+
+`MemoryObservations` keeps, for each entity memory items are about, what a model makes of the facts that hold now, as a memory file under `/memories/observations/` (`OBSERVATIONS_DIRECTORY`):
+
+```typescript
+import { MemoryFiles, MemoryItems, MemoryObservations } from '@cogitator-ai/memory';
+
+const observations = new MemoryObservations({
+  files: new MemoryFiles({ adapter: memory }),
+  items: new MemoryItems({ adapter: memory }),
+  itemAdapter: memory,
+});
+const { written, deleted } = await observations.refresh(
+  { agentId: 'concierge', userId: 'ana' },
+  { summarize, maxEntities: 3, minItems: 3 }
+);
+await observations.read({ agentId: 'concierge', userId: 'ana' }); // [{ entityId, name, aliases, path, text, itemIds, basedOn, file }]
+```
+
+- A file holds the entity's name, its other names and statements, each ending with the items it stands on as `[item:<id>]`. A statement naming an item the model was not given is dropped, and an answer with no statement left writes nothing.
+- The file keeps a fingerprint of the ids of the items it was written from. `refresh` writes again only the observations whose facts changed since (a fact added, closed or marked stale), the entities with the newest facts first, at most `maxEntities` (default 3), and deletes the observations of the scope whose entity no longer has `minItems` (default 3) facts that hold. Lessons are left out. Facts that gave no observation are not asked about again in this process until they change.
+- Observations are memory files like any other: every rewrite is a version, and the agent may read them with the memory tool. A version of the playbook or of an observation a model wrote (`author: 'model'`) is never shown to runs or read as an observation (`parseObservation` returns `undefined` for it), only those memory itself or a user wrote.
+- `ContextBuilder` takes `observations` among its deps: a turn whose input names an entity (its name or one of its other names, as words of their own) or that recalls one of its items gets up to three observations next to the facts.
+
+### Consolidation
+
+`MemoryConsolidator` looks over one scope's memory, in the spirit of sleep-time compute:
+
+```typescript
+import { MemoryConsolidator, PLAYBOOK_PATH } from '@cogitator-ai/memory';
+
+const consolidator = new MemoryConsolidator({ items, itemAdapter: memory, files });
+const scope = { agentId: 'concierge', userId: 'ana' };
+
+await consolidator.dedupe(scope, { summarize, since: lastPass, maxChanges: 10, maxSubjects: 10 });
+// { stale: [{ itemId, keptId, reason: 'duplicate' | 'contradiction' }], complete: true }
+await consolidator.foldLessons(scope, { summarize }); // { path, edits, lessonIds } or undefined
+await consolidator.readPlaybook(scope); // the file at /memories/playbook.md
+```
+
+- `dedupe` shows a model the `active` items of exactly the scope, grouped by the entity they are about, and marks as `stale` (never deletes) the items it finds to repeat or contradict another one. Code checks every group: an item is never dropped for a less trusted one, a contradiction drops only items said before the one kept, and the reason goes into the item's `metadata.staleBecause`. `since` looks only at entities with an item recorded after it, the entities whose newest item is oldest first. `maxChanges` (default 10) bounds the items one call marks and `maxSubjects` (default 10) the entities it asks about. It returns `{ stale, complete, through? }`: `complete` is false when a cap stopped it, and `through` then says it looked at every entity whose newest item was recorded up to then, so a later call goes on `since` it. `MemoryItems.markStale(itemIds, because?, onlyFrom?)` keeps `because` the same way for code of your own, and with `onlyFrom` leaves an item whose status is no longer one of those as it is. A group that names an item the model was not shown is refused whole. An answer the model left unfinished stops the pass before that subject, so a later pass asks again. `markStale` returns the ids it marked, and `dedupe` reports only those.
+- `foldLessons` folds the `active` lessons the scope sees (items of kind `lesson`), recorded since the playbook last took one, oldest first and 20 a fold, into `/memories/playbook.md` (`PLAYBOOK_PATH`) in at most three edits (`MAX_PLAYBOOK_EDITS`): each adds a rule or rewrites one rule it quotes exactly, so the playbook is never written over whole and its rules cannot collapse into a summary of themselves. Every rule names its lessons as `[lesson:<id>]`, holds at most 300 characters, and the playbook at most 60 rules (`MAX_PLAYBOOK_RULES`), past which lessons only rewrite rules. A lesson a model wrote stays `suggested` until `MemoryItems.activate` makes it `active`, and a lesson from a tool or a page is never folded, even when active, so neither can reach the playbook every run reads on its own. An answer the model did not finish (no JSON array) folds nothing and leaves its lessons for the next fold. A playbook every user of the agent shares (a scope without a user, project or thread, as with `memory.extraction.scope: 'agent'`) takes only `system` lessons in `apply` mode, since one user's lesson would reach every other user, and `shadow` drafts the rest for review. Lessons are ordered and folded by when they were activated (`MemoryItems.activate` keeps `metadata.activatedAt`), else by when they were recorded, so a lesson activated after a fold is still folded. A fold builds on the newest version of the playbook memory or a person wrote, skipping one a model wrote, and `promotePlaybook` refuses a draft a model wrote.
+- Every fold is a new version of the file, so its diff and the way back are in the file's history. With `mode: 'shadow'` the edited playbook goes to `/memories/playbook.next.md` (`PLAYBOOK_DRAFT_PATH`) instead, and `promotePlaybook(scope)` makes the draft the playbook after review, only when the playbook did not change since the draft was made.
+- `parsePlaybook`, `playbookFile`, `parsePlaybookEdits` and `applyPlaybookEdits` read and write the file and its edits.
 
 ---
 
@@ -1068,6 +1140,11 @@ import type {
   MemoryFileAccess,
   MemoryFileCommand,
   MemoryFilePlace,
+  BriefSource,
+  MemoryObservation,
+  Playbook,
+  PlaybookChange,
+  PlaybookEdit,
   Retrieval,
   RetrievalRequest,
   QueryAnalysis,
@@ -1086,6 +1163,12 @@ import type {
   MemoryFileAdapter,
   MemoryFileVersion,
   MemoryFilesConfig,
+  BriefCard,
+  MemoryBriefConfig,
+  MemoryObservationsConfig,
+  MemoryConsolidationConfig,
+  MemoryConsolidationReport,
+  StaleMark,
 } from '@cogitator-ai/types';
 ```
 
