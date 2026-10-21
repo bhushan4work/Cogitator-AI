@@ -598,14 +598,5 @@ describe('SQLiteAdapter', () => {
         expect(result.error).toContain('disk I/O error');
       }
     });
-
-    it('reuses in-flight healthCheck across concurrent calls', async () => {
-      const result1 = adapter.healthCheck();
-      const result2 = adapter.healthCheck();
-
-      const [res1, res2] = await Promise.all([result1, result2]);
-      expect(res1.success).toBe(true);
-      expect(res2.success).toBe(true);
-    });
   });
 });

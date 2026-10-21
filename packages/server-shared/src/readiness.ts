@@ -1,4 +1,4 @@
-import type { MemoryAdapter } from '@cogitator-ai/types';
+import type { MemoryAdapter, MemoryResult } from '@cogitator-ai/types';
 
 export type ReadinessCheckStatus = 'ok' | 'error' | 'unchecked';
 export type ReadinessStatus = 'ok' | 'error';
@@ -23,6 +23,26 @@ export interface ReadinessOptions {
 }
 
 export const DEFAULT_READINESS_TIMEOUT_MS = 3000;
+
+const inFlightHealthChecks = new WeakMap<object, Promise<MemoryResult<void>>>();
+
+function runSingleFlightHealthCheck(
+  memory: MemoryAdapter & { healthCheck: () => Promise<MemoryResult<void>> }
+): Promise<MemoryResult<void>> {
+  const existing = inFlightHealthChecks.get(memory);
+  if (existing) {
+    return existing;
+  }
+  const promise = (async () => {
+    try {
+      return await memory.healthCheck();
+    } finally {
+      inFlightHealthChecks.delete(memory);
+    }
+  })();
+  inFlightHealthChecks.set(memory, promise);
+  return promise;
+}
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -52,34 +72,40 @@ export async function checkReadiness(
   const timeoutMs = options.timeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
   const checks: Record<string, ReadinessCheckStatus> = {};
 
-  if (target?.getMemory) {
+  const getMemory = target?.getMemory;
+  if (getMemory) {
     try {
-      await withTimeout(
-        (async () => {
-          const memory = await target.getMemory!();
+      const memoryStatus = await withTimeout(
+        (async (): Promise<ReadinessCheckStatus | undefined> => {
+          const memory = await getMemory();
           if (!memory) {
             if (target.memoryConfigured) {
               console.error('[readiness] Configured memory adapter failed to connect');
-              checks.memory = 'error';
+              return 'error';
             }
-          } else if (typeof memory.healthCheck === 'function') {
-            const result = await memory.healthCheck();
-            if (result?.success) {
-              checks.memory = 'ok';
-            } else {
-              console.error(
-                '[readiness] Memory healthCheck failed:',
-                result?.error ?? 'Unknown error'
-              );
-              checks.memory = 'error';
-            }
-          } else {
-            checks.memory = 'unchecked';
+            return undefined;
           }
+          if (typeof memory.healthCheck === 'function') {
+            const result = await runSingleFlightHealthCheck(
+              memory as MemoryAdapter & { healthCheck: () => Promise<MemoryResult<void>> }
+            );
+            if (result?.success) {
+              return 'ok';
+            }
+            console.error(
+              '[readiness] Memory healthCheck failed:',
+              result?.error ?? 'Unknown error'
+            );
+            return 'error';
+          }
+          return 'unchecked';
         })(),
         timeoutMs,
         'Memory readiness check timed out'
       );
+      if (memoryStatus) {
+        checks.memory = memoryStatus;
+      }
     } catch (err) {
       console.error(
         '[readiness] Memory check error:',

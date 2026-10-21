@@ -54,7 +54,7 @@ type PoolClient = SqlQueryable & {
 
 type Pool = Omit<SqlQueryable, 'query'> & {
   query(
-    queryTextOrConfig: string | { text: string; timeout?: number },
+    queryTextOrConfig: string | { text: string; query_timeout?: number },
     values?: unknown[]
   ): Promise<{ rows: Record<string, unknown>[] }>;
   connect(): Promise<PoolClient>;
@@ -471,10 +471,10 @@ export class PostgresAdapter
     }
   }
 
-  protected override async performHealthCheck(): Promise<MemoryResult<void>> {
+  async healthCheck(): Promise<MemoryResult<void>> {
     if (!this.pool) return this.failure('Not connected');
     try {
-      await this.pool.query({ text: 'SELECT 1', timeout: 3000 });
+      await this.pool.query({ text: 'SELECT 1', query_timeout: 3000 });
       return this.success(undefined);
     } catch (error) {
       return this.failure(error instanceof Error ? error.message : String(error));

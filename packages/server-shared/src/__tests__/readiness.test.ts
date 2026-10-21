@@ -256,4 +256,67 @@ describe('checkReadiness', () => {
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
   });
+
+  it('shares pending in-flight healthCheck across concurrent readiness probes', async () => {
+    let resolveCheck!: (val: { success: boolean; data: undefined }) => void;
+    const delayedCheck = new Promise<{ success: boolean; data: undefined }>((resolve) => {
+      resolveCheck = resolve;
+    });
+    const memory = {
+      provider: 'redis',
+      healthCheck: vi.fn().mockReturnValue(delayedCheck),
+    } as unknown as MemoryAdapter;
+
+    const target = {
+      getMemory: vi.fn().mockResolvedValue(memory),
+    };
+
+    const probe1 = checkReadiness(target);
+    const probe2 = checkReadiness(target);
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(memory.healthCheck).toHaveBeenCalledOnce();
+
+    resolveCheck({ success: true, data: undefined });
+    const [res1, res2] = await Promise.all([probe1, probe2]);
+
+    expect(res1.statusCode).toBe(200);
+    expect(res2.statusCode).toBe(200);
+    expect(res1.body.checks.memory).toBe('ok');
+    expect(res2.body.checks.memory).toBe('ok');
+  });
+
+  it('does not mutate already-returned response when health check completes after timeout', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let resolveLateCheck!: (val: { success: boolean; data: undefined }) => void;
+    const latePromise = new Promise<{ success: boolean; data: undefined }>((resolve) => {
+      resolveLateCheck = resolve;
+    });
+
+    const memory = {
+      provider: 'postgres',
+      healthCheck: vi.fn().mockReturnValue(latePromise),
+    } as unknown as MemoryAdapter;
+
+    const target = {
+      getMemory: vi.fn().mockResolvedValue(memory),
+    };
+
+    const result = await checkReadiness(target, { timeoutMs: 30 });
+    expect(result.statusCode).toBe(503);
+    expect(result.body.checks.memory).toBe('error');
+
+    // Health check resolves after the readiness check has already returned
+    resolveLateCheck({ success: true, data: undefined });
+    await latePromise;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // Response must not be mutated
+    expect(result.body.checks.memory).toBe('error');
+    expect(result.body.status).toBe('error');
+
+    errorSpy.mockRestore();
+  });
 });

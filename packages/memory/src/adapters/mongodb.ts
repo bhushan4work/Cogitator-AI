@@ -389,7 +389,7 @@ export class MongoDBAdapter extends BranchingMemoryAdapter {
     return this.success(undefined);
   }
 
-  protected override async performHealthCheck(): Promise<MemoryResult<void>> {
+  async healthCheck(): Promise<MemoryResult<void>> {
     if (!this.db) return this.failure('Not connected');
     try {
       await this.db.command({ ping: 1 });
