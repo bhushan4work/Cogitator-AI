@@ -17,7 +17,7 @@ Website docs: [Evals](https://cogitator.app/docs/evals), [Datasets](https://cogi
 ## Features
 
 - **EvalSuite** — Run datasets against agents or plain functions with configurable concurrency, timeouts, and retries
-- **5 Deterministic Metrics** — exactMatch, contains, similarity, regex, jsonSchema (Zod)
+- **7 Deterministic Metrics** - exactMatch, contains, containsAll, containsAny, similarity, regex, jsonSchema (Zod)
 - **5 LLM-as-Judge Metrics** — faithfulness, relevance, coherence, helpfulness, custom llmMetric
 - **3 Statistical Metrics** — latency, cost, tokenUsage with full percentile breakdowns
 - **Custom Metrics** — `metric()` factory for anything domain-specific
@@ -154,18 +154,22 @@ All transformations return new `Dataset` instances — the original is never mut
 
 Metrics that compare output against expected values using string operations or schema validation.
 
-| Metric       | Description                                    | Requires `expected` |
-| ------------ | ---------------------------------------------- | ------------------- |
-| `exactMatch` | Exact string match (case optional)             | Yes                 |
-| `contains`   | Output contains expected substring             | Yes                 |
-| `similarity` | Levenshtein distance similarity score (0 to 1) | Yes                 |
-| `regex`      | Output matches a regex pattern                 | No                  |
-| `jsonSchema` | Output is valid JSON matching a Zod schema     | No                  |
+| Metric        | Description                                    | Requires `expected` |
+| ------------- | ---------------------------------------------- | ------------------- |
+| `exactMatch`  | Exact string match (case optional)             | Yes                 |
+| `contains`    | Output contains expected substring             | Yes                 |
+| `containsAll` | Fraction of configured keywords found          | No                  |
+| `containsAny` | Whether any configured keyword is found        | No                  |
+| `similarity`  | Levenshtein distance similarity score (0 to 1) | Yes                 |
+| `regex`       | Output matches a regex pattern                 | No                  |
+| `jsonSchema`  | Output is valid JSON matching a Zod schema     | No                  |
 
 ```typescript
 import {
   exactMatch,
   contains,
+  containsAll,
+  containsAny,
   similarity,
   regex,
   jsonSchema,
@@ -176,6 +180,8 @@ import { z } from 'zod';
 const metrics = [
   exactMatch({ caseSensitive: true }),
   contains(),
+  containsAll(['security', 'privacy', 'compliance']),
+  containsAny(['approved', 'accepted']),
   similarity(),
   regex(/\d{4}-\d{2}-\d{2}/),
   jsonSchema(z.object({ answer: z.string(), confidence: z.number() })),
@@ -193,6 +199,8 @@ const metrics = [
   regex(/\[\d+\]/, { name: 'hasCitation' }),
 ];
 ```
+
+`containsAll()` scores the fraction of its keywords found and reports any missing keywords in `details`. `containsAny()` scores 1 when at least one keyword is found and 0 otherwise. Keywords use substring matching, so `cat` matches `concatenate`. Both metrics are case-insensitive by default, accept `caseSensitive` and `name` options, ignore duplicate keywords, and reject empty lists or empty and whitespace-only keywords when the metric is created.
 
 `regex()` ignores the `g` and `y` flags, which would make identical outputs alternate between pass and fail.
 
@@ -480,6 +488,8 @@ result.report('ci');
 | -------------- | ------------- | ------------------------------------- |
 | `exactMatch`   | Deterministic | Exact string match                    |
 | `contains`     | Deterministic | Substring match                       |
+| `containsAll`  | Deterministic | Fraction of keywords found            |
+| `containsAny`  | Deterministic | Any configured keyword found          |
 | `similarity`   | Deterministic | Levenshtein distance similarity score |
 | `regex`        | Deterministic | Regex pattern match                   |
 | `jsonSchema`   | Deterministic | Zod schema validation                 |

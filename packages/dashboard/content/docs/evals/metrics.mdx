@@ -55,6 +55,35 @@ contains(); // case-insensitive (default)
 contains({ caseSensitive: true }); // case-sensitive
 ```
 
+### containsAll
+
+Scores the fraction of configured keywords found in the output. For example, finding two of three keywords scores `2 / 3`. Missing keywords are listed in `details`.
+
+```typescript
+import { containsAll } from '@cogitator-ai/evals';
+
+containsAll(['security', 'privacy', 'compliance']);
+containsAll(['Alpha', 'Beta'], { caseSensitive: true });
+```
+
+### containsAny
+
+Scores `1` when the output contains at least one configured keyword and `0` when it contains none. On failure, `details` lists the keywords that were checked.
+
+```typescript
+import { containsAny } from '@cogitator-ai/evals';
+
+containsAny(['approved', 'accepted']);
+containsAny(['YES', 'OK'], { caseSensitive: true });
+```
+
+Both keyword metrics use substring matching, so `cat` matches `concatenate`. They are case-insensitive by default, accept a custom `name`, ignore duplicate keywords, and reject empty lists or empty and whitespace-only keywords when they are created.
+
+| Option          | Type    | Default       | Description                |
+| --------------- | ------- | ------------- | -------------------------- |
+| `caseSensitive` | boolean | false         | Require exact case matches |
+| `name`          | string  | built-in name | Custom metric name         |
+
 ### similarity
 
 Measures string similarity against expected values using Levenshtein distance, implemented via two-row dynamic programming without external dependencies. Calculates:
@@ -100,7 +129,7 @@ The `g` and `y` flags are ignored: they make `RegExp.test` resume from the last 
 
 ### Metric names
 
-Every built-in per-case metric (`exactMatch`, `contains`, `similarity`, `regex`, `jsonSchema`, `faithfulness`, `relevance`, `coherence`, `helpfulness`) takes a `name` option. A suite refuses two metrics with the same name, a per-case metric and a statistical one included, because their scores would merge into one aggregate, comparison and CSV column. Name the second metric of a kind:
+Every built-in per-case metric (`exactMatch`, `contains`, `containsAll`, `containsAny`, `similarity`, `regex`, `jsonSchema`, `faithfulness`, `relevance`, `coherence`, `helpfulness`) takes a `name` option. A suite refuses two metrics with the same name, a per-case metric and a statistical one included, because their scores would merge into one aggregate, comparison and CSV column. Name the second metric of a kind:
 
 ```typescript
 metrics: [

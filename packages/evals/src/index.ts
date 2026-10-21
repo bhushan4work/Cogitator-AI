@@ -27,7 +27,15 @@ export { Dataset } from './datasets';
 export { loadJsonl } from './datasets';
 export { loadCsv } from './datasets';
 
-export { exactMatch, contains, similarity, regex, jsonSchema } from './metrics/deterministic';
+export {
+  exactMatch,
+  contains,
+  containsAll,
+  containsAny,
+  similarity,
+  regex,
+  jsonSchema,
+} from './metrics/deterministic';
 export {
   faithfulness,
   relevance,

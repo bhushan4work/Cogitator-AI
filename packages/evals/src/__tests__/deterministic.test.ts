@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
-import { exactMatch, contains, similarity, regex, jsonSchema } from '../metrics/deterministic';
+import {
+  exactMatch,
+  contains,
+  containsAll,
+  containsAny,
+  similarity,
+  regex,
+  jsonSchema,
+} from '../metrics/deterministic';
 import { threshold } from '../assertions';
 import type { EvalCaseResult } from '../metrics/types';
 import type { AggregatedMetric } from '../assertions';
@@ -99,6 +107,97 @@ describe('contains', () => {
 
   it('has metricName property', () => {
     expect(contains().metricName).toBe('contains');
+  });
+});
+
+describe('containsAll', () => {
+  it('scores the fraction of keywords found and lists missing keywords', async () => {
+    const score = await containsAll(['alpha', 'beta', 'gamma'])(
+      makeResult('Alpha and gamma are present')
+    );
+
+    expect(score.score).toBeCloseTo(2 / 3);
+    expect(score.details).toBe('missing keywords: "beta"');
+  });
+
+  it('scores 1 without details when every keyword is found', async () => {
+    const score = await containsAll(['alpha', 'beta'])(makeResult('beta follows alpha'));
+
+    expect(score).toEqual({ name: 'containsAll', score: 1, details: undefined });
+  });
+
+  it('respects caseSensitive option', async () => {
+    const metric = containsAll(['Alpha', 'Beta'], { caseSensitive: true });
+
+    expect((await metric(makeResult('Alpha and beta'))).score).toBe(0.5);
+    expect((await metric(makeResult('Alpha and Beta'))).score).toBe(1);
+  });
+
+  it('rejects an empty keyword list', () => {
+    expect(() => containsAll([])).toThrow('containsAll requires at least one keyword');
+  });
+
+  it('rejects empty and whitespace-only keywords', () => {
+    expect(() => containsAll([''])).toThrow('containsAll requires non-empty keywords');
+    expect(() => containsAll(['alpha', '   '])).toThrow('containsAll requires non-empty keywords');
+  });
+
+  it('ignores duplicate keywords when scoring', async () => {
+    const score = await containsAll(['alpha', 'ALPHA', 'beta'])(makeResult('alpha'));
+
+    expect(score.score).toBe(0.5);
+    expect(score.details).toBe('missing keywords: "beta"');
+  });
+
+  it('supports a custom metric name', async () => {
+    const metric = containsAll(['alpha'], { name: 'requiredTerms' });
+
+    expect(metric.metricName).toBe('requiredTerms');
+    expect((await metric(makeResult('alpha'))).name).toBe('requiredTerms');
+  });
+});
+
+describe('containsAny', () => {
+  it('scores 1 when at least one keyword is found', async () => {
+    const score = await containsAny(['alpha', 'beta'])(makeResult('The answer mentions Beta'));
+
+    expect(score).toEqual({ name: 'containsAny', score: 1, details: undefined });
+  });
+
+  it('scores 0 with details when no keyword is found', async () => {
+    const score = await containsAny(['alpha', 'beta'])(makeResult('gamma'));
+
+    expect(score.score).toBe(0);
+    expect(score.details).toBe('output does not contain any of: "alpha", "beta"');
+  });
+
+  it('respects caseSensitive option', async () => {
+    const metric = containsAny(['Alpha'], { caseSensitive: true });
+
+    expect((await metric(makeResult('alpha'))).score).toBe(0);
+    expect((await metric(makeResult('Alpha'))).score).toBe(1);
+  });
+
+  it('rejects an empty keyword list', () => {
+    expect(() => containsAny([])).toThrow('containsAny requires at least one keyword');
+  });
+
+  it('rejects empty and whitespace-only keywords', () => {
+    expect(() => containsAny([''])).toThrow('containsAny requires non-empty keywords');
+    expect(() => containsAny(['alpha', '\t'])).toThrow('containsAny requires non-empty keywords');
+  });
+
+  it('ignores duplicate keywords in failure details', async () => {
+    const score = await containsAny(['alpha', 'ALPHA', 'beta'])(makeResult('gamma'));
+
+    expect(score.details).toBe('output does not contain any of: "alpha", "beta"');
+  });
+
+  it('supports a custom metric name', async () => {
+    const metric = containsAny(['alpha'], { name: 'optionalTerms' });
+
+    expect(metric.metricName).toBe('optionalTerms');
+    expect((await metric(makeResult('alpha'))).name).toBe('optionalTerms');
   });
 });
 

@@ -10,6 +10,38 @@ function createMetricFn(name: string, fn: MetricFn): MetricFn {
   return fn;
 }
 
+interface KeywordTarget {
+  original: string;
+  search: string;
+}
+
+function prepareKeywordTargets(
+  metricName: 'containsAll' | 'containsAny',
+  keywords: string[],
+  caseSensitive: boolean
+): KeywordTarget[] {
+  if (keywords.length === 0) {
+    throw new Error(`${metricName} requires at least one keyword`);
+  }
+
+  const targets: KeywordTarget[] = [];
+  const seen = new Set<string>();
+
+  for (const keyword of keywords) {
+    if (keyword.trim().length === 0) {
+      throw new Error(`${metricName} requires non-empty keywords`);
+    }
+
+    const search = caseSensitive ? keyword : keyword.toLowerCase();
+    if (!seen.has(search)) {
+      seen.add(search);
+      targets.push({ original: keyword, search });
+    }
+  }
+
+  return targets;
+}
+
 export function exactMatch(opts?: MatchOptions): MetricFn {
   const caseSensitive = opts?.caseSensitive ?? false;
   const name = opts?.name ?? 'exactMatch';
@@ -118,6 +150,47 @@ export function contains(opts?: MatchOptions): MetricFn {
       name,
       score: found ? 1 : 0,
       details: found ? undefined : `output does not contain "${expected}"`,
+    };
+  }) as MetricFn);
+}
+
+/** Scores the fraction of keywords found in the output. */
+export function containsAll(keywords: string[], opts?: MatchOptions): MetricFn {
+  const caseSensitive = opts?.caseSensitive ?? false;
+  const name = opts?.name ?? 'containsAll';
+  const targets = prepareKeywordTargets('containsAll', keywords, caseSensitive);
+
+  return createMetricFn(name, (async (result) => {
+    const output = caseSensitive ? result.output : result.output.toLowerCase();
+    const missing = targets.filter((keyword) => !output.includes(keyword.search));
+
+    return {
+      name,
+      score: (targets.length - missing.length) / targets.length,
+      details:
+        missing.length > 0
+          ? `missing keywords: ${missing.map((keyword) => JSON.stringify(keyword.original)).join(', ')}`
+          : undefined,
+    };
+  }) as MetricFn);
+}
+
+/** Scores 1 when the output contains at least one keyword, and 0 otherwise. */
+export function containsAny(keywords: string[], opts?: MatchOptions): MetricFn {
+  const caseSensitive = opts?.caseSensitive ?? false;
+  const name = opts?.name ?? 'containsAny';
+  const targets = prepareKeywordTargets('containsAny', keywords, caseSensitive);
+
+  return createMetricFn(name, (async (result) => {
+    const output = caseSensitive ? result.output : result.output.toLowerCase();
+    const found = targets.some((keyword) => output.includes(keyword.search));
+
+    return {
+      name,
+      score: found ? 1 : 0,
+      details: found
+        ? undefined
+        : `output does not contain any of: ${targets.map((keyword) => JSON.stringify(keyword.original)).join(', ')}`,
     };
   }) as MetricFn);
 }
