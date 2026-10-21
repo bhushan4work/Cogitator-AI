@@ -453,6 +453,28 @@ export const signingToolSchema = z
     };
   });
 
+export const colorToolSchema = z.object({
+  operation: z
+    .enum(['convert', 'contrast'])
+    .describe('Color operation: "convert" (format conversion) or "contrast" (WCAG contrast check)'),
+  color: z
+    .string()
+    .optional()
+    .describe(
+      'Color string for convert, or first/foreground color for contrast (#rgb, #rrggbb, #rrggbbaa, rgb, rgba, hsl, hsla)'
+    ),
+  color2: z.string().optional().describe('Second/background color for contrast calculation'),
+  color1: z.string().optional().describe('Alias for color (first color in contrast calculation)'),
+  foreground: z
+    .string()
+    .optional()
+    .describe('Alias for color (foreground color in contrast calculation)'),
+  background: z
+    .string()
+    .optional()
+    .describe('Alias for color2 (background color in contrast calculation)'),
+});
+
 export function createSlugTool(options?: { timeout?: number }): Tool<SlugToolInput, unknown> {
   return defineWasmTool({
     name: 'slug',
@@ -601,6 +623,21 @@ export function createSigningTool(options?: { timeout?: number }): Tool<SigningT
   });
 }
 
+export function createColorTool(options?: { timeout?: number }): Tool<ColorToolInput, unknown> {
+  return defineWasmTool({
+    name: 'color',
+    description:
+      'Convert color formats (HEX, RGB, HSL) and calculate WCAG 2.x contrast ratios with AA/AAA compliance checks',
+    wasmModule: getWasmPath('color'),
+    wasi: true,
+    wasmFunction: 'color',
+    parameters: colorToolSchema,
+    category: 'utility',
+    tags: ['color', 'convert', 'contrast', 'wcag', 'accessibility'],
+    timeout: options?.timeout ?? 5000,
+  });
+}
+
 export type SlugToolInput = z.infer<typeof slugToolSchema>;
 export type ValidationToolInput = z.infer<typeof validationToolSchema>;
 export type DiffToolInput = z.infer<typeof diffToolSchema>;
@@ -611,5 +648,6 @@ export type XmlToolInput = z.infer<typeof xmlToolSchema>;
 export type DatetimeToolInput = z.infer<typeof datetimeToolSchema>;
 export type CompressionToolInput = z.infer<typeof compressionToolSchema>;
 export type SigningToolInput = z.infer<typeof signingToolSchema>;
+export type ColorToolInput = z.infer<typeof colorToolSchema>;
 
 export * from './manager/index.js';

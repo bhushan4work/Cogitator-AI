@@ -22,6 +22,7 @@ import {
   createDatetimeTool,
   createCompressionTool,
   createSigningTool,
+  createColorTool,
   calcToolSchema,
   jsonToolSchema,
   hashToolSchema,
@@ -36,6 +37,7 @@ import {
   datetimeToolSchema,
   compressionToolSchema,
   signingToolSchema,
+  colorToolSchema,
 } from '../index.js';
 import { z } from 'zod';
 
@@ -155,6 +157,7 @@ describe('defineWasmTool', () => {
       createDatetimeTool(),
       createCompressionTool(),
       createSigningTool(),
+      createColorTool(),
     ];
     for (const tool of tools) {
       expect(tool.sandbox?.wasi).toBe(true);
@@ -293,6 +296,7 @@ describe('tool factory functions', () => {
     { fn: createDatetimeTool, name: 'datetime', func: 'datetime' },
     { fn: createCompressionTool, name: 'compression', func: 'compression' },
     { fn: createSigningTool, name: 'signing', func: 'signing' },
+    { fn: createColorTool, name: 'color', func: 'color' },
   ];
 
   for (const { fn, name, func } of factories) {
@@ -445,5 +449,26 @@ describe('schema validation', () => {
         maxLength: 50,
       }).success
     ).toBe(true);
+  });
+
+  it('colorToolSchema validates convert and contrast inputs', () => {
+    expect(colorToolSchema.safeParse({ operation: 'convert', color: '#ff0000' }).success).toBe(
+      true
+    );
+    expect(
+      colorToolSchema.safeParse({
+        operation: 'contrast',
+        color: '#000000',
+        color2: '#ffffff',
+      }).success
+    ).toBe(true);
+    expect(
+      colorToolSchema.safeParse({
+        operation: 'contrast',
+        foreground: '#000',
+        background: '#fff',
+      }).success
+    ).toBe(true);
+    expect(colorToolSchema.safeParse({ operation: 'invalid' }).success).toBe(false);
   });
 });

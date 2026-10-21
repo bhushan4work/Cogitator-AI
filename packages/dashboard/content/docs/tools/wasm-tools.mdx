@@ -28,7 +28,7 @@ const agent = new Agent({
 
 ## Pre-built WASM Tools
 
-The package ships with **14 ready-to-use** WASM tool factories. Each returns a `Tool` instance backed by a compiled `.wasm` module.
+The package ships with **15 ready-to-use** WASM tool factories. Each returns a `Tool` instance backed by a compiled `.wasm` module.
 
 | Factory                   | Tool name      | Parameters                                                                                                                                                  | Description                                         |
 | ------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
@@ -46,6 +46,7 @@ The package ships with **14 ready-to-use** WASM tool factories. Each returns a `
 | `createDatetimeTool()`    | `datetime`     | `operation` (`parse` \| `format` \| `add` \| `subtract` \| `diff` \| `now`), `date?`, `format?`, `timezone?`, `amount?`, `unit?`, `endDate?`                | Parse, format, manipulate dates (UTC + offsets)     |
 | `createCompressionTool()` | `compression`  | `data`, `operation` (`compress` \| `decompress`), `inputEncoding?`, `outputEncoding?`, `level?` (0-9, 6)                                                    | Gzip compress/decompress data                       |
 | `createSigningTool()`     | `signing`      | `operation` (`generateKeypair` \| `sign` \| `verify`), `algorithm` (`ed25519`), `message?`, `privateKey?`, `publicKey?`, `signature?`, `encoding?`, `seed?` | Ed25519 keypair generation, sign, and verify        |
+| `createColorTool()`       | `color`        | `operation` (`convert` \| `contrast`), `color?`, `color2?`                                                                                                  | Convert color formats and calculate WCAG contrast   |
 
 Every factory accepts an optional `{ timeout }` in milliseconds — 5000 by default, 10000 for `compression` and `signing`:
 
@@ -78,6 +79,7 @@ Plugin-level errors come back as data (`{ ..., error }`) so the agent can recove
 - **signing**: WASM has no secure RNG, so a 32-byte seed is generated on the host for `generateKeypair` (the seed is the private key). Signatures interoperate with `node:crypto`.
 - **datetime**: month arithmetic clamps to month end (`Jan 31 + 1 month = Feb 29`), impossible dates are rejected.
 - **regex**: nested unbounded quantifiers are rejected; any other catastrophic pattern is stopped by the timeout.
+- **color**: format conversion across hex, rgb, and hsl with alpha preservation; WCAG 2.x relative luminance and AA/AAA pass checks for normal and large text.
 
 ---
 
