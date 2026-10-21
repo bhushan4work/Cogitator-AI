@@ -1,5 +1,11 @@
 # @cogitator-ai/evals
 
+## 0.8.0
+
+### Minor Changes
+
+- [#241](https://github.com/cogitator-ai/Cogitator-AI/pull/241) [`ce435e0`](https://github.com/cogitator-ai/Cogitator-AI/commit/ce435e087d2bfd167a9f76a3036806321990ee10) Thanks [@WilliamK112](https://github.com/WilliamK112)! - Add containsAll and containsAny deterministic keyword metrics.
+
 ## 0.7.0
 
 ### Minor Changes
