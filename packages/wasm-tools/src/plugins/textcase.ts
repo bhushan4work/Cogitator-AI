@@ -72,20 +72,13 @@ function splitChunk(chunk: string): string[] {
 
       let split = false;
 
-      // Letter-digit boundary: letter followed by digit
       if (!isCurrentDigit && isNextDigit) {
         split = true;
-      }
-      // Digit-letter boundary: digit followed by letter
-      else if (isCurrentDigit && !isNextDigit) {
+      } else if (isCurrentDigit && !isNextDigit) {
         split = true;
-      }
-      // CamelCase / PascalCase boundary: lower followed by upper
-      else if (isCurrentLower && isNextUpper) {
+      } else if (isCurrentLower && isNextUpper) {
         split = true;
-      }
-      // Acronym boundary: upper followed by upper then lower
-      else if (isCurrentUpper && isNextUpper && isNextNextLower) {
+      } else if (isCurrentUpper && isNextUpper && isNextNextLower) {
         split = true;
       }
 
@@ -107,10 +100,14 @@ function splitChunk(chunk: string): string[] {
  * Splits input text into detected lowercase word tokens.
  * Handles whitespace and `_`, `-`, `.`, `/` separators, including repeated
  * and leading/trailing separators, and applies word boundary splitting on alphanumeric segments.
+ * Input is normalized to NFC, and combining marks stay part of their word, so decomposed
+ * accents (`e` + U+0301) and scripts built on marks, such as Devanagari, are not split apart.
  */
 function splitWords(text: string): string[] {
-  // Separators: whitespace, _, -, ., / (or any non-alphanumeric character)
-  const chunks = text.split(/[^\p{L}\p{N}]+/u).filter((c) => c.length > 0);
+  const chunks = text
+    .normalize('NFC')
+    .split(/[^\p{L}\p{M}\p{N}]+/u)
+    .filter((c) => c.length > 0);
   const words: string[] = [];
 
   for (const chunk of chunks) {

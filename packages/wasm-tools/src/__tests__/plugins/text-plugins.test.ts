@@ -422,6 +422,21 @@ describe('textcase plugin', () => {
     });
   });
 
+  it('keeps combining marks inside their word', () => {
+    expect(textcase({ text: 'café au lait', to: 'snake' })).toEqual({
+      result: 'café_au_lait',
+      words: ['café', 'au', 'lait'],
+    });
+    expect(textcase({ text: 'CaféBar', to: 'kebab' })).toEqual({
+      result: 'café-bar',
+      words: ['café', 'bar'],
+    });
+    expect(textcase({ text: 'हिन्दी भाषा', to: 'snake' })).toEqual({
+      result: 'हिन्दी_भाषा',
+      words: ['हिन्दी', 'भाषा'],
+    });
+  });
+
   it('handles empty input and separator-only input without errors', () => {
     for (const to of [
       'camel',
