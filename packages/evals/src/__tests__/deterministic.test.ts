@@ -515,9 +515,7 @@ describe('tokenF1', () => {
 
     // actual: 4 tokens, expected: 3 tokens, overlap: 2 ('quick', 'brown')
     // precision = 2/4 = 0.5, recall = 2/3, F1 = (2 * 0.5 * 2/3) / (0.5 + 2/3) = 4/7
-    const score2 = await tokenF1()(
-      makeResult('the quick brown fox', 'quick brown dog')
-    );
+    const score2 = await tokenF1()(makeResult('the quick brown fox', 'quick brown dog'));
     expect(score2.score).toBeCloseTo(4 / 7);
     expect(score2.details).toBe(
       `expected "quick brown dog", got "the quick brown fox" (precision: 0.5, recall: ${2 / 3})`
@@ -537,9 +535,7 @@ describe('tokenF1', () => {
     // precision = 1/1 = 1, recall = 1/2 = 0.5, F1 = (2 * 1 * 0.5) / 1.5 = 2/3
     const score2 = await tokenF1()(makeResult('apple', 'apple apple'));
     expect(score2.score).toBeCloseTo(2 / 3);
-    expect(score2.details).toBe(
-      `expected "apple apple", got "apple" (precision: 1, recall: 0.5)`
-    );
+    expect(score2.details).toBe(`expected "apple apple", got "apple" (precision: 1, recall: 0.5)`);
 
     // actual: ['cat', 'cat', 'dog'], expected: ['cat', 'dog', 'dog']
     // overlap: 1 'cat' + 1 'dog' = 2
@@ -593,7 +589,9 @@ describe('tokenF1', () => {
   it('includes precision and recall in details whenever score is below 1', async () => {
     const score = await tokenF1()(makeResult('alpha beta', 'alpha gamma'));
     expect(score.score).toBeLessThan(1);
-    expect(score.details).toBe('expected "alpha gamma", got "alpha beta" (precision: 0.5, recall: 0.5)');
+    expect(score.details).toBe(
+      'expected "alpha gamma", got "alpha beta" (precision: 0.5, recall: 0.5)'
+    );
   });
 
   it('passes threshold assertion when tokenF1 is at or above threshold', async () => {

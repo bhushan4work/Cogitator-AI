@@ -133,10 +133,7 @@ export function similarity(opts?: MatchOptions): MetricFn {
 }
 
 function tokenize(text: string, caseSensitive: boolean): string[] {
-  const normalized = (caseSensitive ? text : text.toLowerCase()).replace(
-    /[!-/:-@[-`{-~]/g,
-    ''
-  );
+  const normalized = (caseSensitive ? text : text.toLowerCase()).replace(/[!-/:-@[-`{-~]/g, '');
   return normalized.split(/\s+/).filter(Boolean);
 }
 
