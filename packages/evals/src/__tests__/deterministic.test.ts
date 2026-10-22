@@ -6,6 +6,7 @@ import {
   containsAll,
   containsAny,
   similarity,
+  tokenF1,
   regex,
   jsonSchema,
 } from '../metrics/deterministic';
@@ -458,5 +459,202 @@ describe('similarity', () => {
 
   it('has metricName property defaulting to similarity', () => {
     expect(similarity().metricName).toBe('similarity');
+  });
+});
+
+describe('tokenF1', () => {
+  it('scores 1 when output tokens match expected tokens identically', async () => {
+    const metric = tokenF1();
+    const score = await metric(makeResult('hello world', 'hello world'));
+    expect(score).toEqual({ name: 'tokenF1', score: 1 });
+    expect(score.details).toBeUndefined();
+  });
+
+  it('scores 1 for two empty strings without division by zero', async () => {
+    const score = await tokenF1()(makeResult('', ''));
+    expect(score).toEqual({ name: 'tokenF1', score: 1 });
+    expect(score.details).toBeUndefined();
+  });
+
+  it('scores 1 for whitespace-only strings', async () => {
+    const score = await tokenF1()(makeResult('   ', '  '));
+    expect(score).toEqual({ name: 'tokenF1', score: 1 });
+    expect(score.details).toBeUndefined();
+  });
+
+  it('scores 1 when both strings normalize to empty tokens due to punctuation', async () => {
+    const score = await tokenF1()(makeResult('!?', '...'));
+    expect(score).toEqual({ name: 'tokenF1', score: 1 });
+    expect(score.details).toBeUndefined();
+  });
+
+  it('scores 0 with details when expected is undefined', async () => {
+    const score = await tokenF1()(makeResult('hello'));
+    expect(score.score).toBe(0);
+    expect(score.details).toBe('no expected value provided');
+  });
+
+  it('scores 0 when output is empty and expected is non-empty', async () => {
+    const score = await tokenF1()(makeResult('', 'hello world'));
+    expect(score.score).toBe(0);
+    expect(score.details).toBe('expected "hello world", got "" (precision: 0, recall: 0)');
+  });
+
+  it('scores 0 when output is non-empty and expected is empty', async () => {
+    const score = await tokenF1()(makeResult('hello world', ''));
+    expect(score.score).toBe(0);
+    expect(score.details).toBe('expected "", got "hello world" (precision: 0, recall: 0)');
+  });
+
+  it('calculates partial matches correctly', async () => {
+    // actual: 'red car' (2 tokens), expected: 'red bike' (2 tokens) -> overlap: 1 ('red')
+    // precision = 0.5, recall = 0.5, F1 = 0.5
+    const score = await tokenF1()(makeResult('red car', 'red bike'));
+    expect(score.score).toBe(0.5);
+    expect(score.details).toBe('expected "red bike", got "red car" (precision: 0.5, recall: 0.5)');
+
+    // actual: 4 tokens, expected: 3 tokens, overlap: 2 ('quick', 'brown')
+    // precision = 2/4 = 0.5, recall = 2/3, F1 = (2 * 0.5 * 2/3) / (0.5 + 2/3) = 4/7
+    const score2 = await tokenF1()(
+      makeResult('the quick brown fox', 'quick brown dog')
+    );
+    expect(score2.score).toBeCloseTo(4 / 7);
+    expect(score2.details).toBe(
+      `expected "quick brown dog", got "the quick brown fox" (precision: 0.5, recall: ${2 / 3})`
+    );
+  });
+
+  it('handles duplicate tokens correctly using multiset counts', async () => {
+    // expected has 1 'apple', actual has 3 'apple's -> overlap = 1
+    // precision = 1/3, recall = 1/1 = 1, F1 = (2 * 1/3 * 1) / (1/3 + 1) = 0.5
+    const score1 = await tokenF1()(makeResult('apple apple apple', 'apple'));
+    expect(score1.score).toBe(0.5);
+    expect(score1.details).toBe(
+      `expected "apple", got "apple apple apple" (precision: ${1 / 3}, recall: 1)`
+    );
+
+    // expected has 2 'apple's, actual has 1 'apple' -> overlap = 1
+    // precision = 1/1 = 1, recall = 1/2 = 0.5, F1 = (2 * 1 * 0.5) / 1.5 = 2/3
+    const score2 = await tokenF1()(makeResult('apple', 'apple apple'));
+    expect(score2.score).toBeCloseTo(2 / 3);
+    expect(score2.details).toBe(
+      `expected "apple apple", got "apple" (precision: 1, recall: 0.5)`
+    );
+
+    // actual: ['cat', 'cat', 'dog'], expected: ['cat', 'dog', 'dog']
+    // overlap: 1 'cat' + 1 'dog' = 2
+    // precision = 2/3, recall = 2/3, F1 = 2/3
+    const score3 = await tokenF1()(makeResult('cat cat dog', 'cat dog dog'));
+    expect(score3.score).toBeCloseTo(2 / 3);
+    expect(score3.details).toBe(
+      `expected "cat dog dog", got "cat cat dog" (precision: ${2 / 3}, recall: ${2 / 3})`
+    );
+  });
+
+  it('is case-insensitive by default', async () => {
+    const score = await tokenF1()(makeResult('Hello World', 'hello world'));
+    expect(score.score).toBe(1);
+    expect(score.details).toBeUndefined();
+  });
+
+  it('respects caseSensitive option', async () => {
+    const metric = tokenF1({ caseSensitive: true });
+    const diffCase = await metric(makeResult('Hello World', 'hello world'));
+    expect(diffCase.score).toBe(0);
+    expect(diffCase.details).toBe(
+      'expected "hello world", got "Hello World" (precision: 0, recall: 0)'
+    );
+
+    const sameCase = await metric(makeResult('Hello World', 'Hello World'));
+    expect(sameCase.score).toBe(1);
+    expect(sameCase.details).toBeUndefined();
+  });
+
+  it('strips punctuation when tokenizing', async () => {
+    const score = await tokenF1()(makeResult('Hello, World!', 'hello world'));
+    expect(score.score).toBe(1);
+    expect(score.details).toBeUndefined();
+
+    const score2 = await tokenF1()(makeResult('About 1,000 people', 'about 1000 people'));
+    expect(score2.score).toBe(1);
+    expect(score2.details).toBeUndefined();
+
+    const score3 = await tokenF1()(makeResult('the U.S.A.', 'the USA'));
+    expect(score3.score).toBe(1);
+    expect(score3.details).toBeUndefined();
+  });
+
+  it('scores 0 for completely disjoint tokens and includes precision and recall in details', async () => {
+    const score = await tokenF1()(makeResult('foo bar', 'baz qux'));
+    expect(score.score).toBe(0);
+    expect(score.details).toBe('expected "baz qux", got "foo bar" (precision: 0, recall: 0)');
+  });
+
+  it('includes precision and recall in details whenever score is below 1', async () => {
+    const score = await tokenF1()(makeResult('alpha beta', 'alpha gamma'));
+    expect(score.score).toBeLessThan(1);
+    expect(score.details).toBe('expected "alpha gamma", got "alpha beta" (precision: 0.5, recall: 0.5)');
+  });
+
+  it('passes threshold assertion when tokenF1 is at or above threshold', async () => {
+    const metric = tokenF1();
+    const scoreResult = await metric(makeResult('red car', 'red bike'));
+    expect(scoreResult.score).toBe(0.5);
+
+    const agg: Record<string, AggregatedMetric> = {
+      tokenF1: {
+        name: 'tokenF1',
+        mean: scoreResult.score,
+        median: scoreResult.score,
+        min: scoreResult.score,
+        max: scoreResult.score,
+        stdDev: 0,
+        p50: scoreResult.score,
+        p95: scoreResult.score,
+        p99: scoreResult.score,
+      },
+    };
+
+    const assertionResult = threshold('tokenF1', 0.5)(agg, { total: 1, duration: 10, cost: 0 });
+    expect(assertionResult.passed).toBe(true);
+    expect(assertionResult.actual).toBe(0.5);
+    expect(assertionResult.expected).toBe(0.5);
+  });
+
+  it('fails threshold assertion when tokenF1 is below threshold', async () => {
+    const metric = tokenF1();
+    const scoreResult = await metric(makeResult('red car', 'red bike'));
+    expect(scoreResult.score).toBe(0.5);
+
+    const agg: Record<string, AggregatedMetric> = {
+      tokenF1: {
+        name: 'tokenF1',
+        mean: scoreResult.score,
+        median: scoreResult.score,
+        min: scoreResult.score,
+        max: scoreResult.score,
+        stdDev: 0,
+        p50: scoreResult.score,
+        p95: scoreResult.score,
+        p99: scoreResult.score,
+      },
+    };
+
+    const assertionResult = threshold('tokenF1', 0.8)(agg, { total: 1, duration: 10, cost: 0 });
+    expect(assertionResult.passed).toBe(false);
+    expect(assertionResult.actual).toBe(0.5);
+    expect(assertionResult.expected).toBe(0.8);
+  });
+
+  it('supports custom metric name', async () => {
+    const custom = tokenF1({ name: 'f1Score' });
+    expect(custom.metricName).toBe('f1Score');
+
+    const result = await custom(makeResult('hello', 'hello'));
+    expect(result.name).toBe('f1Score');
+  });
+
+  it('has metricName property defaulting to tokenF1', () => {
+    expect(tokenF1().metricName).toBe('tokenF1');
   });
 });

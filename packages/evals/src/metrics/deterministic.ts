@@ -132,6 +132,63 @@ export function similarity(opts?: MatchOptions): MetricFn {
   }) as MetricFn);
 }
 
+function tokenize(text: string, caseSensitive: boolean): string[] {
+  const normalized = (caseSensitive ? text : text.toLowerCase()).replace(
+    /[!-/:-@[-`{-~]/g,
+    ''
+  );
+  return normalized.split(/\s+/).filter(Boolean);
+}
+
+export function tokenF1(opts?: MatchOptions): MetricFn {
+  const caseSensitive = opts?.caseSensitive ?? false;
+  const name = opts?.name ?? 'tokenF1';
+
+  return createMetricFn(name, (async (result) => {
+    const expected = result.case.expected;
+    if (expected === undefined) {
+      return { name, score: 0, details: 'no expected value provided' };
+    }
+
+    const output = result.output.trim();
+    const target = expected.trim();
+
+    const actualTokens = tokenize(output, caseSensitive);
+    const expectedTokens = tokenize(target, caseSensitive);
+
+    if (actualTokens.length === 0 && expectedTokens.length === 0) {
+      return { name, score: 1 };
+    }
+
+    const counts = new Map<string, number>();
+    for (const token of expectedTokens) {
+      counts.set(token, (counts.get(token) ?? 0) + 1);
+    }
+
+    let overlap = 0;
+    for (const token of actualTokens) {
+      const left = counts.get(token) ?? 0;
+      if (left > 0) {
+        overlap++;
+        counts.set(token, left - 1);
+      }
+    }
+
+    const precision = actualTokens.length > 0 ? overlap / actualTokens.length : 0;
+    const recall = expectedTokens.length > 0 ? overlap / expectedTokens.length : 0;
+    const score = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
+
+    return {
+      name,
+      score,
+      details:
+        score < 1
+          ? `expected "${target}", got "${output}" (precision: ${precision}, recall: ${recall})`
+          : undefined,
+    };
+  }) as MetricFn);
+}
+
 export function contains(opts?: MatchOptions): MetricFn {
   const caseSensitive = opts?.caseSensitive ?? false;
   const name = opts?.name ?? 'contains';

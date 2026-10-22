@@ -114,6 +114,38 @@ similarity({ caseSensitive: true });
 | `caseSensitive` | boolean | false          | Require exact case match   |
 | `name`          | string  | `'similarity'` | Custom name for the metric |
 
+### tokenF1
+
+Computes the token-level F1 score between the output and the expected value as the harmonic mean of precision and recall. It calculates token overlap using multiset counts so duplicate tokens are handled correctly:
+
+`precision = overlap / actual token count`
+`recall = overlap / expected token count`
+`F1 = (2 * precision * recall) / (precision + recall)`
+
+It lowercases unless `caseSensitive: true`, strips punctuation, and splits on whitespace. Both empty strings score `1`, and cases without `expected` score `0` with details `'no expected value provided'`. When the score is below `1`, `details` reports precision and recall alongside the expected and received values.
+
+```typescript
+import { EvalSuite, tokenF1, threshold } from '@cogitator-ai/evals';
+
+const suite = new EvalSuite({
+  dataset,
+  target: { fn },
+  metrics: [tokenF1()],
+  assertions: [threshold('tokenF1', 0.8)],
+});
+```
+
+Case-sensitive mode:
+
+```typescript
+tokenF1({ caseSensitive: true });
+```
+
+| Option          | Type    | Default     | Description                |
+| --------------- | ------- | ----------- | -------------------------- |
+| `caseSensitive` | boolean | false       | Require exact case match   |
+| `name`          | string  | `'tokenF1'` | Custom name for the metric |
+
 ### regex
 
 Tests the output against a regular expression pattern.
@@ -129,7 +161,7 @@ The `g` and `y` flags are ignored: they make `RegExp.test` resume from the last 
 
 ### Metric names
 
-Every built-in per-case metric (`exactMatch`, `contains`, `containsAll`, `containsAny`, `similarity`, `regex`, `jsonSchema`, `faithfulness`, `relevance`, `coherence`, `helpfulness`) takes a `name` option. A suite refuses two metrics with the same name, a per-case metric and a statistical one included, because their scores would merge into one aggregate, comparison and CSV column. Name the second metric of a kind:
+Every built-in per-case metric (`exactMatch`, `contains`, `containsAll`, `containsAny`, `similarity`, `tokenF1`, `regex`, `jsonSchema`, `faithfulness`, `relevance`, `coherence`, `helpfulness`) takes a `name` option. A suite refuses two metrics with the same name, a per-case metric and a statistical one included, because their scores would merge into one aggregate, comparison and CSV column. Name the second metric of a kind:
 
 ```typescript
 metrics: [
