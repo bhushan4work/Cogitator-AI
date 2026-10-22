@@ -1,5 +1,11 @@
 # @cogitator-ai/channels
 
+## 0.15.10
+
+### Patch Changes
+
+- [#258](https://github.com/cogitator-ai/Cogitator-AI/pull/258) [`d936a95`](https://github.com/cogitator-ai/Cogitator-AI/commit/d936a952fb233dcb22b961d421ac42ce03841d29) Thanks [@bhushan4work](https://github.com/bhushan4work)! - Validate `codeLength` and `expiresIn` in `PairingMiddleware`, `pairingCodeLength` and `pairingExpiresMs` in `DmPolicyMiddleware`, and `maxPerMinute` in `RateLimitMiddleware` constructors to reject invalid and non-positive numbers immediately at middleware creation time.
+
 ## 0.15.9
 
 ### Patch Changes
