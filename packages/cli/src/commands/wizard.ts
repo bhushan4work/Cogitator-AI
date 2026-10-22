@@ -4,7 +4,12 @@ import { resolve } from 'node:path';
 import * as p from '@clack/prompts';
 import chalk from 'chalk';
 import { stringify, parse as parseYaml } from 'yaml';
-import { AssistantConfigSchema, type AssistantConfigOutput } from '@cogitator-ai/channels';
+import {
+  AssistantConfigSchema,
+  EMAIL_ADDRESS_PATTERN,
+  EMAIL_ALLOW_FROM_PATTERN,
+  type AssistantConfigOutput,
+} from '@cogitator-ai/channels';
 import { printBanner } from '../utils/logger.js';
 import { examplesHelp } from '../utils/cli.js';
 import { mergeEnvContent, parseDotenv } from '../utils/env.js';
@@ -19,7 +24,7 @@ import {
 } from '../utils/provider-models.js';
 
 type AssistantConfig = AssistantConfigOutput;
-type ChannelName = 'telegram' | 'discord' | 'slack' | 'bluesky' | 'threads' | 'github';
+type ChannelName = 'telegram' | 'discord' | 'slack' | 'bluesky' | 'threads' | 'github' | 'email';
 type Capabilities = AssistantConfig['capabilities'];
 type McpServers = NonNullable<AssistantConfig['mcpServers']>;
 
@@ -30,6 +35,7 @@ export const CHANNEL_TOKEN_ENV: Record<ChannelName, string> = {
   bluesky: 'BLUESKY_APP_PASSWORD',
   threads: 'THREADS_ACCESS_TOKEN',
   github: 'GITHUB_CHANNEL_TOKEN',
+  email: 'EMAIL_IMAP_PASSWORD',
 };
 
 const CHANNEL_LABELS: Record<ChannelName, string> = {
@@ -39,6 +45,7 @@ const CHANNEL_LABELS: Record<ChannelName, string> = {
   bluesky: 'Bluesky',
   threads: 'Threads',
   github: 'GitHub',
+  email: 'Email',
 };
 
 const TOKEN_PROMPTS: Record<ChannelName, string> = {
@@ -49,6 +56,7 @@ const TOKEN_PROMPTS: Record<ChannelName, string> = {
   threads: 'Threads long-lived access token:',
   github:
     'GitHub token of a separate bot account, scoped to the repositories it answers in (issues and pull requests write):',
+  email: 'IMAP password of the bot mailbox (an app password for Gmail and Outlook):',
 };
 
 const OWNER_PROMPTS: Record<ChannelName, string> = {
@@ -59,6 +67,7 @@ const OWNER_PROMPTS: Record<ChannelName, string> = {
   threads: 'Threads owner username(s), comma-separated (for admin commands)',
   github:
     'GitHub owner user ID(s), comma-separated (numbers from api.github.com/users/<login>, for admin commands)',
+  email: 'Owner email address(es), comma-separated (always answered, for admin commands)',
 };
 
 const CHANNELS: readonly ChannelName[] = [
@@ -68,6 +77,7 @@ const CHANNELS: readonly ChannelName[] = [
   'bluesky',
   'threads',
   'github',
+  'email',
 ];
 
 function isChannelName(value: unknown): value is ChannelName {
@@ -137,6 +147,43 @@ export function parsePathList(raw: string): string[] {
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+type EmailChannelConfig = NonNullable<AssistantConfig['channels']['email']>;
+
+/** What the wizard asks about the email channel */
+export interface WizardEmailAnswers {
+  address: string;
+  imapHost: string;
+  smtpHost: string;
+  ownerIds: string[];
+  allowFrom: string[];
+  trustedAuthservIds: string[];
+}
+
+/**
+ * The email channel of `cogitator.yml` after the wizard: the answers replace what the file held
+ * for the address, the servers, the owners, `allowFrom` and `trustedAuthservIds` (a blank answer
+ * removes the last two), and its other settings stay.
+ */
+export function emailChannelConfig(
+  existing: EmailChannelConfig | undefined,
+  answers: WizardEmailAnswers
+): EmailChannelConfig {
+  const kept: EmailChannelConfig = { ...existing };
+  delete kept.allowFrom;
+  delete kept.trustedAuthservIds;
+  return {
+    ...kept,
+    address: answers.address,
+    imap: { ...existing?.imap, host: answers.imapHost },
+    smtp: { ...existing?.smtp, host: answers.smtpHost },
+    ownerIds: answers.ownerIds,
+    ...(answers.allowFrom.length > 0 && { allowFrom: answers.allowFrom }),
+    ...(answers.trustedAuthservIds.length > 0 && {
+      trustedAuthservIds: answers.trustedAuthservIds,
+    }),
+  };
 }
 
 /** Channels configured in cogitator.yml that the wizard does not set up, kept on `--edit` */
@@ -389,6 +436,33 @@ export const wizardCommand = new Command('wizard')
         envUpdates.set('BLUESKY_HANDLE', handle);
       }
 
+      let emailServer: { address: string; imapHost: string } | undefined;
+      if (ch === 'email') {
+        const current = existing.channels?.email;
+        const currentAddress = current?.address ?? existingEnv.EMAIL_ADDRESS;
+        const address = prompt(
+          await p.text({
+            message: 'Address of the bot mailbox',
+            placeholder: 'assistant@example.com',
+            ...(currentAddress ? { initialValue: currentAddress } : {}),
+            validate: (v) =>
+              EMAIL_ADDRESS_PATTERN.test(v?.trim() ?? '') ? undefined : 'Not an email address',
+          })
+        )
+          .trim()
+          .toLowerCase();
+        const currentImap = current?.imap?.host ?? existingEnv.EMAIL_IMAP_HOST;
+        const imapHost = prompt(
+          await p.text({
+            message: 'IMAP server it reads mail from',
+            placeholder: 'imap.gmail.com',
+            ...(currentImap ? { initialValue: currentImap } : {}),
+            validate: (v) => (!v?.trim() ? 'IMAP server is required' : undefined),
+          })
+        ).trim();
+        emailServer = { address, imapHost };
+      }
+
       const token = await askSecret({
         message: TOKEN_PROMPTS[ch],
         current: existingEnv[tokenEnv],
@@ -402,8 +476,14 @@ export const wizardCommand = new Command('wizard')
           message: OWNER_PROMPTS[ch],
           placeholder: 'your user ID',
           ...(existingOwners ? { initialValue: existingOwners } : {}),
-          validate: (v) =>
-            parsePathList(v ?? '').length === 0 ? 'Owner ID is required' : undefined,
+          validate: (v) => {
+            const owners = parsePathList(v ?? '');
+            if (owners.length === 0) return 'Owner ID is required';
+            if (ch === 'email' && owners.some((owner) => !EMAIL_ADDRESS_PATTERN.test(owner))) {
+              return 'Owners are email addresses';
+            }
+            return undefined;
+          },
         })
       );
 
@@ -434,6 +514,55 @@ export const wizardCommand = new Command('wizard')
         if (webhookSecret) envUpdates.set('GITHUB_WEBHOOK_SECRET', webhookSecret);
       }
 
+      let emailAnswers: Omit<WizardEmailAnswers, 'ownerIds'> | undefined;
+      if (ch === 'email' && emailServer) {
+        const current = existing.channels?.email;
+        const currentSmtp = current?.smtp?.host ?? existingEnv.EMAIL_SMTP_HOST;
+        const smtpHost = prompt(
+          await p.text({
+            message: 'SMTP server it sends mail through',
+            placeholder: 'smtp.gmail.com',
+            ...(currentSmtp ? { initialValue: currentSmtp } : {}),
+            validate: (v) => (!v?.trim() ? 'SMTP server is required' : undefined),
+          })
+        ).trim();
+        const smtpPassword = await askSecret({
+          message: 'SMTP password (often the same app password):',
+          current: existingEnv.EMAIL_SMTP_PASSWORD,
+          required: 'Required',
+        });
+        if (smtpPassword) envUpdates.set('EMAIL_SMTP_PASSWORD', smtpPassword);
+        const currentAllowFrom = current?.allowFrom?.join(', ');
+        const allowFrom = parsePathList(
+          prompt(
+            await p.text({
+              message:
+                'Who else may write to it: addresses or domains, comma-separated (blank for the owners only)',
+              placeholder: 'example.com, ann@example.org',
+              ...(currentAllowFrom ? { initialValue: currentAllowFrom } : {}),
+              validate: (v) =>
+                parsePathList(v ?? '').every((entry) => EMAIL_ALLOW_FROM_PATTERN.test(entry))
+                  ? undefined
+                  : 'Each entry is an address, a domain, *.domain or *',
+            })
+          ) ?? ''
+        );
+        const currentTrusted =
+          current?.trustedAuthservIds?.join(', ') ??
+          (/gmail|google/i.test(emailServer.imapHost) ? 'mx.google.com' : undefined);
+        const trustedAuthservIds = parsePathList(
+          prompt(
+            await p.text({
+              message:
+                'Server id the mailbox host writes in Authentication-Results, so forged senders are caught (mx.google.com for Gmail, blank to skip)',
+              placeholder: 'mx.google.com',
+              ...(currentTrusted ? { initialValue: currentTrusted } : {}),
+            })
+          ) ?? ''
+        );
+        emailAnswers = { ...emailServer, smtpHost, allowFrom, trustedAuthservIds };
+      }
+
       const ownerIds = parsePathList(ownerIdsRaw);
       if (ch === 'bluesky') channelsConfig.bluesky = { ...existing.channels?.bluesky, ownerIds };
       else if (ch === 'threads')
@@ -444,6 +573,11 @@ export const wizardCommand = new Command('wizard')
           webhook: existing.channels?.github?.webhook ?? { port: 8787 },
           ownerIds,
         };
+      else if (ch === 'email' && emailAnswers)
+        channelsConfig.email = emailChannelConfig(existing.channels?.email, {
+          ...emailAnswers,
+          ownerIds: ownerIds.map((owner) => owner.toLowerCase()),
+        });
       else channelsConfig[ch] = { ownerIds };
     }
 

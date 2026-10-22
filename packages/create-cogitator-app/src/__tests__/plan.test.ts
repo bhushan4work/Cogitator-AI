@@ -454,6 +454,66 @@ describe('deploy', () => {
   });
 });
 
+describe('a messaging bot on email', () => {
+  const plan = planProject(specFor('channels', 'openai', { channels: ['email'] }));
+
+  it('reads the mailbox over IMAP and answers over SMTP, with the settings from the env', () => {
+    const gateway = file(plan, 'src/gateway.ts');
+    expect(gateway).toContain("import { Gateway, emailChannel } from '@cogitator-ai/channels';");
+    expect(gateway).toContain('address: env.EMAIL_ADDRESS');
+    expect(gateway).toContain("allowFrom: env.EMAIL_ALLOW_FROM.split(',')");
+    expect(gateway).toContain('pass: env.EMAIL_IMAP_PASSWORD');
+    expect(gateway).toContain('port: Number(env.EMAIL_SMTP_PORT ?? 587)');
+    expect(syntaxErrors('src/gateway.ts', gateway)).toEqual([]);
+    const pkg = JSON.parse(file(plan, 'package.json')) as { dependencies: Record<string, string> };
+    expect(Object.keys(pkg.dependencies)).toEqual(
+      expect.arrayContaining(['imapflow', 'postal-mime', 'nodemailer'])
+    );
+  });
+
+  it('asks for the mailbox, who may write and the passwords, and documents the risks', () => {
+    const env = file(plan, '.env.example');
+    for (const name of [
+      'EMAIL_ADDRESS',
+      'EMAIL_ALLOW_FROM',
+      'EMAIL_IMAP_HOST',
+      'EMAIL_IMAP_PASSWORD',
+      'EMAIL_SMTP_HOST',
+      'EMAIL_SMTP_PASSWORD',
+    ]) {
+      expect(env).toMatch(new RegExp(`^${name}=`, 'm'));
+    }
+    expect(env).toMatch(/^# EMAIL_SMTP_PORT=/m);
+    const readme = file(plan, 'README.md');
+    expect(readme).toContain('EMAIL_ALLOW_FROM');
+    expect(readme).toContain('Authentication-Results');
+    expect(file(plan, 'src/env.ts')).toContain("required('EMAIL_IMAP_PASSWORD'");
+  });
+
+  it('hands every variable the bot needs to a deployment, the settings with the passwords', () => {
+    const deployed = planProject(
+      specFor('channels', 'openai', { channels: ['email'], deploy: 'docker' })
+    );
+    const yml = file(deployed, 'cogitator.yml');
+    for (const name of [
+      'EMAIL_ADDRESS',
+      'EMAIL_ALLOW_FROM',
+      'EMAIL_IMAP_HOST',
+      'EMAIL_IMAP_PASSWORD',
+      'EMAIL_SMTP_HOST',
+      'EMAIL_SMTP_PASSWORD',
+    ]) {
+      expect(yml).toContain(`    - ${name}`);
+    }
+    expect(yml).not.toContain('    - EMAIL_SMTP_PORT');
+    const gateway = file(deployed, 'src/gateway.ts');
+    expect(gateway).toContain('port: Number(env.EMAIL_IMAP_PORT ?? 993)');
+    expect(gateway).toContain("secure: env.EMAIL_IMAP_SECURE !== 'false'");
+    expect(gateway).toContain('trustedAuthservIds: env.EMAIL_TRUSTED_AUTHSERV_IDS');
+    expect(syntaxErrors('src/gateway.ts', gateway)).toEqual([]);
+  });
+});
+
 describe('a messaging bot on GitHub', () => {
   const plan = planProject(specFor('channels', 'openai', { channels: ['github'] }));
 

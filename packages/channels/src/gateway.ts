@@ -116,6 +116,19 @@ function limitFor(channel: Channel, msg: ChannelMessage): number {
   return channel.maxMessageChars ?? getPlatformLimit(msg.channelType);
 }
 
+/**
+ * Lets the promise chains of what just settled run (the queue settles what it drops at once,
+ * and each answer settles a few promise steps later), without waiting for any timer.
+ */
+async function settleMicrotasks(): Promise<void> {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+}
+
+/** The key of a message whose answer the gateway tracks: its channel, chat and id. */
+function answerKey(msg: ChannelMessage): string {
+  return `${msg.channelType}\u0000${msg.channelId}\u0000${msg.id}`;
+}
+
 function draftKey(channelType: string, channelId: string, draftId: number): string {
   return `${channelType}:${channelId}:${draftId}`;
 }
@@ -227,6 +240,21 @@ export class Gateway {
   private readonly pending = new Set<Promise<boolean>>();
   /** The stop in progress, which a second {@link stop} call returns */
   private stopping: Promise<void> | null = null;
+  /** Calls of `channel.redeliver` in progress */
+  private readonly redeliveries = new Set<Promise<void>>();
+  /**
+   * Messages taken from a channel that can redeliver them, by the promise of their answer, until
+   * it settles. Those still here once `stop()` gave up on the runs are handed back.
+   */
+  private readonly unanswered = new Map<
+    Promise<boolean>,
+    { channel: Channel; handled: ChannelMessage; messages: ChannelMessage[] }
+  >();
+  /**
+   * Messages whose answer is going out or went out, by `answerKey`, so a run aborted after its
+   * first message was sent (or while it is being sent) is not redelivered
+   */
+  private readonly answeredKeys = new Set<string>();
   /** The last pending write of each user's session, so writes to one session never interleave */
   private readonly sessionWrites = new Map<string, Promise<void>>();
   private running = false;
@@ -255,13 +283,16 @@ export class Gateway {
         : new MessageQueue(queueMode, (msg, signal) => this.processMessage(msg, signal));
 
     this.debouncer = config.debounce?.enabled
-      ? new InboundDebouncer(config.debounce, async (merged) => {
-          this.dispatch(merged).catch(() => {});
+      ? new InboundDebouncer(config.debounce, async (merged, originals) => {
+          const answered = this.dispatch(merged);
+          const channel = this.channels.find((ch) => ch.type === merged.channelType);
+          if (channel?.redeliver) this.watchUnanswered(channel, merged, originals, answered);
+          else answered.catch(() => {});
         })
       : null;
 
     for (const channel of this.channels) {
-      channel.onMessage((msg) => this.handleIncoming(msg, false));
+      channel.onMessage((msg) => this.handleIncoming(msg, false, channel));
       channel.onAction?.((action) => this.handleAction(channel, action));
       channel.onStop?.((stop) => {
         this.stoppableDrafts
@@ -318,6 +349,15 @@ export class Gateway {
       await settlesWithin(this.idle(), timeout);
     }
     this.messageQueue?.dispose();
+    await settleMicrotasks();
+    for (const [answered, { channel, handled, messages }] of this.unanswered) {
+      this.unanswered.delete(answered);
+      if (this.answeredKeys.has(answerKey(handled))) continue;
+      for (const msg of messages) void this.redeliver(channel, msg);
+    }
+    await Promise.all(
+      [...this.redeliveries].map((redelivery) => settlesWithin(redelivery, timeout))
+    );
 
     await Promise.all(this.channels.map((ch) => ch.stop()));
     this.startedAt = null;
@@ -582,13 +622,20 @@ export class Gateway {
   /**
    * A message from a channel, a button or {@link injectMessage}. With a queue, a channel's message
    * is only queued, so the channel goes on to its next update while the thread waits its turn.
-   * `untilAnswered` waits for the answer.
+   * `untilAnswered` waits for the answer. A message of `channel` the gateway does not answer
+   * because it stops (refused while stopping, or dropped by `stop()`) goes back through
+   * `channel.redeliver`.
    */
-  private async handleIncoming(msg: ChannelMessage, untilAnswered: boolean): Promise<void> {
+  private async handleIncoming(
+    msg: ChannelMessage,
+    untilAnswered: boolean,
+    channel?: Channel
+  ): Promise<void> {
     if (this.stopping) {
       const refused = new Error('The gateway is stopping: the message was dropped');
       this.config.onError?.(refused, msg);
       if (untilAnswered) throw refused;
+      if (channel?.redeliver) await this.redeliver(channel, msg);
       return;
     }
     if (this.debouncer) {
@@ -596,13 +643,46 @@ export class Gateway {
       return;
     }
     const answered = this.dispatch(msg);
+    if (channel?.redeliver && !untilAnswered) this.watchUnanswered(channel, msg, [msg], answered);
     if (untilAnswered || !this.messageQueue) {
-      if (!(await answered) && untilAnswered) {
+      const done = await answered;
+      if (!done && untilAnswered) {
         throw new Error('The message was not answered: its run failed or was aborted');
       }
       return;
     }
-    answered.catch(() => {});
+    if (!channel?.redeliver) answered.catch(() => {});
+  }
+
+  /** Hands a message back to its channel, reporting a failure to `onError`. */
+  private redeliver(channel: Channel, msg: ChannelMessage): Promise<void> {
+    const redelivery = Promise.resolve()
+      .then(() => channel.redeliver?.(msg))
+      .catch((error: unknown) => this.config.onError?.(toError(error), msg))
+      .finally(() => this.redeliveries.delete(redelivery));
+    this.redeliveries.add(redelivery);
+    return redelivery;
+  }
+
+  /**
+   * Watches the answer of messages taken from `channel`: when the gateway stops before answering
+   * them they go back through `channel.redeliver`, and so do those whose run is still going when
+   * `stop()` gives up on it. A message whose answer went out is never handed back.
+   */
+  private watchUnanswered(
+    channel: Channel,
+    handled: ChannelMessage,
+    messages: ChannelMessage[],
+    answered: Promise<boolean>
+  ): void {
+    const entry = { channel, handled, messages };
+    this.unanswered.set(answered, entry);
+    void answered.then((done) => {
+      if (this.unanswered.get(answered) !== entry) return;
+      this.unanswered.delete(answered);
+      if (done || this.running) return;
+      for (const msg of messages) void this.redeliver(channel, msg);
+    });
   }
 
   /** Puts a message through the queue of its thread, resolving once it is done with */
@@ -696,13 +776,16 @@ export class Gateway {
     this.stops.set(runSignal, stop);
     this.runs.add(stop);
 
+    const key = answerKey(msg);
     try {
       await this.processWithChannel(msg, channel, threadId, runSignal);
+      if (this.answeredKeys.has(key)) return true;
       return signal?.aborted !== true && stop.signal.reason !== GATEWAY_STOPPED;
     } catch (error) {
       if (!runSignal.aborted) this.config.onError?.(toError(error), msg);
-      return false;
+      return this.answeredKeys.has(key);
     } finally {
+      this.answeredKeys.delete(key);
       this.runs.delete(stop);
       const remaining = (this.inFlight.get(threadId) ?? 1) - 1;
       if (remaining <= 0) this.inFlight.delete(threadId);
@@ -1046,15 +1129,23 @@ export class Gateway {
   ): Promise<string[]> {
     const chunks = chunkMessage(output, limitFor(channel, msg));
     const ids: string[] = [];
+    const key = answerKey(msg);
+    const first = !this.answeredKeys.has(key);
     for (let i = 0; i < chunks.length; i++) {
-      ids.push(
-        await channel.sendText(msg.channelId, chunks[i], {
-          ...(i === 0 && replyTo ? { replyTo } : {}),
-          ...(i === chunks.length - 1 && buttons ? { buttons } : {}),
-          ...(msg.topicId ? { topicId: msg.topicId } : {}),
-          format: 'markdown',
-        })
-      );
+      if (i === 0) this.answeredKeys.add(key);
+      try {
+        ids.push(
+          await channel.sendText(msg.channelId, chunks[i], {
+            ...(i === 0 && replyTo ? { replyTo } : {}),
+            ...(i === chunks.length - 1 && buttons ? { buttons } : {}),
+            ...(msg.topicId ? { topicId: msg.topicId } : {}),
+            format: 'markdown',
+          })
+        );
+      } catch (error) {
+        if (i === 0 && first) this.answeredKeys.delete(key);
+        throw error;
+      }
     }
     return ids;
   }
@@ -1173,6 +1264,7 @@ export class Gateway {
     const stoppedByUser = () => stop?.signal.aborted === true;
     const keepWhatWasWritten = async () => {
       await stream.finish();
+      this.answeredKeys.add(answerKey(msg));
       await this.hooks?.emit('stream:finished', {
         msg,
         threadId,
@@ -1217,6 +1309,7 @@ export class Gateway {
     let replied = tokenCount > 0;
     if (replied) {
       await stream.finish();
+      this.answeredKeys.add(answerKey(msg));
     } else {
       await stream.abort();
       const output = adaptFor(channel, msg, result.output);

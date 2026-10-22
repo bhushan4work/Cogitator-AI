@@ -16,6 +16,7 @@ export type ChannelType =
   | 'bluesky'
   | 'threads'
   | 'github'
+  | 'email'
   | (string & {});
 
 export type AttachmentType = 'image' | 'file' | 'audio' | 'video';
@@ -43,7 +44,8 @@ export interface ChannelMessage {
   /**
    * The topic or thread inside the chat the message was posted in: a Telegram forum topic or a
    * topic of a private chat, the `ts` of the Slack thread of a channel message, the first comment
-   * of a GitHub review thread. Replies go to the same topic.
+   * of a GitHub review thread, the first `Message-ID` of an email thread. Replies go to the same
+   * topic.
    */
   topicId?: string;
   /**
@@ -158,6 +160,19 @@ export interface Channel {
    * catches its own errors and reports them through `onError`.
    */
   onMessage(handler: (msg: ChannelMessage) => Promise<void>): void;
+
+  /**
+   * Called when the Gateway does not answer a message of this channel because it stops: one
+   * that came in while it was stopping (called before the handler resolves), or one it had
+   * queued or was running and dropped after `drainTimeout`. A channel that can deliver it again
+   * later does: the email channel leaves the mail unread or marks it unread again, and answers
+   * a webhook `503` so the provider retries. A run that ignores the abort is handed back once
+   * `stop()` gives up on it. A message whose answer started going out is never handed back, so
+   * delivery is at least once for unanswered messages only, and the tools of a run that was
+   * aborted may run again. The Gateway waits up to `drainTimeout` for each call before it stops
+   * the channel.
+   */
+  redeliver?(msg: ChannelMessage): Promise<void>;
 
   sendText(channelId: string, text: string, options?: SendOptions): Promise<string>;
   editText(
