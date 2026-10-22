@@ -2,4 +2,4 @@
 '@cogitator-ai/channels': patch
 ---
 
-Validate `codeLength` in `PairingMiddleware`, `pairingCodeLength` in `DmPolicyMiddleware`, and `maxPerMinute` in `RateLimitMiddleware` constructors to reject non-positive integers and invalid values immediately at middleware creation time.
+Validate `codeLength` and `expiresIn` in `PairingMiddleware`, `pairingCodeLength` and `pairingExpiresMs` in `DmPolicyMiddleware`, and `maxPerMinute` in `RateLimitMiddleware` constructors to reject invalid and non-positive numbers immediately at middleware creation time.

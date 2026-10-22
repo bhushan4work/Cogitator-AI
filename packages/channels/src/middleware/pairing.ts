@@ -7,6 +7,7 @@ import {
   prunePending,
   type PendingPairing,
 } from './pairing-codes';
+import { assertPositiveInteger, assertPositiveFiniteNumber } from './validation';
 
 export interface PairingConfig {
   ownerIds: Record<string, string>;
@@ -23,13 +24,11 @@ export class PairingMiddleware implements GatewayMiddleware {
   private readonly expiresIn: number;
 
   constructor(config: PairingConfig) {
-    if (
-      config.codeLength !== undefined &&
-      (!Number.isInteger(config.codeLength) || config.codeLength <= 0)
-    ) {
-      throw new Error(
-        `Invalid codeLength: ${String(config.codeLength)}. Expected a positive integer.`
-      );
+    if (config.codeLength !== undefined) {
+      assertPositiveInteger('codeLength', config.codeLength);
+    }
+    if (config.expiresIn !== undefined) {
+      assertPositiveFiniteNumber('expiresIn', config.expiresIn);
     }
     this.codeLength = config.codeLength ?? 6;
     this.expiresIn = (config.expiresIn ?? 300) * 1000;

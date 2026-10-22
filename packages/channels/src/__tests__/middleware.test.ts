@@ -152,6 +152,60 @@ describe('PairingMiddleware', () => {
       }).toThrow(/Invalid codeLength: 0/);
       expect(mw).toBeUndefined();
     });
+
+    it('accepts valid expiresIn and preserves default behavior when omitted', () => {
+      const mwDefault = new PairingMiddleware({
+        ownerIds: { telegram: 'owner_1' },
+      });
+      expect(mwDefault).toBeDefined();
+
+      const mwValid = new PairingMiddleware({
+        ownerIds: { telegram: 'owner_1' },
+        expiresIn: 60,
+      });
+      expect(mwValid).toBeDefined();
+
+      const mwValidFloat = new PairingMiddleware({
+        ownerIds: { telegram: 'owner_1' },
+        expiresIn: 0.5,
+      });
+      expect(mwValidFloat).toBeDefined();
+
+      const mwFactory = pairing({
+        ownerIds: { telegram: 'owner_1' },
+        expiresIn: 120,
+      });
+      expect(mwFactory).toBeDefined();
+    });
+
+    it('rejects invalid expiresIn values at middleware creation time', () => {
+      const invalidValues = [0, -1, -60, NaN, Infinity, -Infinity, '60' as any, null as any];
+
+      for (const val of invalidValues) {
+        expect(
+          () => new PairingMiddleware({ ownerIds: { telegram: 'owner_1' }, expiresIn: val }),
+          `Expected expiresIn=${String(val)} to throw at creation time`
+        ).toThrow(new RegExp(`Invalid expiresIn: ${String(val)}`));
+
+        expect(
+          () => pairing({ ownerIds: { telegram: 'owner_1' }, expiresIn: val }),
+          `Expected pairing({ expiresIn: ${String(val)} }) to throw at creation time`
+        ).toThrow(new RegExp(`Invalid expiresIn: ${String(val)}`));
+      }
+    });
+
+    it('proves expiresIn errors occur at construction rather than during message handling', async () => {
+      let mw: PairingMiddleware | undefined;
+      expect(() => {
+        mw = new PairingMiddleware({ ownerIds: { telegram: 'owner_1' }, expiresIn: 0 });
+      }).toThrow(/Invalid expiresIn: 0/);
+      expect(mw).toBeUndefined();
+
+      expect(() => {
+        mw = new PairingMiddleware({ ownerIds: { telegram: 'owner_1' }, expiresIn: -10 });
+      }).toThrow(/Invalid expiresIn: -10/);
+      expect(mw).toBeUndefined();
+    });
   });
 });
 
@@ -229,12 +283,8 @@ describe('RateLimitMiddleware', () => {
         ).toThrow(new RegExp(`Invalid maxPerMinute: ${String(val)}`));
       }
 
-      expect(() => new RateLimitMiddleware({} as any)).toThrow(
-        /Invalid maxPerMinute: undefined/
-      );
-      expect(() => rateLimit({} as any)).toThrow(
-        /Invalid maxPerMinute: undefined/
-      );
+      expect(() => new RateLimitMiddleware({} as any)).toThrow(/Invalid maxPerMinute: undefined/);
+      expect(() => rateLimit({} as any)).toThrow(/Invalid maxPerMinute: undefined/);
     });
 
     it('proves errors occur at construction rather than during message handling', async () => {

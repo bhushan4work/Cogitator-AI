@@ -10,6 +10,7 @@ import {
   prunePending,
   type PendingPairing,
 } from './pairing-codes';
+import { assertPositiveInteger, assertPositiveFiniteNumber } from './validation';
 import { expandHome } from '../paths';
 
 export type DmPolicyMode = 'open' | 'allowlist' | 'pairing' | 'disabled';
@@ -52,13 +53,11 @@ export class DmPolicyMiddleware implements GatewayMiddleware {
   private readonly onStoreError?: (error: Error) => void;
 
   constructor(config: DmPolicyConfig) {
-    if (
-      config.pairingCodeLength !== undefined &&
-      (!Number.isInteger(config.pairingCodeLength) || config.pairingCodeLength <= 0)
-    ) {
-      throw new Error(
-        `Invalid pairingCodeLength: ${String(config.pairingCodeLength)}. Expected a positive integer.`
-      );
+    if (config.pairingCodeLength !== undefined) {
+      assertPositiveInteger('pairingCodeLength', config.pairingCodeLength);
+    }
+    if (config.pairingExpiresMs !== undefined) {
+      assertPositiveFiniteNumber('pairingExpiresMs', config.pairingExpiresMs);
     }
     this.mode = config.mode;
     this.storePath = config.storePath ? expandHome(config.storePath) : DEFAULT_STORE_PATH;
