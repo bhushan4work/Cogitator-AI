@@ -1,5 +1,11 @@
 # @cogitator-ai/wasm-tools
 
+## 0.11.0
+
+### Minor Changes
+
+- [#263](https://github.com/cogitator-ai/Cogitator-AI/pull/263) [`6e173a6`](https://github.com/cogitator-ai/Cogitator-AI/commit/6e173a664093054f715fbe65de33c908ffab02e8) Thanks [@bhushan4work](https://github.com/bhushan4work)! - Add semver tool plugin for parsing, comparing (SemVer 2.0.0 precedence), range satisfaction, and version bumping.
+
 ## 0.10.11
 
 ### Patch Changes
