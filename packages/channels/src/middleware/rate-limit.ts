@@ -1,4 +1,5 @@
 import type { GatewayMiddleware, ChannelMessage, MiddlewareContext } from '@cogitator-ai/types';
+import { assertPositiveInteger } from './validation';
 
 export interface RateLimitConfig {
   maxPerMinute: number;
@@ -17,7 +18,9 @@ export class RateLimitMiddleware implements GatewayMiddleware {
   private readonly buckets = new Map<string, UserBucket>();
   private lastSweep = 0;
 
-  constructor(private readonly config: RateLimitConfig) {}
+  constructor(private readonly config: RateLimitConfig) {
+    assertPositiveInteger('maxPerMinute', config?.maxPerMinute);
+  }
 
   async handle(
     msg: ChannelMessage,

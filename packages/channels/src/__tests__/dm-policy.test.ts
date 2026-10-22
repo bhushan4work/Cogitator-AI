@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DmPolicyMiddleware } from '../middleware/dm-policy';
+import { DmPolicyMiddleware, dmPolicy } from '../middleware/dm-policy';
 import type { ChannelMessage, MiddlewareContext, Channel } from '@cogitator-ai/types';
 import {
   existsSync,
@@ -444,6 +444,157 @@ describe('DmPolicyMiddleware', () => {
       });
 
       expect(mw.isApproved('telegram', 'stranger')).toBe(false);
+    });
+  });
+
+  describe('constructor validation: pairingCodeLength', () => {
+    it('accepts valid pairingCodeLength and preserves default behavior when omitted', () => {
+      const mwDefault = new DmPolicyMiddleware({
+        mode: 'open',
+        storePath: tempStorePath,
+      });
+      expect(mwDefault).toBeDefined();
+
+      const mwValid = new DmPolicyMiddleware({
+        mode: 'pairing',
+        storePath: tempStorePath,
+        pairingCodeLength: 8,
+      });
+      expect(mwValid).toBeDefined();
+
+      const mwFactory = dmPolicy({
+        mode: 'pairing',
+        storePath: tempStorePath,
+        pairingCodeLength: 10,
+      });
+      expect(mwFactory).toBeDefined();
+    });
+
+    it('rejects invalid pairingCodeLength values at middleware creation time', () => {
+      const invalidValues = [
+        0,
+        -1,
+        -8,
+        NaN,
+        3.5,
+        0.5,
+        '8' as any,
+        null as any,
+        Infinity,
+        -Infinity,
+      ];
+
+      for (const val of invalidValues) {
+        expect(
+          () =>
+            new DmPolicyMiddleware({
+              mode: 'pairing',
+              storePath: tempStorePath,
+              pairingCodeLength: val,
+            }),
+          `Expected pairingCodeLength=${String(val)} to throw at creation time`
+        ).toThrow(new RegExp(`Invalid pairingCodeLength: ${String(val)}`));
+
+        expect(
+          () =>
+            dmPolicy({
+              mode: 'pairing',
+              storePath: tempStorePath,
+              pairingCodeLength: val,
+            }),
+          `Expected dmPolicy({ pairingCodeLength: ${String(val)} }) to throw at creation time`
+        ).toThrow(new RegExp(`Invalid pairingCodeLength: ${String(val)}`));
+      }
+    });
+
+    it('proves errors occur at construction rather than during message handling', async () => {
+      let mw: DmPolicyMiddleware | undefined;
+      expect(() => {
+        mw = new DmPolicyMiddleware({
+          mode: 'pairing',
+          storePath: tempStorePath,
+          pairingCodeLength: 0,
+        });
+      }).toThrow(/Invalid pairingCodeLength: 0/);
+      expect(mw).toBeUndefined();
+    });
+  });
+
+  describe('constructor validation: pairingExpiresMs', () => {
+    it('accepts valid pairingExpiresMs and preserves default behavior when omitted', () => {
+      const mwDefault = new DmPolicyMiddleware({
+        mode: 'open',
+        storePath: tempStorePath,
+      });
+      expect(mwDefault).toBeDefined();
+
+      const mwValid = new DmPolicyMiddleware({
+        mode: 'pairing',
+        storePath: tempStorePath,
+        pairingExpiresMs: 60_000,
+      });
+      expect(mwValid).toBeDefined();
+
+      const mwValidFloat = new DmPolicyMiddleware({
+        mode: 'pairing',
+        storePath: tempStorePath,
+        pairingExpiresMs: 1500.5,
+      });
+      expect(mwValidFloat).toBeDefined();
+
+      const mwFactory = dmPolicy({
+        mode: 'pairing',
+        storePath: tempStorePath,
+        pairingExpiresMs: 120_000,
+      });
+      expect(mwFactory).toBeDefined();
+    });
+
+    it('rejects invalid pairingExpiresMs values at middleware creation time', () => {
+      const invalidValues = [0, -1, -1000, NaN, Infinity, -Infinity, '60000' as any, null as any];
+
+      for (const val of invalidValues) {
+        expect(
+          () =>
+            new DmPolicyMiddleware({
+              mode: 'pairing',
+              storePath: tempStorePath,
+              pairingExpiresMs: val,
+            }),
+          `Expected pairingExpiresMs=${String(val)} to throw at creation time`
+        ).toThrow(new RegExp(`Invalid pairingExpiresMs: ${String(val)}`));
+
+        expect(
+          () =>
+            dmPolicy({
+              mode: 'pairing',
+              storePath: tempStorePath,
+              pairingExpiresMs: val,
+            }),
+          `Expected dmPolicy({ pairingExpiresMs: ${String(val)} }) to throw at creation time`
+        ).toThrow(new RegExp(`Invalid pairingExpiresMs: ${String(val)}`));
+      }
+    });
+
+    it('proves errors occur at construction rather than during message handling', async () => {
+      let mw: DmPolicyMiddleware | undefined;
+      expect(() => {
+        mw = new DmPolicyMiddleware({
+          mode: 'pairing',
+          storePath: tempStorePath,
+          pairingExpiresMs: 0,
+        });
+      }).toThrow(/Invalid pairingExpiresMs: 0/);
+      expect(mw).toBeUndefined();
+
+      expect(() => {
+        mw = new DmPolicyMiddleware({
+          mode: 'pairing',
+          storePath: tempStorePath,
+          pairingExpiresMs: -500,
+        });
+      }).toThrow(/Invalid pairingExpiresMs: -500/);
+      expect(mw).toBeUndefined();
     });
   });
 });

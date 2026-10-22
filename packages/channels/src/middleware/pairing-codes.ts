@@ -1,6 +1,6 @@
 import { customAlphabet } from 'nanoid';
 
-const PAIRING_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+export const PAIRING_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 export interface PendingPairing {
   code: string;
