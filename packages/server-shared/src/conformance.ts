@@ -3,6 +3,7 @@ import type { MemoryQueryOptions, ResumeOptions, RunOptions, RunResult } from '@
 import type { AnonymousPolicy, RunLimits } from './contract.js';
 import type { StreamEvent } from './protocol.js';
 import { toAgentRunResponse } from './response.js';
+import { StreamEventSchema } from './stream-schemas.js';
 import type { ContextPolicy, ThreadMessageRole } from './validation.js';
 
 /**
@@ -39,6 +40,7 @@ export const CONFORMANCE_ROUTES = {
   agentRun: `/agents/${CONFORMANCE_NAMES.agent}/run`,
   agentStream: `/agents/${CONFORMANCE_NAMES.agent}/stream`,
   agentResume: `/agents/${CONFORMANCE_NAMES.agent}/resume`,
+  agentResumeStream: `/agents/${CONFORMANCE_NAMES.agent}/resume/stream`,
   swarmRun: `/swarms/${CONFORMANCE_NAMES.swarm}/run`,
   workflowRun: `/workflows/${CONFORMANCE_NAMES.workflow}/run`,
   threadMessages: `/threads/${CONFORMANCE_NAMES.thread}/messages`,
@@ -94,8 +96,13 @@ export interface ConformanceCase {
     runOptions?: Readonly<Record<string, unknown>>;
     /** The JSON answer must be exactly `toAgentRunResponse()` of what the runtime returned */
     runResponse?: true;
-    /** The stream must announce the run's thread in `start` and `finish`, this one when set */
+    /**
+     * The stream must announce the run's thread in `start` and `finish`, this one when set, and
+     * end with a `finish` event that says how the run ended
+     */
     streamThread?: string | true;
+    /** The stream must end with an `error` event of this code */
+    streamError?: string;
     /** Messages the request adds to memory */
     memoryWrites?: number;
     /** The exact JSON answer */
@@ -200,6 +207,51 @@ export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
     route: 'agentResume',
     body: run({ threadId: '  ' }),
     expect: { status: 400, code: 'INVALID_INPUT' },
+  },
+  {
+    name: 'resumes a paused run as a stream on its thread, with the decisions',
+    route: 'agentResumeStream',
+    body: run({
+      threadId: CONFORMANCE_NAMES.thread,
+      decisions: { call_2: { approved: false, reason: 'too much' } },
+      defaultDecision: { approved: true },
+    }),
+    expect: {
+      status: 200,
+      streamThread: CONFORMANCE_NAMES.thread,
+      runOptions: {
+        stream: true,
+        decisions: { call_2: { approved: false, reason: 'too much' } },
+        defaultDecision: { approved: true },
+      },
+    },
+  },
+  {
+    name: 'refuses a whitespace resume stream threadId',
+    route: 'agentResumeStream',
+    body: run({ threadId: '  ' }),
+    expect: { status: 400, code: 'INVALID_INPUT' },
+  },
+  {
+    name: 'refuses a resume stream body sent as text/plain',
+    route: 'agentResumeStream',
+    body: run({ threadId: CONFORMANCE_NAMES.thread }),
+    contentType: 'text/plain',
+    expect: { status: 415, code: 'UNSUPPORTED_MEDIA_TYPE' },
+  },
+  {
+    name: 'ends a resume stream of a thread with no paused run with its error',
+    route: 'agentResumeStream',
+    runtime: { fail: { code: ErrorCode.RUN_NOT_PAUSED, message: 'Thread has no paused run' } },
+    body: run({ threadId: CONFORMANCE_NAMES.thread }),
+    expect: { status: 200, runs: 1, streamError: 'RUN_NOT_PAUSED' },
+  },
+  {
+    name: 'refuses a resume stream on a thread the server keeps the caller from, before it streams',
+    route: 'agentResumeStream',
+    server: { forbiddenThreads: [CONFORMANCE_NAMES.thread] },
+    body: run({ threadId: CONFORMANCE_NAMES.thread }),
+    expect: { status: 403, code: 'THREAD_FORBIDDEN' },
   },
   {
     name: 'refuses a stream body sent as text/plain',
@@ -381,6 +433,38 @@ export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
     body: run({ input: 'hi' }),
     expect: { status: 200, runOptions: { deps: { tenant: 'acme' } } },
   },
+  {
+    name: 'hands a resume stream the dependencies the server builds for the request',
+    route: 'agentResumeStream',
+    server: { deps: { tenant: 'acme' } },
+    body: run({ threadId: CONFORMANCE_NAMES.thread }),
+    expect: {
+      status: 200,
+      streamThread: CONFORMANCE_NAMES.thread,
+      runOptions: { deps: { tenant: 'acme' } },
+    },
+  },
+  ...(['agentStream', 'agentResumeStream'] as const).flatMap((route): ConformanceCase[] => {
+    const body =
+      route === 'agentStream' ? run({ input: 'hi' }) : run({ threadId: CONFORMANCE_NAMES.thread });
+    const label = route === 'agentStream' ? 'a stream' : 'a resume stream';
+    return [
+      {
+        name: `ends ${label} that failed unexpectedly without telling what it was`,
+        route,
+        runtime: { crash: 'database password is hunter2' },
+        body,
+        expect: { status: 200, runs: 1, streamError: 'INTERNAL_ERROR', hides: 'hunter2' },
+      },
+      {
+        name: `refuses ${label} from a caller without identity where the server denies anonymous callers`,
+        route,
+        server: { anonymous: 'deny' },
+        body,
+        expect: { status: 401, code: 'UNAUTHORIZED' },
+      },
+    ];
+  }),
 ];
 
 /** The method a case sends */
@@ -522,23 +606,17 @@ export class ConformanceRuntime {
     this.runs.push(options);
     const failure = this.failure();
     if (failure) return Promise.reject(failure);
-    if (options.stream) {
-      options.onReasoning?.('thinking');
-      options.onToken?.('Hel');
-      options.onToken?.('lo');
-      options.onToolCall?.({ id: 'call_1', name: 'lookup', arguments: { query: 'order 42' } });
-      options.onToolResult?.({ callId: 'call_1', name: 'lookup', result: { found: true } });
-      options.onToken?.(' again');
-    }
+    if (options.stream) streamParts(options);
     return Promise.resolve(
       this.record(conformanceRunResult(options.threadId ?? CONFORMANCE_GENERATED_THREAD))
     );
   }
 
   resume(_agent: unknown, threadId: string, options: ResumeOptions): Promise<RunResult> {
-    this.runs.push(options);
+    this.runs.push({ ...options, threadId });
     const failure = this.failure();
     if (failure) return Promise.reject(failure);
+    if (options.stream) streamParts(options);
     return Promise.resolve(this.record(conformancePausedResult(threadId)));
   }
 
@@ -593,6 +671,21 @@ export interface ConformanceResponse {
   body: string;
   /** The answer's headers, names in lower case, for the cases that check them */
   headers?: Readonly<Record<string, string>>;
+}
+
+/**
+ * What the conformance runtime streams: a reasoning part, text, a tool call and its result, and
+ * a call of a tool that returned nothing
+ */
+function streamParts(options: RunOptions | ResumeOptions): void {
+  options.onReasoning?.('thinking');
+  options.onToken?.('Hel');
+  options.onToken?.('lo');
+  options.onToolCall?.({ id: 'call_1', name: 'lookup', arguments: { query: 'order 42' } });
+  options.onToolResult?.({ callId: 'call_1', name: 'lookup', result: { found: true } });
+  options.onToolCall?.({ id: 'call_3', name: 'notify', arguments: {} });
+  options.onToolResult?.({ callId: 'call_3', name: 'notify', result: undefined });
+  options.onToken?.(' again');
 }
 
 /** How {@link checkConformance} reads an adapter's answers */
@@ -698,8 +791,23 @@ export function checkConformance(
     fail(`answer ${response.body}, expected ${JSON.stringify(expect.json)}`);
   }
 
+  if (response.status === 200 && testCase.route.endsWith('Stream')) {
+    problems.push(...checkStreamEvents(response.body));
+  }
+
   if (expect.streamThread !== undefined) {
-    problems.push(...checkStreamThread(response.body, expect.streamThread, options.threadId));
+    problems.push(
+      ...checkStreamThread(response.body, expect.streamThread, options.threadId, runtime)
+    );
+  }
+
+  if (expect.streamError !== undefined) {
+    const last = parseSseEvents(response.body).at(-1);
+    if (last?.type !== 'error' || last.code !== expect.streamError) {
+      fail(
+        `the stream ended with ${JSON.stringify(last)}, expected an ${expect.streamError} error`
+      );
+    }
   }
 
   if (expect.memoryWrites !== undefined && runtime.memoryWrites.length !== expect.memoryWrites) {
@@ -729,7 +837,30 @@ export function checkConformance(
   return problems;
 }
 
-function checkStreamThread(body: string, expected: string | true, runThread: unknown): string[] {
+/** Every event of a stream must match its schema, and nothing may follow `finish` or `error` */
+function checkStreamEvents(body: string): string[] {
+  const events = parseSseEvents(body);
+  const problems: string[] = [];
+  events.forEach((event, at) => {
+    const parsed = StreamEventSchema.safeParse(event);
+    if (!parsed.success) {
+      problems.push(
+        `event ${at} ${JSON.stringify(event)} breaks its schema: ${parsed.error.message}`
+      );
+    }
+  });
+  const end = events.findIndex((event) => event.type === 'finish' || event.type === 'error');
+  if (end === -1) problems.push('the stream ends without a finish or error event');
+  else if (end !== events.length - 1) problems.push(`events follow the ${events[end]?.type} event`);
+  return problems;
+}
+
+function checkStreamThread(
+  body: string,
+  expected: string | true,
+  runThread: unknown,
+  runtime: ConformanceRuntime
+): string[] {
   const events = parseSseEvents(body);
   const start = events.find((event) => event.type === 'start');
   const finish = events.find((event) => event.type === 'finish');
@@ -750,8 +881,21 @@ function checkStreamThread(body: string, expected: string | true, runThread: unk
   if (toolStart !== -1 && (textEnd === -1 || textEnd > toolStart)) {
     problems.push('the tool call started inside an open text part');
   }
-  if (finish?.status !== 'completed' || finish.truncated !== true) {
+  const result = runtime.results.at(-1);
+  const outcome = result && toAgentRunResponse(result);
+  if (
+    !outcome ||
+    finish?.status !== outcome.status ||
+    finish.truncated !== outcome.truncated ||
+    !sameJson(finish.pendingApprovals, outcome.pendingApprovals)
+  ) {
     problems.push('the finish event does not say how the run ended');
+  }
+  if (outcome?.status === 'paused') {
+    const approval = events.find((event) => event.type === 'approval-required');
+    if (approval?.threadId !== outcome.threadId) {
+      problems.push('the paused run sent no approval-required event for its thread');
+    }
   }
   return problems;
 }

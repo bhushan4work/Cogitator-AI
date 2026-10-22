@@ -329,6 +329,8 @@ data: {"type":"finish","messageId":"msg_…","usage":{"inputTokens":12,"outputTo
 data: [DONE]
 ```
 
+Each event matches `StreamEventSchema` from `@cogitator-ai/server-shared`, which a client can parse events with (see [OpenAPI](#openapi) for the event schemas in the document).
+
 `start` names the run's thread: the `threadId` of the request, or the thread the controller opened for it, so a client that sent none continues the conversation with this one even if the stream breaks. `finish` repeats it with `status` and the other outcome fields of the JSON answer.
 
 An agent with `reasoning: { summary: true }` also streams its reasoning summary as `reasoning-start`, `reasoning-delta` and `reasoning-end` events. A text or reasoning part opens with its first delta and is closed before a part of the other kind, a tool call or `finish`, so parts never overlap and text after a tool call starts a new part. An answer the model gave in one piece arrives as one text part before `finish`, and a resumed run that pauses again sends `approval-required` before `finish`. `POST /agents/:name/run` returns the summary as `reasoning`, and `usage` gains `reasoningTokens`, `cachedInputTokens` and `cacheWriteTokens` when the provider reports them. The `finish` event of an agent stream carries the same `usage` as the JSON answer, these counts included.
@@ -376,7 +378,16 @@ shutdown = onShutdownSignals(server);
 
 ## OpenAPI
 
-Request and response schemas are Zod, so `docs()` and `openapi()` from `@tetsujs/openapi` describe every route, the run failures a `CogitatorError` can produce, the thread page query, the `limits` as field defaults, and the schemes of a `secured()` caller hook. SSE and WebSocket endpoints are documented by their description only, since OpenAPI cannot describe what follows the headers.
+Request and response schemas are Zod, so `docs()` and `openapi()` from `@tetsujs/openapi` describe every route, the run failures a `CogitatorError` can produce, the thread page query, the `limits` as field defaults, and the schemes of a `secured()` caller hook. `@tetsujs/openapi` has no way yet to give a route a `text/event-stream` body, so the SSE endpoints come out with a description and no body schema, and the WebSocket endpoint with its description only. To have the stream events in the document, build it with `openapi()` and pass it through `documentStreamEvents` from `@cogitator-ai/server-shared`, which adds the `StreamEvent` components and gives every `/stream` route that body:
+
+```ts
+import { openapi } from '@tetsujs/openapi';
+import { documentStreamEvents } from '@cogitator-ai/server-shared';
+
+const document = documentStreamEvents(openapi(app, { info }).document);
+```
+
+`docs()` builds its document itself and takes no transform, so the document it serves leaves the stream bodies out.
 
 The request and response schemas (`RunBody`, `ResumeBody`, `AgentRunResponse`, `SocketMessage`, …) and their TypeScript types (`AgentRunRequest`, `AgentRunResponseBody`, `WebSocketClientMessage`, …) are exported for clients and your own routes, along with `ThreadQuery`, the error helpers `cogitatorErrorResponse()`, `cogitatorErrorStatus()` and `describeError()`, and the `RunLimits` and `AnonymousPolicy` types.
 
