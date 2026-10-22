@@ -17,7 +17,14 @@ export class RateLimitMiddleware implements GatewayMiddleware {
   private readonly buckets = new Map<string, UserBucket>();
   private lastSweep = 0;
 
-  constructor(private readonly config: RateLimitConfig) {}
+  constructor(private readonly config: RateLimitConfig) {
+    const maxPerMinute = config?.maxPerMinute;
+    if (!Number.isInteger(maxPerMinute) || (maxPerMinute as number) <= 0) {
+      throw new Error(
+        `Invalid maxPerMinute: ${String(maxPerMinute)}. Expected a positive integer.`
+      );
+    }
+  }
 
   async handle(
     msg: ChannelMessage,

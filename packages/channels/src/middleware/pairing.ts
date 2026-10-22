@@ -23,6 +23,14 @@ export class PairingMiddleware implements GatewayMiddleware {
   private readonly expiresIn: number;
 
   constructor(config: PairingConfig) {
+    if (
+      config.codeLength !== undefined &&
+      (!Number.isInteger(config.codeLength) || config.codeLength <= 0)
+    ) {
+      throw new Error(
+        `Invalid codeLength: ${String(config.codeLength)}. Expected a positive integer.`
+      );
+    }
     this.codeLength = config.codeLength ?? 6;
     this.expiresIn = (config.expiresIn ?? 300) * 1000;
 

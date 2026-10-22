@@ -52,6 +52,14 @@ export class DmPolicyMiddleware implements GatewayMiddleware {
   private readonly onStoreError?: (error: Error) => void;
 
   constructor(config: DmPolicyConfig) {
+    if (
+      config.pairingCodeLength !== undefined &&
+      (!Number.isInteger(config.pairingCodeLength) || config.pairingCodeLength <= 0)
+    ) {
+      throw new Error(
+        `Invalid pairingCodeLength: ${String(config.pairingCodeLength)}. Expected a positive integer.`
+      );
+    }
     this.mode = config.mode;
     this.storePath = config.storePath ? expandHome(config.storePath) : DEFAULT_STORE_PATH;
     this.codeLength = config.pairingCodeLength ?? DEFAULT_PAIRING_CODE_LENGTH;

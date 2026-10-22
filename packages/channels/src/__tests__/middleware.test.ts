@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { PairingMiddleware } from '../middleware/pairing';
-import { RateLimitMiddleware } from '../middleware/rate-limit';
+import { PairingMiddleware, pairing } from '../middleware/pairing';
+import { RateLimitMiddleware, rateLimit } from '../middleware/rate-limit';
 import type { ChannelMessage, MiddlewareContext, Channel } from '@cogitator-ai/types';
 
 function createMsg(overrides: Partial<ChannelMessage> = {}): ChannelMessage {
@@ -97,6 +97,62 @@ describe('PairingMiddleware', () => {
 
     expect(ctx.channel.sendText).toHaveBeenCalledWith('ch_1', 'Invalid or expired pairing code.');
   });
+
+  describe('constructor validation', () => {
+    it('accepts valid codeLength and preserves default behavior when omitted', () => {
+      const mwDefault = new PairingMiddleware({
+        ownerIds: { telegram: 'owner_1' },
+      });
+      expect(mwDefault).toBeDefined();
+
+      const mwValid = new PairingMiddleware({
+        ownerIds: { telegram: 'owner_1' },
+        codeLength: 8,
+      });
+      expect(mwValid).toBeDefined();
+
+      const mwFactory = pairing({
+        ownerIds: { telegram: 'owner_1' },
+        codeLength: 10,
+      });
+      expect(mwFactory).toBeDefined();
+    });
+
+    it('rejects invalid codeLength values at middleware creation time', () => {
+      const invalidValues = [
+        0,
+        -1,
+        -10,
+        NaN,
+        3.5,
+        0.5,
+        '8' as any,
+        null as any,
+        Infinity,
+        -Infinity,
+      ];
+
+      for (const val of invalidValues) {
+        expect(
+          () => new PairingMiddleware({ ownerIds: { telegram: 'owner_1' }, codeLength: val }),
+          `Expected codeLength=${String(val)} to throw at creation time`
+        ).toThrow(new RegExp(`Invalid codeLength: ${String(val)}`));
+
+        expect(
+          () => pairing({ ownerIds: { telegram: 'owner_1' }, codeLength: val }),
+          `Expected pairing({ codeLength: ${String(val)} }) to throw at creation time`
+        ).toThrow(new RegExp(`Invalid codeLength: ${String(val)}`));
+      }
+    });
+
+    it('proves errors occur at construction rather than during message handling', async () => {
+      let mw: PairingMiddleware | undefined;
+      expect(() => {
+        mw = new PairingMiddleware({ ownerIds: { telegram: 'owner_1' }, codeLength: 0 });
+      }).toThrow(/Invalid codeLength: 0/);
+      expect(mw).toBeUndefined();
+    });
+  });
 });
 
 describe('RateLimitMiddleware', () => {
@@ -135,5 +191,68 @@ describe('RateLimitMiddleware', () => {
     await mw.handle(createMsg(), ctx, vi.fn());
 
     expect(ctx.channel.sendText).toHaveBeenCalledWith('ch_1', 'Slow down!');
+  });
+
+  describe('constructor validation', () => {
+    it('accepts valid maxPerMinute positive integers', () => {
+      const mwValid = new RateLimitMiddleware({ maxPerMinute: 60 });
+      expect(mwValid).toBeDefined();
+
+      const mwFactory = rateLimit({ maxPerMinute: 10 });
+      expect(mwFactory).toBeDefined();
+    });
+
+    it('rejects invalid maxPerMinute values at middleware creation time', () => {
+      const invalidValues = [
+        0,
+        -1,
+        -10,
+        undefined as any,
+        NaN,
+        2.5,
+        0.5,
+        '10' as any,
+        null as any,
+        Infinity,
+        -Infinity,
+      ];
+
+      for (const val of invalidValues) {
+        expect(
+          () => new RateLimitMiddleware({ maxPerMinute: val }),
+          `Expected maxPerMinute=${String(val)} to throw at creation time`
+        ).toThrow(new RegExp(`Invalid maxPerMinute: ${String(val)}`));
+
+        expect(
+          () => rateLimit({ maxPerMinute: val }),
+          `Expected rateLimit({ maxPerMinute: ${String(val)} }) to throw at creation time`
+        ).toThrow(new RegExp(`Invalid maxPerMinute: ${String(val)}`));
+      }
+
+      expect(() => new RateLimitMiddleware({} as any)).toThrow(
+        /Invalid maxPerMinute: undefined/
+      );
+      expect(() => rateLimit({} as any)).toThrow(
+        /Invalid maxPerMinute: undefined/
+      );
+    });
+
+    it('proves errors occur at construction rather than during message handling', async () => {
+      let mw: RateLimitMiddleware | undefined;
+      expect(() => {
+        mw = new RateLimitMiddleware({ maxPerMinute: 0 });
+      }).toThrow(/Invalid maxPerMinute: 0/);
+      expect(mw).toBeUndefined();
+
+      expect(() => {
+        mw = new RateLimitMiddleware({ maxPerMinute: -5 });
+      }).toThrow(/Invalid maxPerMinute: -5/);
+      expect(mw).toBeUndefined();
+
+      expect(() => {
+        mw = new RateLimitMiddleware({} as any);
+      }).toThrow(/Invalid maxPerMinute: undefined/);
+      expect(mw).toBeUndefined();
+    });
   });
 });
