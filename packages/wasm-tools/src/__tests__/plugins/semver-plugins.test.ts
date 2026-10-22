@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { runPlugin, pluginCall } from '../helpers/run-plugin';
 
 interface SemverOutput {
-  result?: number | boolean | string;
   error?: string;
 
   // parse
@@ -113,6 +112,30 @@ describe('semver plugin: parse', () => {
     expect(res.output.error).toContain('Invalid Semantic Version');
   });
 
+  it.each(['9007199254740991.0.0', '0.9007199254740991.0', '0.0.9007199254740991'])(
+    'accepts components at Number.MAX_SAFE_INTEGER: %s',
+    (version) => {
+      const res = semver({ operation: 'parse', version });
+      expect(res.error).toBeUndefined();
+    }
+  );
+
+  it.each([
+    '9007199254740992.0.0',
+    '9007199254740993.0.0',
+    '0.9007199254740992.0',
+    '0.0.9007199254740992',
+    '999999999999999999.0.0',
+  ])('rejects unsafe component without precision loss: %s', (version) => {
+    const res = runPlugin<SemverOutput>('semver', 'semver', {
+      operation: 'parse',
+      version,
+    });
+    expect(res.code).toBe(1);
+    expect(res.output.error).toBeDefined();
+    expect(res.output.error).toContain('Invalid Semantic Version');
+  });
+
   it('returns error when version is missing for parse', () => {
     const res = runPlugin<SemverOutput>('semver', 'semver', {
       operation: 'parse',
@@ -129,26 +152,38 @@ describe('semver plugin: compare', () => {
       version: '1.2.3',
       version2: '1.2.3',
     });
-    expect(res.result).toBe(0);
+    expect(res.comparison).toBe(0);
     expect(res.comparison).toBe(0);
   });
 
   it('correctly compares major, minor, patch precedence numerically', () => {
-    expect(semver({ operation: 'compare', version: '1.0.0', version2: '2.0.0' }).result).toBe(-1);
-    expect(semver({ operation: 'compare', version: '2.0.0', version2: '1.0.0' }).result).toBe(1);
-    expect(semver({ operation: 'compare', version: '1.1.0', version2: '1.2.0' }).result).toBe(-1);
-    expect(semver({ operation: 'compare', version: '1.2.0', version2: '1.1.0' }).result).toBe(1);
-    expect(semver({ operation: 'compare', version: '1.1.1', version2: '1.1.2' }).result).toBe(-1);
-    expect(semver({ operation: 'compare', version: '1.1.2', version2: '1.1.1' }).result).toBe(1);
+    expect(semver({ operation: 'compare', version: '1.0.0', version2: '2.0.0' }).comparison).toBe(
+      -1
+    );
+    expect(semver({ operation: 'compare', version: '2.0.0', version2: '1.0.0' }).comparison).toBe(
+      1
+    );
+    expect(semver({ operation: 'compare', version: '1.1.0', version2: '1.2.0' }).comparison).toBe(
+      -1
+    );
+    expect(semver({ operation: 'compare', version: '1.2.0', version2: '1.1.0' }).comparison).toBe(
+      1
+    );
+    expect(semver({ operation: 'compare', version: '1.1.1', version2: '1.1.2' }).comparison).toBe(
+      -1
+    );
+    expect(semver({ operation: 'compare', version: '1.1.2', version2: '1.1.1' }).comparison).toBe(
+      1
+    );
   });
 
   it('prerelease has lower precedence than normal version', () => {
-    expect(semver({ operation: 'compare', version: '1.0.0-alpha', version2: '1.0.0' }).result).toBe(
-      -1
-    );
-    expect(semver({ operation: 'compare', version: '1.0.0', version2: '1.0.0-alpha' }).result).toBe(
-      1
-    );
+    expect(
+      semver({ operation: 'compare', version: '1.0.0-alpha', version2: '1.0.0' }).comparison
+    ).toBe(-1);
+    expect(
+      semver({ operation: 'compare', version: '1.0.0', version2: '1.0.0-alpha' }).comparison
+    ).toBe(1);
   });
 
   it('implements SemVer section 11 precedence sequence', () => {
@@ -167,39 +202,40 @@ describe('semver plugin: compare', () => {
       const v1 = seq[i];
       const v2 = seq[i + 1];
       const res = semver({ operation: 'compare', version: v1, version2: v2 });
-      expect(res.result).toBe(-1);
+      expect(res.comparison).toBe(-1);
       const rev = semver({ operation: 'compare', version: v2, version2: v1 });
-      expect(rev.result).toBe(1);
+      expect(rev.comparison).toBe(1);
     }
   });
 
   it('ignores build metadata in precedence comparison', () => {
     expect(
-      semver({ operation: 'compare', version: '1.0.0+build.1', version2: '1.0.0+build.2' }).result
+      semver({ operation: 'compare', version: '1.0.0+build.1', version2: '1.0.0+build.2' })
+        .comparison
     ).toBe(0);
     expect(
       semver({
         operation: 'compare',
         version: '1.0.0-alpha+001',
         version2: '1.0.0-alpha+002',
-      }).result
+      }).comparison
     ).toBe(0);
     expect(
       semver({
         operation: 'compare',
         version: '1.0.0+20130313144700',
         version2: '1.0.0',
-      }).result
+      }).comparison
     ).toBe(0);
   });
 
-  it('supports other as alias for version2', () => {
+  it('requires version2 instead of the removed other alias', () => {
     const res = semver({
       operation: 'compare',
       version: '1.0.0',
       other: '2.0.0',
     });
-    expect(res.result).toBe(-1);
+    expect(res.error).toBeDefined();
   });
 
   it('returns error for malformed input in compare', () => {

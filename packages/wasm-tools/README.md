@@ -445,13 +445,13 @@ const semver = createSemverTool({ timeout: 5000 });
 // → { major: 1, minor: 2, patch: 3, prerelease: ["alpha", 1], build: ["build"], version: "1.2.3-alpha.1+build" }
 
 // Compare: { operation: "compare", version: "1.0.0-alpha", version2: "1.0.0" }
-// → { result: -1, comparison: -1 }
+// → { comparison: -1 }
 
 // Satisfies: { operation: "satisfies", version: "1.2.3", range: "^1.0.0" }
-// → { satisfies: true, result: true }
+// → { satisfies: true }
 
 // Bump: { operation: "bump", version: "1.2.3", release: "minor" }
-// → { version: "1.3.0", result: "1.3.0" }
+// → { version: "1.3.0" }
 ```
 
 Implements SemVer 2.0.0 precedence rules (build metadata ignored in comparison), range satisfaction supporting `^`, `~`, relational operators (`>=`, `<=`, `>`, `<`, `=`), wildcards (`x`, `X`, `*`), and `||` unions with prerelease isolation, and deterministic version bumping.

@@ -3,7 +3,6 @@ interface SemverInput {
   version?: string;
   version1?: string;
   version2?: string;
-  other?: string;
   range?: string;
   release?: 'major' | 'minor' | 'patch' | 'prerelease';
   type?: 'major' | 'minor' | 'patch' | 'prerelease';
@@ -12,7 +11,6 @@ interface SemverInput {
 }
 
 interface SemverOutput {
-  result?: number | boolean | string;
   error?: string;
 
   // parse
@@ -71,6 +69,17 @@ function parseSemver(str: unknown): ParsedSemver {
   const major = parseInt(match[1], 10);
   const minor = parseInt(match[2], 10);
   const patch = parseInt(match[3], 10);
+
+  if (
+    !Number.isSafeInteger(major) ||
+    !Number.isSafeInteger(minor) ||
+    !Number.isSafeInteger(patch)
+  ) {
+    throw new Error(
+      `Invalid Semantic Version: ${str} (major, minor and patch must not exceed Number.MAX_SAFE_INTEGER)`
+    );
+  }
+
   const prereleaseStr = match[4];
   const buildStr = match[5];
 
@@ -562,14 +571,13 @@ export function semver(): number {
           buildMetadata: parsed.build,
           metadata: parsed.build,
           version: parsed.version,
-          result: parsed.version,
         };
         Host.outputString(JSON.stringify(output));
         return 0;
       }
 
       case 'compare': {
-        const v2Str = input.version2 ?? input.other;
+        const v2Str = input.version2;
         if (version === undefined || v2Str === undefined) {
           throw new Error('compare operation requires version and version2');
         }
@@ -577,7 +585,6 @@ export function semver(): number {
         const v2 = parseSemver(v2Str);
         const cmp = compareSemver(v1, v2);
         const output: SemverOutput = {
-          result: cmp,
           comparison: cmp,
         };
         Host.outputString(JSON.stringify(output));
@@ -591,7 +598,6 @@ export function semver(): number {
         const res = satisfiesRange(version, input.range);
         const output: SemverOutput = {
           satisfies: res,
-          result: res,
         };
         Host.outputString(JSON.stringify(output));
         return 0;
@@ -606,7 +612,6 @@ export function semver(): number {
         const bumped = bumpVersion(version, release, id);
         const output: SemverOutput = {
           version: bumped,
-          result: bumped,
         };
         Host.outputString(JSON.stringify(output));
         return 0;

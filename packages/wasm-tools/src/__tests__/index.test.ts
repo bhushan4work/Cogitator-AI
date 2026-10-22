@@ -535,6 +535,7 @@ describe('schema validation', () => {
         release: 'minor',
       }).success
     ).toBe(true);
+    expect('other' in semverToolSchema.shape).toBe(false);
     expect(semverToolSchema.safeParse({ operation: 'invalid' }).success).toBe(false);
   });
 });

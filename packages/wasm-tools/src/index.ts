@@ -353,10 +353,6 @@ export const semverToolSchema = z.object({
     .optional()
     .describe('Semantic version string to parse, compare, test, or bump'),
   version2: z.string().optional().describe('Second semantic version string for compare operation'),
-  other: z
-    .string()
-    .optional()
-    .describe('Alternative name for second semantic version in compare operation'),
   range: z
     .string()
     .optional()
