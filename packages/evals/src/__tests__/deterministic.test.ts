@@ -6,6 +6,7 @@ import {
   containsAll,
   containsAny,
   similarity,
+  tokenF1,
   regex,
   jsonSchema,
 } from '../metrics/deterministic';
@@ -307,7 +308,7 @@ describe('similarity', () => {
   it('respects caseSensitive option', async () => {
     const metric = similarity({ caseSensitive: true });
     const diffCase = await metric(makeResult('Hello', 'hello'));
-    // Distance 1 (H vs h), max length 5 => score = 1 - 1/5 = 0.8
+
     expect(diffCase.score).toBe(0.8);
     expect(diffCase.details).toContain('distance: 1');
 
@@ -327,25 +328,22 @@ describe('similarity', () => {
   });
 
   it('accurately scores typos', async () => {
-    // Single-character typo: 1 deletion / insertion / substitution
     const singleTypo = await similarity()(makeResult('helo', 'hello'));
     expect(singleTypo.score).toBe(0.8);
     expect(singleTypo.details).toContain('distance: 1');
 
-    // Multi-character edit: kitten -> sitting (sub k->s, sub e->i, add g: distance 3, maxLen 7)
     const multiTypo = await similarity()(makeResult('kitten', 'sitting'));
     expect(multiTypo.score).toBeCloseTo(1 - 3 / 7);
     expect(multiTypo.details).toContain('distance: 3');
   });
 
   it('scores 0 or near 0 for unrelated strings', async () => {
-    // Completely disjoint strings: distance = maxLen => score = 0
     const disjoint = await similarity()(makeResult('abc', 'xyz'));
     expect(disjoint.score).toBe(0);
     expect(disjoint.details).toBe('expected "xyz", got "abc" (distance: 3)');
 
     const unrelated = await similarity()(makeResult('apple', 'banana'));
-    // apple vs banana: distance 5, maxLen 6 => score 1/6
+
     expect(unrelated.score).toBeCloseTo(1 / 6);
     expect(unrelated.details).toContain('distance: 5');
   });
@@ -366,27 +364,22 @@ describe('similarity', () => {
   });
 
   it('calculates score based on insertions, deletions, and substitutions', async () => {
-    // Substitution
     const sub = await similarity()(makeResult('cat', 'bat'));
     expect(sub.score).toBeCloseTo(2 / 3);
     expect(sub.details).toContain('distance: 1');
 
-    // Insertion
     const ins = await similarity()(makeResult('cat', 'cats'));
     expect(ins.score).toBe(0.75);
     expect(ins.details).toContain('distance: 1');
 
-    // Deletion
     const del = await similarity()(makeResult('cats', 'cat'));
     expect(del.score).toBe(0.75);
     expect(del.details).toContain('distance: 1');
 
-    // Empty output vs non-empty expected
     const emptyOutput = await similarity()(makeResult('', 'abc'));
     expect(emptyOutput.score).toBe(0);
     expect(emptyOutput.details).toContain('distance: 3');
 
-    // Non-empty output vs empty expected
     const emptyExpected = await similarity()(makeResult('abc', ''));
     expect(emptyExpected.score).toBe(0);
     expect(emptyExpected.details).toContain('distance: 3');
@@ -458,5 +451,207 @@ describe('similarity', () => {
 
   it('has metricName property defaulting to similarity', () => {
     expect(similarity().metricName).toBe('similarity');
+  });
+});
+
+describe('tokenF1', () => {
+  it('drops capitalized articles in case-sensitive mode too', async () => {
+    const score = await tokenF1({ caseSensitive: true })(makeResult('The cat sat', 'cat sat'));
+    expect(score).toEqual({ name: 'tokenF1', score: 1 });
+  });
+
+  it('scores 1 when output tokens match expected tokens identically', async () => {
+    const metric = tokenF1();
+    const score = await metric(makeResult('hello world', 'hello world'));
+    expect(score).toEqual({ name: 'tokenF1', score: 1 });
+    expect(score.details).toBeUndefined();
+  });
+
+  it('scores 1 for two empty strings without division by zero', async () => {
+    const score = await tokenF1()(makeResult('', ''));
+    expect(score).toEqual({ name: 'tokenF1', score: 1 });
+    expect(score.details).toBeUndefined();
+  });
+
+  it('scores 1 for whitespace-only strings', async () => {
+    const score = await tokenF1()(makeResult('   ', '  '));
+    expect(score).toEqual({ name: 'tokenF1', score: 1 });
+    expect(score.details).toBeUndefined();
+  });
+
+  it('scores 1 when both strings normalize to empty tokens due to punctuation', async () => {
+    const score = await tokenF1()(makeResult('!?', '...'));
+    expect(score).toEqual({ name: 'tokenF1', score: 1 });
+    expect(score.details).toBeUndefined();
+  });
+
+  it('scores 0 with details when expected is undefined', async () => {
+    const score = await tokenF1()(makeResult('hello'));
+    expect(score.score).toBe(0);
+    expect(score.details).toBe('no expected value provided');
+  });
+
+  it('scores 0 when output is empty and expected is non-empty', async () => {
+    const score = await tokenF1()(makeResult('', 'hello world'));
+    expect(score.score).toBe(0);
+    expect(score.details).toBe('expected "hello world", got "" (precision: 0, recall: 0)');
+  });
+
+  it('scores 0 when output is non-empty and expected is empty', async () => {
+    const score = await tokenF1()(makeResult('hello world', ''));
+    expect(score.score).toBe(0);
+    expect(score.details).toBe('expected "", got "hello world" (precision: 0, recall: 0)');
+  });
+
+  it('calculates partial matches correctly', async () => {
+    const score = await tokenF1()(makeResult('red car', 'red bike'));
+    expect(score.score).toBe(0.5);
+    expect(score.details).toBe('expected "red bike", got "red car" (precision: 0.5, recall: 0.5)');
+
+    const score2 = await tokenF1()(makeResult('the cat sat', 'cat sat down'));
+    expect(score2.score).toBeCloseTo(0.8);
+    expect(score2.details).toBe(
+      'expected "cat sat down", got "the cat sat" (precision: 1, recall: 0.67)'
+    );
+  });
+
+  it('handles duplicate tokens correctly using multiset counts', async () => {
+    const score1 = await tokenF1()(makeResult('apple apple apple', 'apple'));
+    expect(score1.score).toBe(0.5);
+    expect(score1.details).toBe(
+      'expected "apple", got "apple apple apple" (precision: 0.33, recall: 1)'
+    );
+
+    const score2 = await tokenF1()(makeResult('apple', 'apple apple'));
+    expect(score2.score).toBeCloseTo(2 / 3);
+    expect(score2.details).toBe('expected "apple apple", got "apple" (precision: 1, recall: 0.5)');
+
+    const score3 = await tokenF1()(makeResult('cat cat dog', 'cat dog dog'));
+    expect(score3.score).toBeCloseTo(2 / 3);
+    expect(score3.details).toBe(
+      'expected "cat dog dog", got "cat cat dog" (precision: 0.67, recall: 0.67)'
+    );
+  });
+
+  it('strips standalone articles a, an, and the when tokenizing', async () => {
+    const score1 = await tokenF1()(makeResult('the cat sat', 'cat sat down'));
+    expect(score1.score).toBeCloseTo(0.8);
+
+    const score2 = await tokenF1()(makeResult('a red bike', 'red bike'));
+    expect(score2.score).toBe(1);
+    expect(score2.details).toBeUndefined();
+
+    const score3 = await tokenF1()(makeResult('an apple', 'apple'));
+    expect(score3.score).toBe(1);
+    expect(score3.details).toBeUndefined();
+  });
+
+  it('is case-insensitive by default', async () => {
+    const score = await tokenF1()(makeResult('Hello World', 'hello world'));
+    expect(score.score).toBe(1);
+    expect(score.details).toBeUndefined();
+  });
+
+  it('respects caseSensitive option', async () => {
+    const metric = tokenF1({ caseSensitive: true });
+    const diffCase = await metric(makeResult('Hello World', 'hello world'));
+    expect(diffCase.score).toBe(0);
+    expect(diffCase.details).toBe(
+      'expected "hello world", got "Hello World" (precision: 0, recall: 0)'
+    );
+
+    const sameCase = await metric(makeResult('Hello World', 'Hello World'));
+    expect(sameCase.score).toBe(1);
+    expect(sameCase.details).toBeUndefined();
+  });
+
+  it('strips punctuation when tokenizing', async () => {
+    const score = await tokenF1()(makeResult('Hello, World!', 'hello world'));
+    expect(score.score).toBe(1);
+    expect(score.details).toBeUndefined();
+
+    const score2 = await tokenF1()(makeResult('About 1,000 people', 'about 1000 people'));
+    expect(score2.score).toBe(1);
+    expect(score2.details).toBeUndefined();
+
+    const score3 = await tokenF1()(makeResult('the U.S.A.', 'the USA'));
+    expect(score3.score).toBe(1);
+    expect(score3.details).toBeUndefined();
+  });
+
+  it('scores 0 for completely disjoint tokens and includes precision and recall in details', async () => {
+    const score = await tokenF1()(makeResult('foo bar', 'baz qux'));
+    expect(score.score).toBe(0);
+    expect(score.details).toBe('expected "baz qux", got "foo bar" (precision: 0, recall: 0)');
+  });
+
+  it('includes precision and recall in details whenever score is below 1', async () => {
+    const score = await tokenF1()(makeResult('alpha beta', 'alpha gamma'));
+    expect(score.score).toBeLessThan(1);
+    expect(score.details).toBe(
+      'expected "alpha gamma", got "alpha beta" (precision: 0.5, recall: 0.5)'
+    );
+  });
+
+  it('passes threshold assertion when tokenF1 is at or above threshold', async () => {
+    const metric = tokenF1();
+    const scoreResult = await metric(makeResult('red car', 'red bike'));
+    expect(scoreResult.score).toBe(0.5);
+
+    const agg: Record<string, AggregatedMetric> = {
+      tokenF1: {
+        name: 'tokenF1',
+        mean: scoreResult.score,
+        median: scoreResult.score,
+        min: scoreResult.score,
+        max: scoreResult.score,
+        stdDev: 0,
+        p50: scoreResult.score,
+        p95: scoreResult.score,
+        p99: scoreResult.score,
+      },
+    };
+
+    const assertionResult = threshold('tokenF1', 0.5)(agg, { total: 1, duration: 10, cost: 0 });
+    expect(assertionResult.passed).toBe(true);
+    expect(assertionResult.actual).toBe(0.5);
+    expect(assertionResult.expected).toBe(0.5);
+  });
+
+  it('fails threshold assertion when tokenF1 is below threshold', async () => {
+    const metric = tokenF1();
+    const scoreResult = await metric(makeResult('red car', 'red bike'));
+    expect(scoreResult.score).toBe(0.5);
+
+    const agg: Record<string, AggregatedMetric> = {
+      tokenF1: {
+        name: 'tokenF1',
+        mean: scoreResult.score,
+        median: scoreResult.score,
+        min: scoreResult.score,
+        max: scoreResult.score,
+        stdDev: 0,
+        p50: scoreResult.score,
+        p95: scoreResult.score,
+        p99: scoreResult.score,
+      },
+    };
+
+    const assertionResult = threshold('tokenF1', 0.8)(agg, { total: 1, duration: 10, cost: 0 });
+    expect(assertionResult.passed).toBe(false);
+    expect(assertionResult.actual).toBe(0.5);
+    expect(assertionResult.expected).toBe(0.8);
+  });
+
+  it('supports custom metric name', async () => {
+    const custom = tokenF1({ name: 'f1Score' });
+    expect(custom.metricName).toBe('f1Score');
+
+    const result = await custom(makeResult('hello', 'hello'));
+    expect(result.name).toBe('f1Score');
+  });
+
+  it('has metricName property defaulting to tokenF1', () => {
+    expect(tokenF1().metricName).toBe('tokenF1');
   });
 });

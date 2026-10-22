@@ -18,7 +18,7 @@ Website docs: [Evals](https://cogitator.app/docs/evals), [Datasets](https://cogi
 ## Features
 
 - **EvalSuite** — Run datasets against agents or plain functions with configurable concurrency, timeouts, and retries
-- **7 Deterministic Metrics** - exactMatch, contains, containsAll, containsAny, similarity, regex, jsonSchema (Zod)
+- **8 Deterministic Metrics** - exactMatch, contains, containsAll, containsAny, similarity, tokenF1, regex, jsonSchema (Zod)
 - **6 LLM-as-Judge Metrics** - faithfulness, relevance, coherence, helpfulness, contextRelevance, custom llmMetric
 - **4 Statistical Metrics** - latency, cost, tokenUsage with full percentile breakdowns, and passAtK over trials
 - **Custom Metrics** — `metric()` factory for anything domain-specific
@@ -176,6 +176,7 @@ Metrics that compare output against expected values using string operations or s
 | `containsAll` | Fraction of configured keywords found          | No                  |
 | `containsAny` | Whether any configured keyword is found        | No                  |
 | `similarity`  | Levenshtein distance similarity score (0 to 1) | Yes                 |
+| `tokenF1`     | Token-level F1 score (precision and recall)    | Yes                 |
 | `regex`       | Output matches a regex pattern                 | No                  |
 | `jsonSchema`  | Output is valid JSON matching a Zod schema     | No                  |
 
@@ -186,6 +187,7 @@ import {
   containsAll,
   containsAny,
   similarity,
+  tokenF1,
   regex,
   jsonSchema,
   threshold,
@@ -198,6 +200,7 @@ const metrics = [
   containsAll(['security', 'privacy', 'compliance']),
   containsAny(['approved', 'accepted']),
   similarity(),
+  tokenF1(),
   regex(/\d{4}-\d{2}-\d{2}/),
   jsonSchema(z.object({ answer: z.string(), confidence: z.number() })),
 ];
@@ -216,6 +219,8 @@ const metrics = [
 ```
 
 `containsAll()` scores the fraction of its keywords found and reports any missing keywords in `details`. `containsAny()` scores 1 when at least one keyword is found and 0 otherwise. Keywords use substring matching, so `cat` matches `concatenate`. Both metrics are case-insensitive by default, accept `caseSensitive` and `name` options, ignore duplicate keywords, and reject empty lists or empty and whitespace-only keywords when the metric is created.
+
+`tokenF1()` computes token overlap using multiset counts so duplicate tokens are handled correctly, returning the harmonic mean of precision and recall. It lowercases unless `caseSensitive: true`, strips punctuation, removes standalone articles (`a`, `an`, `the`), splits on whitespace, scores 1 for both empty strings, and reports precision and recall in `details` whenever the score is below 1.
 
 `regex()` ignores the `g` and `y` flags, which would make identical outputs alternate between pass and fail.
 
@@ -667,6 +672,7 @@ result.report('ci');
 | `containsAll`        | Deterministic | Fraction of keywords found                                         |
 | `containsAny`        | Deterministic | Any configured keyword found                                       |
 | `similarity`         | Deterministic | Levenshtein distance similarity score                              |
+| `tokenF1`            | Deterministic | Token-level F1 score                                               |
 | `regex`              | Deterministic | Regex pattern match                                                |
 | `jsonSchema`         | Deterministic | Zod schema validation                                              |
 | `faithfulness`       | LLM Judge     | Factual accuracy                                                   |

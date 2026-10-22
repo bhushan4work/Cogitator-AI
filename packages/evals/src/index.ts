@@ -35,6 +35,7 @@ export {
   containsAll,
   containsAny,
   similarity,
+  tokenF1,
   regex,
   jsonSchema,
 } from './metrics/deterministic';

@@ -82,11 +82,7 @@ function levenshteinDistance(s1: readonly string[], s2: readonly string[]): numb
     const char1 = s1[i - 1];
     for (let j = 1; j <= n; j++) {
       const cost = char1 === s2[j - 1] ? 0 : 1;
-      curr[j] = Math.min(
-        prev[j] + 1, // deletion
-        curr[j - 1] + 1, // insertion
-        prev[j - 1] + cost // substitution
-      );
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
     }
     const temp = prev;
     prev = curr;
@@ -128,6 +124,66 @@ export function similarity(opts?: MatchOptions): MetricFn {
       score,
       details:
         score < 1 ? `expected "${target}", got "${output}" (distance: ${distance})` : undefined,
+    };
+  }) as MetricFn);
+}
+
+function tokenize(text: string, caseSensitive: boolean): string[] {
+  const normalized = (caseSensitive ? text : text.toLowerCase())
+    .replace(/[!-/:-@[-`{-~]/g, '')
+    .replace(/\b(a|an|the)\b/gi, ' ');
+  return normalized.split(/\s+/).filter(Boolean);
+}
+
+function roundToTwo(value: number): number {
+  return Number(value.toFixed(2));
+}
+
+export function tokenF1(opts?: MatchOptions): MetricFn {
+  const caseSensitive = opts?.caseSensitive ?? false;
+  const name = opts?.name ?? 'tokenF1';
+
+  return createMetricFn(name, (async (result) => {
+    const expected = result.case.expected;
+    if (expected === undefined) {
+      return { name, score: 0, details: 'no expected value provided' };
+    }
+
+    const output = result.output.trim();
+    const target = expected.trim();
+
+    const actualTokens = tokenize(output, caseSensitive);
+    const expectedTokens = tokenize(target, caseSensitive);
+
+    if (actualTokens.length === 0 && expectedTokens.length === 0) {
+      return { name, score: 1 };
+    }
+
+    const counts = new Map<string, number>();
+    for (const token of expectedTokens) {
+      counts.set(token, (counts.get(token) ?? 0) + 1);
+    }
+
+    let overlap = 0;
+    for (const token of actualTokens) {
+      const left = counts.get(token) ?? 0;
+      if (left > 0) {
+        overlap++;
+        counts.set(token, left - 1);
+      }
+    }
+
+    const precision = actualTokens.length > 0 ? overlap / actualTokens.length : 0;
+    const recall = expectedTokens.length > 0 ? overlap / expectedTokens.length : 0;
+    const score = precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
+
+    return {
+      name,
+      score,
+      details:
+        score < 1
+          ? `expected "${target}", got "${output}" (precision: ${roundToTwo(precision)}, recall: ${roundToTwo(recall)})`
+          : undefined,
     };
   }) as MetricFn);
 }
