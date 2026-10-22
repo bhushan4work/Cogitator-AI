@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/browser",
-  "version": "0.4.40",
+  "version": "0.4.41",
   "description": "Browser automation tools for Cogitator AI agents",
   "keywords": [
     "cogitator",

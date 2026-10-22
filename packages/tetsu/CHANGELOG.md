@@ -1,5 +1,15 @@
 # @cogitator-ai/tetsu
 
+## 0.8.3
+
+### Patch Changes
+
+- Updated dependencies [[`c2abc6b`](https://github.com/cogitator-ai/Cogitator-AI/commit/c2abc6be10fb86aa696b324e3c170efd0e8f7899), [`c2abc6b`](https://github.com/cogitator-ai/Cogitator-AI/commit/c2abc6be10fb86aa696b324e3c170efd0e8f7899)]:
+  - @cogitator-ai/types@0.65.0
+  - @cogitator-ai/core@0.60.0
+  - @cogitator-ai/memory@0.25.1
+  - @cogitator-ai/server-shared@0.9.2
+
 ## 0.8.2
 
 ### Patch Changes
