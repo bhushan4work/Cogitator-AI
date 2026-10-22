@@ -1,5 +1,33 @@
 # @cogitator-ai/evals
 
+## 0.13.0
+
+### Minor Changes
+
+- [#264](https://github.com/cogitator-ai/Cogitator-AI/pull/264) [`c757489`](https://github.com/cogitator-ai/Cogitator-AI/commit/c75748968d50646a9ba1f78102f1692a25f05220) - Experiment tracking: named runs saved as versioned run files, a `RunStore`, `compareRuns()`, Markdown and HTML reports, and `reportComparison()`
+
+  Agent case results now keep the `traceId` of their run (`RunResult.trace.traceId`) and the versioned instructions it used in `prompt` (`{ key, versionId?, version?, abTest? }`, from `RunResult.prompt`). Each turn of a multi-turn case keeps its own and the case keeps the last turn's, each trial its own. The JSON report carries them.
+
+  `EvalSuite` takes `name` and JSON-serializable `metadata` describing the experiment. `EvalSuiteResult` gains `runId`, `startedAt`, `finishedAt`, `toRun()` and `saveRun()`, so hand-written mocks of it need them, and the JSON report gains a top-level `name` and `runId`. `result.saveRun(target)` writes a run file (`format: 'cogitator.eval-run'`, `version: 1`, `<runId>.json` in a directory target) with the dataset fingerprint (SHA-256 of the canonical JSON of the cases run), the configuration (metric names, judge model, temperature and samples, trials, concurrency, target kind, agent name and model, never functions, Cogitator instances or keys), the prompt versions used, every case result with a stable `caseKey`, the aggregates, assertions and stats. `result.toRun()` returns it without writing, `loadRun(path)` reads it back validated with Zod, and `RunStore` keeps runs in a directory with `save()`, `list()` (newest first, with metric means), `load(id)` and `latest(filter?)`. `list()` and `latest()` skip `.json` entries they cannot use, reporting each to the `onSkip` option (a process warning by default), while `load(id)` throws for them. Runs are validated before they are written, so a hand-made `runId` cannot lead outside the directory.
+
+  `compareRuns(base, head, { alpha?, test?, seed?, metrics? })` matches cases by `caseKey`, lists the cases only one run has in `added` and `removed`, and compares each metric both runs have with the statistics of `EvalComparison` (means, difference, bootstrap CI, effect size, p-value, Holm-adjusted p-value, significance and winner), plus the `improved` and `regressed` cases. `warnings` say when the dataset fingerprints, the prompt versions, the metrics or the judge differ. A metric no matched case was scored on is left out and named in `warnings`, so it does not weaken the Holm correction of the others.
+
+  `result.report()` takes two new types: `markdown`, a compact summary for pull request comments, and `html`, a self-contained page that reads well in light and dark color schemes. `reportComparison(comparison, 'markdown' | 'html' | 'console', { path? })` renders `compareRuns()` and `EvalComparison` results with the winner, a metric table, regressions, improvements and warnings, and `comparisonMarkdown()` and `comparisonHtml()` return the text. The statistics of `EvalComparison` moved into a module shared with `compareRuns()`, with no change to their results.
+
+## 0.12.0
+
+### Minor Changes
+
+- [#262](https://github.com/cogitator-ai/Cogitator-AI/pull/262) [`62113ba`](https://github.com/cogitator-ai/Cogitator-AI/commit/62113bac3519fc7101a32e5633f430660fe967b9) - Sturdier LLM judges and sounder A/B statistics: injection-safe prompts, sampling, rubrics, G-Eval, pairwise judging, judge calibration, Holm's correction, bootstrap intervals and effect sizes
+
+  Judge prompts now keep every untrusted value of a case (input, response, expected answer, context, retrieved passages, the turns of a conversation) inside XML-like tags such as `<input>` and `<response>`, with `<`, `>` and `&` escaped, and tell the judge that tag contents are data to evaluate, never instructions. An answer that tells the judge to give it full marks can no longer close its tag and speak as the rubric. This applies to every judge metric, and the cache key version is bumped, so verdicts cached by an earlier version miss once and are judged again.
+
+  `judge.samples` asks the judge several times per case and metric and scores the mean of the verdicts it could read, with their spread in `details`, each verdict in `metadata.samples` and the summed `usage`. Each sample has its own cache key. `llmMetric()` takes a discrete `rubric` (at least two levels with distinct scores) as an alternative to its free prompt: the judge picks a level, normalized to 0 - 1. The new `gEval({ name, criteria, steps?, scale? })` scores on a scale following evaluation steps, which the judge writes from the criteria once per metric instance when none are given. `calibrateJudge(metric, examples)` scores labelled examples and reports Pearson, Spearman, the mean absolute error and Cohen's kappa against the labels.
+
+  `EvalComparison` takes `pairwise: { criteria?, name? }`: the judge reads both answers of each case twice, swapped the second time, and `result.pairwise` reports wins, ties, the challenger's win rate and each verdict. Each metric comparison now reports `difference`, a seeded bootstrap `ci` of the paired differences, `effectSize` (Cohen's d), the `test` it ran and `adjustedPValue`, and `summary.latency` and `summary.cost` compare the two sides per case, lower being better, outside the vote on the winner. New options: `alpha` (0.05 by default), `test: 't' | 'wilcoxon'` and `seed`. The statistics are exported: `wilcoxonSignedRank`, `mcnemarExact`, `holm`, `bootstrapCI`, `cohensD`, `pearson` and `spearman`.
+
+  Behaviour changes: a metric of a comparison is now `significant` when its Holm-adjusted p-value across the compared metrics is below `alpha`, so a comparison of several metrics declares fewer winners than before, while `pValue` stays the test's own. Binary metrics with fewer than 25 discordant pairs take the exact McNemar test instead of the chi-square approximation. Judge prompts leave out the expected answer when a case has none instead of writing `N/A`, the judge's instructions changed, and `llmMetric()` now refuses an empty name or prompt. `pairedTTest` rounds the paired differences to 12 significant digits, so a constant difference with float noise counts as constant. `JudgeCogitator.run` may receive a `signal`, which pairwise judging passes so a cancelled comparison stops promptly.
+
 ## 0.11.0
 
 ### Minor Changes

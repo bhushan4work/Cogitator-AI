@@ -21,8 +21,26 @@ export type {
   EvalComparisonOptions,
   EvalComparisonRunOptions,
   MetricComparison,
+  ResourceComparison,
   ComparisonResult,
+  ComparisonTest,
+  ComparisonWinner,
 } from './eval-comparison';
+export type {
+  PairwiseOptions,
+  PairwiseResult,
+  PairwiseCase,
+  PairwiseVerdict,
+  PairwiseSide,
+  PairwiseOutcome,
+} from './pairwise';
+export { calibrateJudge } from './calibrate-judge';
+export type {
+  CalibrationExample,
+  CalibrateJudgeOptions,
+  CalibrationCase,
+  JudgeCalibration,
+} from './calibrate-judge';
 export { EvalBuilder } from './eval-builder';
 
 export { Dataset } from './datasets';
@@ -48,7 +66,22 @@ export {
   contextRelevance,
   bindJudgeContext,
 } from './metrics/llm-judge';
-export type { LLMMetricFn, JudgeContext, JudgeMessage } from './metrics/llm-judge';
+export type {
+  LLMMetricFn,
+  LLMMetricOptions,
+  PromptMetricOptions,
+  RubricMetricOptions,
+  RubricLevel,
+  JudgeContext,
+  JudgeMessage,
+  JudgeRunOptions,
+  JudgeFormat,
+  JudgeVerdict,
+  JudgeScore,
+  JudgeSetup,
+} from './metrics/llm-judge';
+export { gEval } from './metrics/g-eval';
+export type { GEvalOptions } from './metrics/g-eval';
 export {
   latency,
   cost,
@@ -80,6 +113,7 @@ export type {
   MetricUsage,
   MetricOptions,
   EvalCaseResult,
+  EvalPrompt,
   ScoredCaseResult,
   EvalToolCall,
   EvalToolResult,
@@ -98,11 +132,48 @@ export type { AssertionFn, AssertionResult, AggregatedMetric, EvalStats } from '
 
 export { report } from './reporters';
 export type { ReporterType, ReporterOptions, ReportedCase } from './reporters';
+export { reportComparison, comparisonMarkdown, comparisonHtml } from './reporters/comparison';
+export type { ReportableComparison, ComparisonReporterType } from './reporters/comparison';
+
+export {
+  loadRun,
+  caseKey,
+  RunStore,
+  compareRuns,
+  EvalRunSchema,
+  EVAL_RUN_FORMAT,
+  EVAL_RUN_VERSION,
+} from './runs';
+export type {
+  EvalRun,
+  EvalRunCase,
+  EvalRunConfig,
+  EvalRunSource,
+  JsonMetadata,
+  RunSummary,
+  RunFilter,
+  RunStoreOptions,
+  SkippedRunFile,
+  CompareRunsOptions,
+  RunComparison,
+  RunMetricComparison,
+  RunCaseChange,
+  RunCaseRef,
+  RunRef,
+  RunWinner,
+} from './runs';
 
 export { pairedTTest } from './stats/t-test';
 export type { TTestResult } from './stats/t-test';
-export { mcnemarsTest } from './stats/mcnemar';
-export type { McNemarResult } from './stats/mcnemar';
+export { mcnemarsTest, mcnemarExact } from './stats/mcnemar';
+export type { McNemarResult, McNemarExactResult } from './stats/mcnemar';
+export { wilcoxonSignedRank } from './stats/wilcoxon';
+export type { WilcoxonResult } from './stats/wilcoxon';
+export { bootstrapCI } from './stats/bootstrap';
+export type { BootstrapOptions, BootstrapInterval } from './stats/bootstrap';
+export { cohensD } from './stats/effect-size';
+export { holm } from './stats/holm';
+export { pearson, spearman } from './stats/correlation';
 export { mean, median, stdDev, percentile, aggregate } from './stats/percentiles';
 
 export type {
