@@ -1,5 +1,15 @@
 # @cogitator-ai/hono
 
+## 0.8.5
+
+### Patch Changes
+
+- Updated dependencies [[`3f81cdb`](https://github.com/cogitator-ai/Cogitator-AI/commit/3f81cdb928c80f4c70548911d4e6fd07cf2b1e52)]:
+  - @cogitator-ai/types@0.60.0
+  - @cogitator-ai/core@0.56.2
+  - @cogitator-ai/memory@0.24.1
+  - @cogitator-ai/server-shared@0.6.5
+
 ## 0.8.4
 
 ### Patch Changes
