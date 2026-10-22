@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/sandbox",
-  "version": "0.6.15",
+  "version": "0.6.16",
   "description": "Sandbox execution for Cogitator agents (Docker and WASM)",
   "keywords": [
     "cogitator",

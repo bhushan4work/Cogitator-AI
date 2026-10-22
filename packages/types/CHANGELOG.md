@@ -1,5 +1,11 @@
 # @cogitator-ai/types
 
+## 0.59.0
+
+### Minor Changes
+
+- [#248](https://github.com/cogitator-ai/Cogitator-AI/pull/248) [`e205fef`](https://github.com/cogitator-ai/Cogitator-AI/commit/e205fefeeabd060cf84e5a4b125c4c64e42d57c3) - Memory files read only what stands. `MemoryFileAdapter.findFileHeads` gives the newest version of each scope and path a filter and a branch see, and `MemoryFiles` lists, views and indexes files through it, so a turn no longer reads the whole history of every file. Postgres and SQLite find the heads in SQL, InMemory, MongoDB and Redis in process, and MongoDB now asks only for batches holding a version of a scope the reader sees. A change that finds, once kept, a file of its own under another file or with files under it, which writers in two processes can make at the same time, is taken back, its own versions withdrawn (`withdrawFileVersions`, a new optional store method every built-in adapter has, `MemoryFileVersion.withdrawn`), and refused so the writer tries again. `fileHeads` finds heads in process for a store of your own, and the conformance kit checks `findFileHeads`.
+
 ## 0.58.0
 
 ### Minor Changes
