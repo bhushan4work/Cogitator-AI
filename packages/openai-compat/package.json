@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/openai-compat",
-  "version": "21.3.13",
+  "version": "21.3.14",
   "description": "OpenAI-compatible server for Cogitator agents: Chat Completions, Responses and Assistants APIs",
   "keywords": [
     "cogitator",
