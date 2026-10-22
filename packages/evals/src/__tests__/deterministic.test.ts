@@ -513,12 +513,12 @@ describe('tokenF1', () => {
     expect(score.score).toBe(0.5);
     expect(score.details).toBe('expected "red bike", got "red car" (precision: 0.5, recall: 0.5)');
 
-    // actual: 4 tokens, expected: 3 tokens, overlap: 2 ('quick', 'brown')
-    // precision = 2/4 = 0.5, recall = 2/3, F1 = (2 * 0.5 * 2/3) / (0.5 + 2/3) = 4/7
-    const score2 = await tokenF1()(makeResult('the quick brown fox', 'quick brown dog'));
-    expect(score2.score).toBeCloseTo(4 / 7);
+    // 'the cat sat' vs 'cat sat down': articles removed -> ['cat', 'sat'] vs ['cat', 'sat', 'down']
+    // overlap = 2, precision = 2/2 = 1, recall = 2/3, F1 = 0.8
+    const score2 = await tokenF1()(makeResult('the cat sat', 'cat sat down'));
+    expect(score2.score).toBeCloseTo(0.8);
     expect(score2.details).toBe(
-      `expected "quick brown dog", got "the quick brown fox" (precision: 0.5, recall: ${2 / 3})`
+      'expected "cat sat down", got "the cat sat" (precision: 1, recall: 0.67)'
     );
   });
 
@@ -528,14 +528,14 @@ describe('tokenF1', () => {
     const score1 = await tokenF1()(makeResult('apple apple apple', 'apple'));
     expect(score1.score).toBe(0.5);
     expect(score1.details).toBe(
-      `expected "apple", got "apple apple apple" (precision: ${1 / 3}, recall: 1)`
+      'expected "apple", got "apple apple apple" (precision: 0.33, recall: 1)'
     );
 
     // expected has 2 'apple's, actual has 1 'apple' -> overlap = 1
     // precision = 1/1 = 1, recall = 1/2 = 0.5, F1 = (2 * 1 * 0.5) / 1.5 = 2/3
     const score2 = await tokenF1()(makeResult('apple', 'apple apple'));
     expect(score2.score).toBeCloseTo(2 / 3);
-    expect(score2.details).toBe(`expected "apple apple", got "apple" (precision: 1, recall: 0.5)`);
+    expect(score2.details).toBe('expected "apple apple", got "apple" (precision: 1, recall: 0.5)');
 
     // actual: ['cat', 'cat', 'dog'], expected: ['cat', 'dog', 'dog']
     // overlap: 1 'cat' + 1 'dog' = 2
@@ -543,8 +543,21 @@ describe('tokenF1', () => {
     const score3 = await tokenF1()(makeResult('cat cat dog', 'cat dog dog'));
     expect(score3.score).toBeCloseTo(2 / 3);
     expect(score3.details).toBe(
-      `expected "cat dog dog", got "cat cat dog" (precision: ${2 / 3}, recall: ${2 / 3})`
+      'expected "cat dog dog", got "cat cat dog" (precision: 0.67, recall: 0.67)'
     );
+  });
+
+  it('strips standalone articles a, an, and the when tokenizing', async () => {
+    const score1 = await tokenF1()(makeResult('the cat sat', 'cat sat down'));
+    expect(score1.score).toBeCloseTo(0.8);
+
+    const score2 = await tokenF1()(makeResult('a red bike', 'red bike'));
+    expect(score2.score).toBe(1);
+    expect(score2.details).toBeUndefined();
+
+    const score3 = await tokenF1()(makeResult('an apple', 'apple'));
+    expect(score3.score).toBe(1);
+    expect(score3.details).toBeUndefined();
   });
 
   it('is case-insensitive by default', async () => {

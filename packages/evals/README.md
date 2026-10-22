@@ -212,7 +212,7 @@ const metrics = [
 
 `containsAll()` scores the fraction of its keywords found and reports any missing keywords in `details`. `containsAny()` scores 1 when at least one keyword is found and 0 otherwise. Keywords use substring matching, so `cat` matches `concatenate`. Both metrics are case-insensitive by default, accept `caseSensitive` and `name` options, ignore duplicate keywords, and reject empty lists or empty and whitespace-only keywords when the metric is created.
 
-`tokenF1()` computes token overlap using multiset counts so duplicate tokens are handled correctly, returning the harmonic mean of precision and recall. It lowercases unless `caseSensitive: true`, strips punctuation, splits on whitespace, scores 1 for both empty strings, and reports precision and recall in `details` whenever the score is below 1.
+`tokenF1()` computes token overlap using multiset counts so duplicate tokens are handled correctly, returning the harmonic mean of precision and recall. It lowercases unless `caseSensitive: true`, strips punctuation, removes standalone articles (`a`, `an`, `the`), splits on whitespace, scores 1 for both empty strings, and reports precision and recall in `details` whenever the score is below 1.
 
 `regex()` ignores the `g` and `y` flags, which would make identical outputs alternate between pass and fail.
 

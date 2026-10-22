@@ -133,8 +133,14 @@ export function similarity(opts?: MatchOptions): MetricFn {
 }
 
 function tokenize(text: string, caseSensitive: boolean): string[] {
-  const normalized = (caseSensitive ? text : text.toLowerCase()).replace(/[!-/:-@[-`{-~]/g, '');
+  const normalized = (caseSensitive ? text : text.toLowerCase())
+    .replace(/[!-/:-@[-`{-~]/g, '')
+    .replace(/\b(a|an|the)\b/g, ' ');
   return normalized.split(/\s+/).filter(Boolean);
+}
+
+function roundToTwo(value: number): number {
+  return Number(value.toFixed(2));
 }
 
 export function tokenF1(opts?: MatchOptions): MetricFn {
@@ -180,7 +186,7 @@ export function tokenF1(opts?: MatchOptions): MetricFn {
       score,
       details:
         score < 1
-          ? `expected "${target}", got "${output}" (precision: ${precision}, recall: ${recall})`
+          ? `expected "${target}", got "${output}" (precision: ${roundToTwo(precision)}, recall: ${roundToTwo(recall)})`
           : undefined,
     };
   }) as MetricFn);
