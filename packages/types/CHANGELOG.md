@@ -1,5 +1,11 @@
 # @cogitator-ai/types
 
+## 0.62.0
+
+### Minor Changes
+
+- [#256](https://github.com/cogitator-ai/Cogitator-AI/pull/256) [`2d00dd2`](https://github.com/cogitator-ai/Cogitator-AI/commit/2d00dd2dda98ab9aa59c1c7d38ad96b652d7979f) Thanks [@6alex6kash6](https://github.com/6alex6kash6)! - Add custom HTTP headers to Ollama provider configuration for authentication proxies and gateways. Headers reach both non-streaming and streaming chat requests, while the JSON content type is preserved and `apiKey` takes precedence over custom authorization regardless of header-name casing. Reject invalid HTTP headers when constructing the backend. Normalize all trailing slashes in the Ollama base URL before building request endpoints.
+
 ## 0.61.0
 
 ### Minor Changes
