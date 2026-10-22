@@ -259,11 +259,38 @@ describe('workflow jobs whose agent pauses', () => {
   it('fail without retries in the worker pool', async () => {
     const runtime = worker();
     const { WorkerPool } = await import('../worker');
-    const pool = new WorkerPool({ redis: { host: 'h', port: 1 }, ...runtime });
+    const { InMemoryCheckpointStore } = await import('@cogitator-ai/workflows');
+    const { workflowCheckpointId } = await import('../processors/workflow');
+    const checkpoints = new InMemoryCheckpointStore();
+    const pool = new WorkerPool({ redis: { host: 'h', port: 1 }, ...runtime, checkpoints });
     await pool.start();
+    const data = {
+      type: 'workflow' as const,
+      jobId: 'w',
+      runId: 'r',
+      input: { order: ' A-1 ' },
+      workflowConfig: {
+        ...workflow,
+        nodes: [
+          {
+            id: 'prep',
+            type: 'transform' as const,
+            config: { transform: 'trim', inputKey: 'order' },
+          },
+          ...workflow.nodes,
+        ],
+        edges: [{ from: 'prep', to: 'pay' }, ...workflow.edges],
+      },
+    };
+    const saved: string[] = [];
+    const save = checkpoints.save.bind(checkpoints);
+    checkpoints.save = async (checkpoint) => {
+      saved.push(checkpoint.id);
+      await save(checkpoint);
+    };
     const job = {
       id: 'job_1',
-      data: { type: 'workflow', jobId: 'w', runId: 'r', input: {}, workflowConfig: workflow },
+      data,
       attemptsMade: 0,
       opts: { attempts: 3 },
     } as unknown as Job<JobPayload>;
@@ -272,6 +299,8 @@ describe('workflow jobs whose agent pauses', () => {
 
     expect(error).toBeInstanceOf(mocks.UnrecoverableError);
     expect((error as Error).message).toContain('paused in workflow "refunds"');
+    expect(saved).toEqual([workflowCheckpointId(data)]);
+    expect(await checkpoints.load(workflowCheckpointId(data))).toBeNull();
     await pool.forceStop();
   });
 });

@@ -32,6 +32,59 @@ import {
   type BullConnection,
 } from './connection.js';
 
+/**
+ * Names BullMQ keeps next to the jobs of a queue, under the same prefix: a job under one of them
+ * would overwrite a key of the queue itself
+ */
+const QUEUE_KEYS = new Set([
+  'active',
+  'wait',
+  'waiting-children',
+  'paused',
+  'id',
+  'delayed',
+  'prioritized',
+  'stalled-check',
+  'completed',
+  'failed',
+  'stalled',
+  'repeat',
+  'limiter',
+  'meta',
+  'events',
+  'pc',
+  'marker',
+  'de',
+]);
+
+/**
+ * The id a producer gave a job, once checked: BullMQ builds Redis keys from it, so it must be a
+ * non-empty string without ':', not an integer and not a name of the queue's own keys
+ */
+function checkJobId(jobId: string): string {
+  if (jobId === '' || jobId.includes(':')) {
+    throw new Error(`A job id must be a non-empty string without ':', got '${jobId}'`);
+  }
+  if (`${Number.parseInt(jobId, 10)}` === jobId) {
+    throw new Error(`A job id must not be an integer, got '${jobId}'`);
+  }
+  if (QUEUE_KEYS.has(jobId)) {
+    throw new Error(`A job id must not be '${jobId}', a key the queue keeps for itself`);
+  }
+  return jobId;
+}
+
+const isResume = (payload: JobPayload) => payload.type === 'agent' && payload.resume !== undefined;
+const describe = (payload: JobPayload) =>
+  isResume(payload)
+    ? 'a resumed agent job'
+    : `${payload.type === 'agent' ? 'an' : 'a'} ${payload.type} job`;
+
+/**
+ * A queue of agent, workflow and swarm jobs. Each `add*Job` takes a `jobId`: the job is added
+ * under it, and adding a job whose id the queue holds already gives the job it holds back instead
+ * of adding a second one, so producers can retry an add without running the work twice.
+ */
 export class JobQueue {
   private queue: Queue<JobPayload>;
   private connection: BullConnection;
@@ -65,9 +118,11 @@ export class JobQueue {
       priority?: number;
       delay?: number;
       metadata?: Record<string, unknown>;
+      /** Id of the job, see {@link JobQueue} for adding one twice */
+      jobId?: string;
     }
   ): Promise<Job<AgentJobPayload>> {
-    const jobId = nanoid();
+    const jobId = options?.jobId === undefined ? nanoid() : checkJobId(options.jobId);
     const threadId = options?.threadId ?? nanoid();
 
     const payload: AgentJobPayload = {
@@ -80,11 +135,7 @@ export class JobQueue {
       metadata: options?.metadata,
     };
 
-    return this.queue.add('agent', payload, {
-      jobId,
-      priority: options?.priority,
-      delay: options?.delay,
-    }) as Promise<Job<AgentJobPayload>>;
+    return this.add(payload, options);
   }
 
   /**
@@ -119,6 +170,8 @@ export class JobQueue {
       priority?: number;
       delay?: number;
       metadata?: Record<string, unknown>;
+      /** Id of the job, see {@link JobQueue} for adding one twice */
+      jobId?: string;
     }
   ): Promise<Job<AgentJobPayload>> {
     if (paused.status !== undefined && paused.status !== 'paused') {
@@ -128,7 +181,7 @@ export class JobQueue {
     if (!threadId) {
       throw new Error('Cannot resume an agent job without the checkpoint or thread of its run');
     }
-    const jobId = nanoid();
+    const jobId = options?.jobId === undefined ? nanoid() : checkJobId(options.jobId);
 
     const payload: AgentJobPayload = {
       type: 'agent',
@@ -145,11 +198,7 @@ export class JobQueue {
       metadata: options?.metadata,
     };
 
-    return this.queue.add('agent', payload, {
-      jobId,
-      priority: options?.priority,
-      delay: options?.delay,
-    }) as Promise<Job<AgentJobPayload>>;
+    return this.add(payload, options);
   }
 
   /**
@@ -163,9 +212,11 @@ export class JobQueue {
       priority?: number;
       delay?: number;
       metadata?: Record<string, unknown>;
+      /** Id of the job, see {@link JobQueue} for adding one twice */
+      jobId?: string;
     }
   ): Promise<Job<WorkflowJobPayload>> {
-    const jobId = nanoid();
+    const jobId = options?.jobId === undefined ? nanoid() : checkJobId(options.jobId);
     const runId = options?.runId ?? nanoid();
 
     const payload: WorkflowJobPayload = {
@@ -177,11 +228,7 @@ export class JobQueue {
       metadata: options?.metadata,
     };
 
-    return this.queue.add('workflow', payload, {
-      jobId,
-      priority: options?.priority,
-      delay: options?.delay,
-    }) as Promise<Job<WorkflowJobPayload>>;
+    return this.add(payload, options);
   }
 
   /**
@@ -194,9 +241,11 @@ export class JobQueue {
       priority?: number;
       delay?: number;
       metadata?: Record<string, unknown>;
+      /** Id of the job, see {@link JobQueue} for adding one twice */
+      jobId?: string;
     }
   ): Promise<Job<SwarmJobPayload>> {
-    const jobId = nanoid();
+    const jobId = options?.jobId === undefined ? nanoid() : checkJobId(options.jobId);
 
     const payload: SwarmJobPayload = {
       type: 'swarm',
@@ -206,11 +255,7 @@ export class JobQueue {
       metadata: options?.metadata,
     };
 
-    return this.queue.add('swarm', payload, {
-      jobId,
-      priority: options?.priority,
-      delay: options?.delay,
-    }) as Promise<Job<SwarmJobPayload>>;
+    return this.add(payload, options);
   }
 
   /**
@@ -234,9 +279,11 @@ export class JobQueue {
       delay?: number;
       /** Agent run timeout in ms (shorthand for `runOptions.timeout`) */
       timeout?: number;
+      /** Id of the job, see {@link JobQueue} for adding one twice */
+      jobId?: string;
     }
   ): Promise<Job<SwarmAgentJobPayload>> {
-    const jobId = nanoid();
+    const jobId = options?.jobId === undefined ? nanoid() : checkJobId(options.jobId);
     const keyPrefix = options?.keyPrefix ?? 'swarm';
 
     const payload: SwarmAgentJobPayload = {
@@ -258,11 +305,36 @@ export class JobQueue {
       },
     };
 
-    return this.queue.add('swarm-agent', payload, {
-      jobId,
+    return this.add(payload, options);
+  }
+
+  /**
+   * Add the job, and when the producer gave its id, hand back the job the queue holds under it:
+   * adding a job whose id the queue holds already adds nothing and gives that job back, so a
+   * producer that retries an add, such as after a timeout, does not run the work twice, even when
+   * the two adds race. A job the queue removed (after it completed or failed, past
+   * `removeOnComplete` or `removeOnFail`) is gone, and its id adds a new job.
+   *
+   * @throws Error when the queue holds the id as another kind of job
+   */
+  private async add<T extends JobPayload>(
+    payload: T,
+    options: { jobId?: string; priority?: number; delay?: number } | undefined
+  ): Promise<Job<T>> {
+    const added = (await this.queue.add(payload.type, payload, {
+      jobId: payload.jobId,
       priority: options?.priority,
       delay: options?.delay,
-    }) as Promise<Job<SwarmAgentJobPayload>>;
+    })) as Job<T>;
+    if (options?.jobId === undefined) return added;
+    const held = (await this.queue.getJob(payload.jobId)) as Job<T> | undefined;
+    if (!held) return added;
+    if (held.data.type !== payload.type || isResume(held.data) !== isResume(payload)) {
+      throw new Error(
+        `The queue holds job '${payload.jobId}' as ${describe(held.data)}, not as ${describe(payload)}`
+      );
+    }
+    return held;
   }
 
   /**

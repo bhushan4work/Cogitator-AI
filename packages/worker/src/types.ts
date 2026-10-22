@@ -8,6 +8,7 @@ import type {
   AgentWireResponseFormat,
   AgentWireRunResult,
   AgentWireUsage,
+  CheckpointStore,
   RunCheckpoint,
   Tool,
   ToolApprovalDecision,
@@ -196,10 +197,26 @@ export interface AgentJobResult extends AgentWireRunResult {
   };
 }
 
+/**
+ * What a job used and cost, summed over its agent runs. `inputTokens` and `outputTokens` are
+ * absent where the runs reported only their totals.
+ */
+export interface JobUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens: number;
+  /** USD */
+  cost: number;
+  /** Agent runs counted */
+  runs: number;
+}
+
 export interface WorkflowJobResult {
   type: 'workflow';
   output: Record<string, unknown>;
   nodeResults: Record<string, unknown>;
+  /** What the agent nodes used and cost */
+  usage: JobUsage;
   duration: number;
 }
 
@@ -207,6 +224,8 @@ export interface SwarmJobResult {
   type: 'swarm';
   output: string;
   rounds: number;
+  /** What the swarm's agent runs used and cost, in all and by agent */
+  usage: JobUsage & { byAgent: Record<string, { tokens: number; cost: number; runs: number }> };
   agentOutputs: {
     agent: string;
     output: string;
@@ -266,6 +285,13 @@ export interface JobExecutionOptions {
    * `WorkerPool.cancelJob()` and a shutdown that runs out of time stop the work
    */
   signal?: AbortSignal;
+  /**
+   * Whether the queue runs the job again after it failed with `error`: a workflow job keeps its
+   * checkpoint for that attempt, and lets it go when none follows. `WorkerPool` answers no for
+   * the last attempt, a cancelled job and a paused agent run, and yes for a job a shutdown
+   * stopped, which another worker takes up. Default: no attempt follows
+   */
+  willRetry?: (error: unknown) => boolean;
 }
 
 /**
@@ -279,6 +305,12 @@ export interface WorkerRuntime {
    * name; a job that needs a tool missing from this list fails.
    */
   tools?: Tool[];
+  /**
+   * Where workflow jobs keep their checkpoint, saved after every node, so a retried job goes on
+   * from it. `WorkerPool` keeps them in its Redis by default, a processor called on its own runs
+   * without them.
+   */
+  checkpoints?: CheckpointStore;
 }
 
 export interface WorkerConfig extends QueueConfig, WorkerRuntime {
@@ -290,6 +322,12 @@ export interface WorkerConfig extends QueueConfig, WorkerRuntime {
   lockDuration?: number;
   /** Stalled job check interval */
   stalledInterval?: number;
+  /**
+   * Seconds the default Redis store keeps a workflow checkpoint after its last save, for a run
+   * that is never resumed or let go, such as one whose worker crashed on its last attempt.
+   * Ignored with `checkpoints`. Default: 7 days
+   */
+  checkpointTtl?: number;
 }
 
 /**
