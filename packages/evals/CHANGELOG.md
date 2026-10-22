@@ -1,5 +1,11 @@
 # @cogitator-ai/evals
 
+## 0.11.0
+
+### Minor Changes
+
+- [#260](https://github.com/cogitator-ai/Cogitator-AI/pull/260) [`4a0643b`](https://github.com/cogitator-ai/Cogitator-AI/commit/4a0643bd72753e12d7c526cf6f2fd1209ee1c55e) Thanks [@bhushan4work](https://github.com/bhushan4work)! - Add `tokenF1` deterministic metric for token-level precision, recall, and F1 scoring with normalization and multiset token overlap.
+
 ## 0.10.0
 
 ### Minor Changes
