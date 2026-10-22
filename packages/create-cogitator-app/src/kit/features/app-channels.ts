@@ -6,6 +6,7 @@ import { LIFECYCLE_TS, startupImports, startupStatements } from './shared.js';
 import type { FeatureModule } from './types.js';
 
 export const WEBCHAT_PORT = 18789;
+export const GITHUB_WEBHOOK_PORT = 8787;
 
 /** Where Bluesky sessions and Threads tokens are kept, out of git. */
 const TOKENS_PATH = '.cogitator/tokens.json';
@@ -114,7 +115,52 @@ const CHANNEL_SETUP: Record<ChannelKind, ChannelSetup> = {
       },
     ],
   },
+  github: {
+    factory: 'githubChannel',
+    expression: code`
+      githubChannel({
+        token: env.GITHUB_CHANNEL_TOKEN,
+        webhook: {
+          secret: env.GITHUB_WEBHOOK_SECRET,
+          port: Number(env.GITHUB_WEBHOOK_PORT ?? ${GITHUB_WEBHOOK_PORT}),
+        },
+      })
+    `,
+    packages: [],
+    env: [
+      {
+        name: 'GITHUB_CHANNEL_TOKEN',
+        description:
+          'Token of a separate GitHub bot account, scoped to the repositories it answers in, with read and write access to issues and pull requests',
+        required: true,
+      },
+      {
+        name: 'GITHUB_WEBHOOK_SECRET',
+        description:
+          'Secret of the webhook that sends issues, pull requests, comments and reviews to /github/webhook',
+        required: true,
+      },
+    ],
+  },
 };
+
+/**
+ * GitHub's webhook when WebChat runs too: served as a route of the WebChat
+ * server, so one port takes both and a deploy that exposes one port reaches both.
+ */
+const GITHUB_ON_WEBCHAT = code`
+  githubChannel({
+    token: env.GITHUB_CHANNEL_TOKEN,
+    webhook: { secret: env.GITHUB_WEBHOOK_SECRET },
+  })
+`;
+
+const WEBCHAT_WITH_GITHUB = code`
+  webchatChannel({
+    port: Number(env.WEBCHAT_PORT ?? ${WEBCHAT_PORT}),
+    routes: { '/github/webhook': github.webhookListener() },
+  })
+`;
 
 /** A messaging bot: one Gateway that answers on every chosen channel with the assistant. */
 export const appChannelsFeature: FeatureModule = {
@@ -144,6 +190,16 @@ export const appChannelsFeature: FeatureModule = {
       });
       project.deploy.port = WEBCHAT_PORT;
     }
+    if (spec.channels.includes('github') && !spec.channels.includes('webchat')) {
+      project.envVar({
+        name: 'GITHUB_WEBHOOK_PORT',
+        description: 'Port GitHub delivers webhook events to, at /github/webhook',
+        example: String(GITHUB_WEBHOOK_PORT),
+        required: false,
+        secret: false,
+      });
+      project.deploy.port = GITHUB_WEBHOOK_PORT;
+    }
 
     project
       .file('src/lifecycle.ts', LIFECYCLE_TS)
@@ -161,6 +217,18 @@ export const appChannelsFeature: FeatureModule = {
     const { spec } = project;
     const channels = spec.channels.map((channel) => CHANNEL_SETUP[channel]);
     const memory = spec.memory !== 'none';
+    const webchat = spec.channels.includes('webchat');
+    const github = spec.channels.includes('github');
+    const declarations: string[] = [];
+    const entries = spec.channels.map((channel) => {
+      if (channel === 'github') {
+        const expression = webchat ? GITHUB_ON_WEBCHAT : CHANNEL_SETUP.github.expression;
+        declarations.push(`const github = ${expression.trim()};`);
+        return 'github';
+      }
+      if (channel === 'webchat' && github) return WEBCHAT_WITH_GITHUB.trim();
+      return CHANNEL_SETUP[channel].expression.trim();
+    });
 
     project.file(
       'src/gateway.ts',
@@ -173,6 +241,7 @@ export const appChannelsFeature: FeatureModule = {
         const env = loadEnv();
         ${startupStatements(project)}
         ${memory && 'const memory = await cogitator.getMemory();'}
+        ${declarations.join('\n')}
 
         /**
          * The assistant on its channels. \`src/index.ts\` starts it, and so do
@@ -183,7 +252,7 @@ export const appChannelsFeature: FeatureModule = {
           cogitator,
           agent: agents.assistant,
           channels: [
-            ${channels.map((c) => `${c.expression},`).join('\n')}
+            ${entries.map((entry) => `${entry},`).join('\n')}
           ],
           ${
             memory &&
@@ -202,18 +271,19 @@ export const appChannelsFeature: FeatureModule = {
       `
     );
 
-    const webchat = spec.channels.includes('webchat');
     project.file(
       'src/index.ts',
       code`
         import { cogitator } from './cogitator.js';
-        ${webchat && "import { loadEnv } from './env.js';"}
+        ${(webchat || github) && "import { loadEnv } from './env.js';"}
         import { gateway } from './gateway.js';
         import { onShutdown } from './lifecycle.js';
 
         await gateway.start();
         console.log(\`The assistant is listening on \${gateway.stats.connectedChannels.join(', ')}\`);
         ${webchat && `console.log(\`WebChat: ws://localhost:\${loadEnv().WEBCHAT_PORT ?? ${WEBCHAT_PORT}}/ws\`);`}
+        ${github && !webchat && `console.log(\`GitHub webhook: http://localhost:\${loadEnv().GITHUB_WEBHOOK_PORT ?? ${GITHUB_WEBHOOK_PORT}}/github/webhook\`);`}
+        ${github && webchat && `console.log(\`GitHub webhook: http://localhost:\${loadEnv().WEBCHAT_PORT ?? ${WEBCHAT_PORT}}/github/webhook\`);`}
 
         onShutdown(async () => {
           await gateway.stop();
@@ -229,5 +299,11 @@ export const appChannelsFeature: FeatureModule = {
         \`src/gateway.ts\` builds a \`Gateway\` from \`@cogitator-ai/channels\` that answers on ${spec.channels.join(', ')} with \`agents.assistant\`, and \`src/index.ts\` starts it. Each chat is its own thread${memory ? ' in memory, compacted when it grows long' : ''}. Channel tokens come from \`.env\`. \`${runScript(pm, 'dev')}\` runs it with reload on change, \`cogitator assistant\` with a live dashboard, \`cogitator daemon start\` in the background.
       `
     );
+    if (github) {
+      project.readmeSection(
+        'GitHub',
+        `On GitHub the bot answers mentions from the repository's owner, members and collaborators. Give it an account of its own and set \`GITHUB_CHANNEL_TOKEN\` to a fine-grained token of that account, scoped to the repositories it answers in (not your own token), and \`GITHUB_WEBHOOK_SECRET\` to the secret of a webhook that sends Issues, Issue comments, Pull requests, Pull request reviews and Pull request review comments to \`/github/webhook\` on port ${webchat ? `\`WEBCHAT_PORT\` (${WEBCHAT_PORT})` : `\`GITHUB_WEBHOOK_PORT\` (${GITHUB_WEBHOOK_PORT})`}.`
+      );
+    }
   },
 };

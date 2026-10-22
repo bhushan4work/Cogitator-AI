@@ -8,7 +8,15 @@ import type { MemoryAdapter } from './memory';
 import type { ToolApprovalDecision, ToolApprovalRequest } from './runtime';
 
 export type ChannelType =
-  'telegram' | 'discord' | 'slack' | 'whatsapp' | 'webchat' | 'bluesky' | 'threads' | (string & {});
+  | 'telegram'
+  | 'discord'
+  | 'slack'
+  | 'whatsapp'
+  | 'webchat'
+  | 'bluesky'
+  | 'threads'
+  | 'github'
+  | (string & {});
 
 export type AttachmentType = 'image' | 'file' | 'audio' | 'video';
 
@@ -33,10 +41,22 @@ export interface ChannelMessage {
   attachments?: Attachment[];
   replyTo?: string;
   /**
-   * The topic or thread inside the chat the message was posted in, such as a Telegram forum
-   * topic or a topic of a private chat. Replies go to the same topic.
+   * The topic or thread inside the chat the message was posted in: a Telegram forum topic or a
+   * topic of a private chat, the `ts` of the Slack thread of a channel message, the first comment
+   * of a GitHub review thread. Replies go to the same topic.
    */
   topicId?: string;
+  /**
+   * The conversation the message belongs to, for channels whose `channelId` does not name it:
+   * on Bluesky and Threads `channelId` is the post to reply to and the conversation is the
+   * thread's root post. The gateway's default thread key uses it in place of `channelId` and
+   * `topicId`, so it shares their namespace: it may equal the `channelId` (or
+   * `channelId:topicId`) of the same conversation, as a WhatsApp chat addressed by LID gives the
+   * phone-number jid that is the `channelId` of the chat addressed by phone number, but never
+   * that of another conversation of the channel. That is why Bluesky and Threads write it as
+   * `thread:<root>` while their `channelId` is `post:<id>` or `dm:<id>`.
+   */
+  conversationId?: string;
   raw: unknown;
 }
 
@@ -99,7 +119,10 @@ export interface ChannelAction {
   userName?: string;
   /** The message the button is under */
   messageId?: string;
+  /** The topic of the message the button is under (`ChannelMessage.topicId`) */
   topicId?: string;
+  /** The conversation of the message the button is under (`ChannelMessage.conversationId`) */
+  conversationId?: string;
   data: string;
   raw: unknown;
 }
@@ -109,7 +132,10 @@ export interface ChannelStop {
   readonly channelType: ChannelType;
   readonly channelId: string;
   readonly draftId: number;
+  /** The topic of the draft (`ChannelMessage.topicId`) */
   topicId?: string;
+  /** The conversation of the draft (`ChannelMessage.conversationId`) */
+  conversationId?: string;
 }
 
 /** A command in a channel's command menu */
@@ -385,6 +411,11 @@ export interface GatewayConfig {
   owner?: OwnerConfig;
 
   session?: {
+    /**
+     * The conversation thread of a message. Defaults to one thread per user per conversation,
+     * `channelType:conversation:userId`, where the conversation is `conversationId`, or
+     * `channelId` plus `:topicId` when the message has a topic.
+     */
     threadKey?: (msg: ChannelMessage) => string;
     compaction?: CompactionConfig;
   };
@@ -394,6 +425,11 @@ export interface GatewayConfig {
   reactions?: StatusReactionConfig;
   debounce?: DebounceConfig;
   envelope?: EnvelopeConfig;
+  /**
+   * How messages of one thread wait for each other. Defaults to `'sequential'`: a thread answers
+   * its messages one at a time in the order they came, while different threads run side by side.
+   * `'parallel'` runs every message at once.
+   */
   queueMode?: QueueMode;
   hooks?: HookRegistry;
 

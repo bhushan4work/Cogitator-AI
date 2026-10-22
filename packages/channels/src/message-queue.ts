@@ -1,9 +1,31 @@
 import type { ChannelMessage, QueueMode } from '@cogitator-ai/types';
-import { mergeByDestination } from './merge-messages';
+import { mergeByDestination, replyDestination } from './merge-messages';
+
+interface QueuedMessage {
+  msg: ChannelMessage;
+  settle: (handled: boolean) => void;
+}
+
+/**
+ * Handles one message. It resolves `false` when the message was not handled (a failed or
+ * aborted run), anything else counts as handled.
+ */
+export type MessageProcessor = (
+  msg: ChannelMessage,
+  signal?: AbortSignal
+) => Promise<boolean | void>;
+
+async function handled(processing: Promise<boolean | void>): Promise<boolean> {
+  try {
+    return (await processing) !== false;
+  } catch {
+    return false;
+  }
+}
 
 interface ThreadState {
   processing: boolean;
-  queue: ChannelMessage[];
+  queue: QueuedMessage[];
   abortController?: AbortController;
 }
 
@@ -12,30 +34,32 @@ export class MessageQueue {
 
   constructor(
     private readonly mode: QueueMode,
-    private readonly processor: (msg: ChannelMessage, signal?: AbortSignal) => Promise<void>
+    private readonly processor: MessageProcessor
   ) {}
 
-  push(msg: ChannelMessage, threadId: string): void {
+  /**
+   * Queues a message of a thread. The returned promise settles once the message is done with:
+   * `true` once it is handled (alone or merged with others), `false` when its processing failed,
+   * a newer message interrupted it or {@link dispose} dropped it. It never rejects.
+   */
+  push(msg: ChannelMessage, threadId: string): Promise<boolean> {
     switch (this.mode) {
       case 'parallel':
-        void this.processor(msg).catch(() => {});
-        break;
+        return handled(this.processor(msg));
       case 'sequential':
-        this.pushSequential(msg, threadId);
-        break;
+        return this.enqueue(msg, threadId, (state) => this.drainSequential(threadId, state));
       case 'interrupt':
-        this.pushInterrupt(msg, threadId);
-        break;
+        return this.pushInterrupt(msg, threadId);
       case 'collect':
-        this.pushCollect(msg, threadId);
-        break;
+        return this.enqueue(msg, threadId, (state) => this.drainCollect(threadId, state));
     }
   }
 
+  /** Aborts interruptible runs and drops every message still waiting, settling their promises */
   dispose(): void {
     for (const state of this.threads.values()) {
       state.abortController?.abort();
-      state.queue.length = 0;
+      for (const queued of state.queue.splice(0)) queued.settle(false);
     }
     this.threads.clear();
   }
@@ -49,12 +73,15 @@ export class MessageQueue {
     return state;
   }
 
-  private pushSequential(msg: ChannelMessage, threadId: string): void {
+  private enqueue(
+    msg: ChannelMessage,
+    threadId: string,
+    drain: (state: ThreadState) => Promise<void>
+  ): Promise<boolean> {
     const state = this.getThread(threadId);
-    state.queue.push(msg);
-    if (!state.processing) {
-      void this.drainSequential(threadId, state);
-    }
+    const done = new Promise<boolean>((settle) => state.queue.push({ msg, settle }));
+    if (!state.processing) void drain(state);
+    return done;
   }
 
   private release(threadId: string, state: ThreadState): void {
@@ -68,43 +95,31 @@ export class MessageQueue {
     state.processing = true;
     let next = state.queue.shift();
     while (next) {
-      try {
-        await this.processor(next);
-      } catch {}
+      next.settle(await handled(this.processor(next.msg)));
       next = state.queue.shift();
     }
     this.release(threadId, state);
   }
 
-  private pushInterrupt(msg: ChannelMessage, threadId: string): void {
+  private pushInterrupt(msg: ChannelMessage, threadId: string): Promise<boolean> {
     const state = this.getThread(threadId);
 
     if (state.processing && state.abortController) {
       state.abortController.abort();
     }
 
-    state.queue.length = 0;
+    for (const queued of state.queue.splice(0)) queued.settle(false);
     const ac = new AbortController();
     state.abortController = ac;
     state.processing = true;
 
-    void this.processor(msg, ac.signal)
-      .catch(() => {})
-      .finally(() => {
-        if (state.abortController === ac) {
-          state.abortController = undefined;
-          this.release(threadId, state);
-        }
-      });
-  }
-
-  private pushCollect(msg: ChannelMessage, threadId: string): void {
-    const state = this.getThread(threadId);
-    state.queue.push(msg);
-
-    if (!state.processing) {
-      void this.drainCollect(threadId, state);
-    }
+    return handled(this.processor(msg, ac.signal)).then((done) => {
+      if (state.abortController === ac) {
+        state.abortController = undefined;
+        this.release(threadId, state);
+      }
+      return done && !ac.signal.aborted;
+    });
   }
 
   private async drainCollect(threadId: string, state: ThreadState): Promise<void> {
@@ -112,11 +127,11 @@ export class MessageQueue {
 
     while (state.queue.length > 0) {
       const batch = state.queue.splice(0, state.queue.length);
-      for (const merged of mergeByDestination(batch)) {
-        try {
-          await this.processor(merged);
-        } catch {}
+      const results = new Map<string, boolean>();
+      for (const merged of mergeByDestination(batch.map((queued) => queued.msg))) {
+        results.set(replyDestination(merged), await handled(this.processor(merged)));
       }
+      for (const queued of batch) queued.settle(results.get(replyDestination(queued.msg)) ?? false);
     }
 
     this.release(threadId, state);

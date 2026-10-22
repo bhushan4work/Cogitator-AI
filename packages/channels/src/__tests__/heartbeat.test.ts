@@ -243,6 +243,42 @@ describe('HeartbeatScheduler', () => {
     scheduler.stop();
   });
 
+  it('sends the task to the topic and conversation of its metadata', async () => {
+    store.getOverdue.mockResolvedValueOnce([
+      {
+        id: 't4',
+        firesAt: Date.now() - 500,
+        metadata: {
+          description: 'Topic task',
+          channel: 'telegram',
+          channelId: '-100',
+          topicId: '7',
+          conversationId: 'thread:root',
+          userId: 'u5',
+        },
+      },
+      {
+        id: 't5',
+        firesAt: Date.now() - 500,
+        metadata: { description: 'Plain task', channelId: '-100', topicId: '', userId: 'u5' },
+      },
+    ]);
+
+    const scheduler = new HeartbeatScheduler(store as unknown as TimerStore, {
+      onFire,
+      pollInterval: 50,
+    });
+    scheduler.start();
+
+    await vi.waitFor(() => expect(onFire).toHaveBeenCalledTimes(2), { timeout: 200 });
+    scheduler.stop();
+
+    const [withTopic, plain] = onFire.mock.calls.map(([msg]) => msg);
+    expect(withTopic).toMatchObject({ topicId: '7', conversationId: 'thread:root' });
+    expect(plain).not.toHaveProperty('topicId');
+    expect(plain).not.toHaveProperty('conversationId');
+  });
+
   it('reschedules interval tasks at now + interval', async () => {
     const now = Date.now();
     store.getOverdue
@@ -339,6 +375,36 @@ describe('HeartbeatScheduler', () => {
     expect(patch.lastError).toBe('boom');
 
     scheduler.stop();
+  });
+
+  it('keeps a failed one-shot task pending to fire again, unless it is bestEffort', async () => {
+    onFire.mockRejectedValue(new Error('aborted'));
+    store.getOverdue
+      .mockResolvedValueOnce([
+        { id: 'once', firesAt: Date.now() - 100, type: 'fixed', metadata: { description: 'A' } },
+        {
+          id: 'effort',
+          firesAt: Date.now() - 100,
+          type: 'fixed',
+          metadata: { description: 'B', bestEffort: true },
+        },
+      ])
+      .mockResolvedValue([]);
+
+    const scheduler = new HeartbeatScheduler(store as unknown as TimerStore, {
+      onFire,
+      pollInterval: 50,
+    });
+    scheduler.start();
+    await vi.waitFor(() => expect(store.update).toHaveBeenCalledTimes(2), { timeout: 200 });
+    scheduler.stop();
+
+    expect(store.markFired.mock.calls.map(([id]) => id)).toEqual(['effort']);
+    expect(store.update).toHaveBeenCalledWith(
+      'once',
+      expect.objectContaining({ lastRunStatus: 'error', consecutiveErrors: 1 })
+    );
+    expect(store.schedule).not.toHaveBeenCalled();
   });
 
   it('skips entries that exceeded maxRetries', async () => {

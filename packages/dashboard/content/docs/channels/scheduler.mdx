@@ -113,7 +113,7 @@ The `schedule_task` tool takes a `description` and exactly one of three formats:
 
 Optional fields: `channel` and `userId` (filled from the current conversation when omitted) and `bestEffort` (failures never count towards `maxRetries`). `createSchedulerTools({ store, defaultChannel?, defaultUserId? })` from `@cogitator-ai/core` builds the three tools for your own agent.
 
-When a task fires, the scheduler injects a message with `channelType`, `channelId` and `userId` from the task and `raw: { scheduled: true, taskId }`; the agent is asked to carry the task out. The Gateway only answers messages for channels it runs, so a task whose channel is missing (or `system`) is not delivered.
+When a task fires, the scheduler injects a message with `channelType`, `channelId`, `userId` and, when the task has them, `topicId` and `conversationId` from the task (`schedule_task` stores those of the run that set it, so a reminder set in a forum topic or a post thread fires there) and `raw: { scheduled: true, taskId }`; the agent is asked to carry the task out. The Gateway only answers messages for channels it runs, so a task whose channel is missing (or `system`) is not delivered.
 
 ## Job Management
 
@@ -143,7 +143,7 @@ interface TimerEntry {
 }
 ```
 
-After `maxRetries` consecutive errors (default: 5), the job is automatically skipped with status `'skipped'`. The error count is carried over when cron/interval jobs are rescheduled (unless the task is `bestEffort`). Re-enable it with `scheduler.enableJob(id)` to reset the error count.
+A one-shot task whose `onFire` throws (`gateway.injectMessage` does when the run failed or `stop()` aborted it) is not marked fired: it fires again on a later poll or after a restart, unless it is `bestEffort`. After `maxRetries` consecutive errors (default: 5), the job is automatically skipped with status `'skipped'`. The error count is carried over when cron/interval jobs are rescheduled (unless the task is `bestEffort`). Re-enable it with `scheduler.enableJob(id)` to reset the error count.
 
 Rescheduled cron/interval jobs get a new id; use `listJobs()` to find the current one.
 

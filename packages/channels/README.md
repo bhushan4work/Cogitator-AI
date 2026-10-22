@@ -15,7 +15,7 @@ pnpm add discord.js                # Discord
 pnpm add @slack/bolt               # Slack
 pnpm add @whiskeysockets/baileys   # WhatsApp, 6.x or 7.x (+ qrcode-terminal to print the pairing QR)
 pnpm add ws                        # WebChat
-pnpm add @atproto/api              # Bluesky (Threads needs no SDK)
+pnpm add @atproto/api              # Bluesky (Threads and GitHub need no SDK)
 
 # RuntimeBuilder (`cogitator up`)
 pnpm add better-sqlite3            # SQLite memory, knowledge graph and core facts (always needed)
@@ -134,7 +134,7 @@ slackChannel({
 });
 ```
 
-Supports: DMs, channel messages (via @mention, the mention is stripped from the text), threads (replies go to the thread root), file shares, Socket Mode (no public URL), streaming via chat.update, reactions. Set `mentionOnly: true` to ignore channel messages that do not mention the bot when the app also subscribes to `message.channels`. In `RuntimeBuilder`, Socket Mode is on when `SLACK_APP_TOKEN` is set; otherwise Slack runs in HTTP mode on `SLACK_PORT` (default 3000). Docs: [Slack](https://cogitator.app/docs/channels/slack).
+Supports: DMs, channel messages (via @mention, the mention is stripped from the text, answered in a new Slack thread that is a conversation of its own without earlier history, `topicId` is the thread's `ts`), threads (replies go to the thread root and continue its conversation), file shares, Socket Mode (no public URL), streaming via chat.update, reactions. Set `mentionOnly: true` to ignore channel messages that do not mention the bot when the app also subscribes to `message.channels`. In `RuntimeBuilder`, Socket Mode is on when `SLACK_APP_TOKEN` is set; otherwise Slack runs in HTTP mode on `SLACK_PORT` (default 3000). Docs: [Slack](https://cogitator.app/docs/channels/slack).
 
 ### WhatsApp
 
@@ -167,6 +167,7 @@ webchatChannel({
   path: '/ws',
   auth: (token) => token === process.env.WEBCHAT_TOKEN,
   maxPayload: 1024 * 1024, // bytes per incoming frame (default 1 MiB)
+  // routes: { '/github/webhook': github.webhookListener() }, // plain HTTP routes on the same port
 });
 ```
 
@@ -224,17 +225,36 @@ const threads = threadsChannel({
 
 The agent answers replies to the bot's posts and mentions of it, from Meta's webhooks (verification and `X-Hub-Signature-256` checked) or, without `webhook`, by polling, which skips replies people make to each other. Answers go out finished, as a chain of 500-character replies when long. The Threads API has no direct messages. Docs: [Threads](https://cogitator.app/docs/channels/threads).
 
+### GitHub
+
+```typescript
+import { githubChannel } from '@cogitator-ai/channels';
+
+const github = githubChannel({
+  token: process.env.GITHUB_CHANNEL_TOKEN!, // a bot account's fine-grained token, or () => an App installation token
+  webhook: {
+    secret: process.env.GITHUB_WEBHOOK_SECRET!, // checked against X-Hub-Signature-256
+    port: 8787, // its own server at /github/webhook, or mount github.handleWebhook / webhookListener()
+  },
+  trigger: 'mention', // or 'all'
+  repositories: ['acme/*'], // default: every repository that sends events, with a warning
+  associations: ['OWNER', 'MEMBER', 'COLLABORATOR'], // the default, or 'any'
+});
+```
+
+The agent answers new issues and pull requests, comments on them, reviews with a body and comments on lines of a diff, from a repository or organization webhook. Each issue or pull request is a conversation, `channelId` `owner/repo#number`, and answers are comments on it. A comment on a line is answered in its review thread, which is the message's `topicId`, so each review thread is a conversation of its own. Deliveries are answered at once and handled after, each once by its `X-GitHub-Delivery` and the comment it carries (remembered in memory). It answers only the repository's owner, members and collaborators unless `associations` or `authors` say otherwise, since what people write steers an agent that holds the token, so give the bot an account and a token of its own scoped to its repositories. The bot skips its own comments and other bots (`allowBots` lets them in), and by default answers only mentions of `@login`, outside code and quotes, plus the next comment of someone it answered and comments in review threads it replied in. Answers go out finished (GitHub notifies people of a comment's first text, `stream: true` edits a comment as it grows, at most every 3 seconds), as several comments past 65536 characters. Reactions use GitHub's eight. GitHub has no upload API for comments, so `sendFile` links a file with a public `url` and refuses a buffer. A GitHub App installation token cannot read `GET /user`: set `login` to `<app-slug>[bot]`. Docs: [GitHub](https://cogitator.app/docs/channels/github).
+
 ## Platform Comparison
 
-| Feature            | Telegram     | Discord | Slack     | WhatsApp | WebChat   | Bluesky            | Threads            |
-| ------------------ | ------------ | ------- | --------- | -------- | --------- | ------------------ | ------------------ |
-| Streaming (edit)   | ✅           | ✅      | ✅        | ✅       | ✅        | ❌ (sent finished) | ❌ (sent finished) |
-| Reactions          | ✅           | ✅      | ✅        | ❌       | ❌        | ❌                 | ❌                 |
-| Typing indicator   | ✅           | ✅      | ❌        | ✅       | ✅        | ❌                 | ❌                 |
-| Photos → vision    | ✅           | ✅      | ✅        | ✅       | ❌        | ❌                 | ❌                 |
-| Voice → STT        | ✅           | ✅      | ✅        | ✅       | ❌        | ❌                 | ❌                 |
-| Max message length | 4096         | 2000    | 40000     | 65536    | unlimited | 300 per post       | 500 per post       |
-| Public URL needed  | webhook only | no      | HTTP only | no       | no        | no                 | webhooks only      |
+| Feature            | Telegram     | Discord | Slack     | WhatsApp | WebChat   | Bluesky            | Threads            | GitHub              |
+| ------------------ | ------------ | ------- | --------- | -------- | --------- | ------------------ | ------------------ | ------------------- |
+| Streaming (edit)   | ✅           | ✅      | ✅        | ✅       | ✅        | ❌ (sent finished) | ❌ (sent finished) | with `stream: true` |
+| Reactions          | ✅           | ✅      | ✅        | ❌       | ❌        | ❌                 | ❌                 | ✅ (8 kinds)        |
+| Typing indicator   | ✅           | ✅      | ❌        | ✅       | ✅        | ❌                 | ❌                 | ❌                  |
+| Photos → vision    | ✅           | ✅      | ✅        | ✅       | ❌        | ❌                 | ❌                 | ❌                  |
+| Voice → STT        | ✅           | ✅      | ✅        | ✅       | ❌        | ❌                 | ❌                 | ❌                  |
+| Max message length | 4096         | 2000    | 40000     | 65536    | unlimited | 300 per post       | 500 per post       | 65536 per comment   |
+| Public URL needed  | webhook only | no      | HTTP only | no       | no        | no                 | webhooks only      | yes (webhook)       |
 
 Outbound calls (`sendText`, `editText`, `sendFile`, `deleteMessage`) throw when the channel is not started, the target chat is unavailable or the platform rejects the request — wrap direct calls in `try/catch`. WebChat is the exception: only `sendText` throws for a disconnected client, the other calls are dropped. `sendText` returns the platform message id (for Discord, the id of the first chunk; continuation chunks are edited and deleted with it).
 
@@ -287,6 +307,7 @@ Docs: [Social Feeds](https://cogitator.app/docs/channels/feeds).
 
 Routes incoming messages to your agent. Handles:
 
+- Conversation threads: one per user per conversation (chat, forum topic, Slack thread, Bluesky or Threads post thread, GitHub issue, pull request or review thread), answered one message at a time
 - Session management (per-user, per-channel) with an optional custom `sessionManager`
 - History compaction, hierarchical into a handoff of grounded atoms or with LLM-written summaries
 - Streaming with `StreamBuffer` when `stream` is set (message editing, splits at the platform limit without losing text); without `stream` the full answer is sent once the run finishes
@@ -305,7 +326,8 @@ const gateway = new Gateway({
   channels,
   memory, // MemoryAdapter — enables sessions and history
   session: {
-    threadKey: (msg) => `${msg.channelType}:${msg.userId}`,
+    // default: `${channelType}:${conversation}:${userId}`, see Conversation threads below
+    threadKey: (msg) => `${msg.channelType}:${msg.channelId}`, // one thread per chat, shared by its members
     // compact once a conversation holds 50 messages (or `threshold` tokens), keep about 4000 tokens of the newest turns verbatim
     compaction: {
       strategy: 'hierarchical',
@@ -319,14 +341,41 @@ const gateway = new Gateway({
 });
 
 gateway.stats; // { uptime, activeSessions, totalSessions, messagesToday, connectedChannels }
-gateway.getSessions(); // [{ threadId, userName, messageCount, lastActiveAt, active }]
-await gateway.compactThread('telegram:42'); // force compaction of one conversation
+gateway.getSessions(); // [{ threadId: 'telegram:42:42', userName, messageCount, lastActiveAt, active }], one per conversation
+await gateway.compactThread('telegram:42:42'); // force compaction of one conversation
 await gateway.compactAll(); // every thread served since start and of every stored session: "Compacted 2 of 3 threads"
-await gateway.injectMessage(msg); // feed a synthetic message (used by the scheduler)
-await gateway.stop();
+await gateway.injectMessage(msg); // feed a synthetic message and wait for its answer (used by the scheduler)
+await gateway.idle(); // wait until every queued message is answered
+await gateway.stop(); // answers what is queued first, up to drainTimeout (30 s), then aborts the rest
 ```
 
 `GatewayConfig.owner` is deprecated and never read: set owners on `ownerCommands({ ownerIds })` and `dmPolicy({ ownerIds })` (see [Middleware](#middleware)).
+
+### Conversation threads
+
+A thread is the conversation memory and the queue of one user in one conversation. The default key is `channelType:conversation:userId`, where the conversation is the message's `conversationId` if it has one, else its `channelId` plus `:topicId` when it has a topic (`defaultThreadKey` computes it):
+
+| Channel          | Conversation                                                                | Example thread                                                   |
+| ---------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Telegram         | chat, plus the forum topic                                                  | `telegram:-100123:7:42`                                          |
+| Slack            | DM, or the Slack thread of a channel message (`topicId`, the thread's `ts`) | `slack:C123:1712.5:U1`                                           |
+| Discord          | channel, a thread is a channel of its own                                   | `discord:98765:1234`                                             |
+| Bluesky, Threads | the post thread's root (`conversationId`), not the reply post               | `bluesky:thread:at://did:plc:a/app.bsky.feed.post/1:did:plc:b`   |
+| GitHub           | issue or pull request, plus the review thread (`topicId`)                   | `github:acme/app#12:583231`, `github:acme/app#12:1840022:583231` |
+| WhatsApp         | chat, a chat addressed by LID by the phone-number jid                       | `whatsapp:15550001111@s.whatsapp.net:15550001111`                |
+| WebChat          | client                                                                      | `webchat:c7f2:c7f2`                                              |
+
+So a user keeps a separate thread in their private chat, in each group and in each topic, and every reply in a Bluesky or Threads post thread lands in the same one. In a Slack channel each top-level message is answered in a new Slack thread, a conversation of its own without the history of earlier ones, and its follow-ups in that thread continue it, while a DM is one conversation. On GitHub each issue or pull request is a conversation, and each review thread another one. A WhatsApp chat that reaches a person by LID gets their phone-number jid as its `conversationId` when WhatsApp shares it, so it stays one thread with the chat addressed by phone number.
+
+The gateway keeps the conversations of each user in their session's metadata (`conversations`, up to 50, most recent first), and `compactAll()` finds their threads there after a restart. A run gets the `topicId` and `conversationId` of its message, and its tools see them in their context, so `schedule_task` stores them with the task and `HeartbeatScheduler` fires it into the same topic and thread, even when the user has moved on to another one. A task without them is answered in the topic and thread of the user's most recent conversation in its chat. With a custom `threadKey` the gateway keeps no conversations and leaves stored sessions out of `compactAll()`, except with `legacyThreadKey`, whose thread of each stored session it still finds.
+
+Up to 0.15 the key was `channelType:userId`, one thread per user per channel type. Threads stored under it are not found by the new key. To keep them, pass `legacyThreadKey`:
+
+```typescript
+import { legacyThreadKey } from '@cogitator-ai/channels';
+
+new Gateway({ ...config, session: { threadKey: legacyThreadKey } });
+```
 
 `session.compaction` is a `CompactionConfig`. With `strategy: 'hierarchical'` the older messages become a handoff of grounded atoms (facts, tasks, decisions, constraints, errors, files, open questions) and the newest `keepRecentTokens` stay verbatim, see [Hierarchical Compaction](https://cogitator.app/docs/memory#hierarchical-compaction). The gateway's summarizer asks the model and prompt each call names, falling back to `summaryModel` and `summaryPrompt`, then to the agent's model and a default prompt. `compactAll()` goes one thread at a time, past those that fail, and lists them after the count.
 
@@ -434,19 +483,21 @@ const gateway = new Gateway({
 
 ## Queue Modes
 
-Control concurrent message handling per user:
+Control how the messages of one thread wait for each other. Different threads always run side by side.
 
 ```typescript
 const gateway = new Gateway({
   // ...
-  queueMode: 'sequential', // 'parallel' | 'sequential' | 'interrupt' | 'collect'
+  queueMode: 'sequential', // the default, or 'parallel' | 'interrupt' | 'collect'
 });
 ```
 
-- **parallel** — default, all messages processed immediately
-- **sequential** — FIFO per thread, wait for current to finish
-- **interrupt** — abort the current run (its signal is passed to `cogitator.run`), start the new message
+- **sequential** - default, FIFO per thread: a message waits until the one before it is answered
+- **parallel** - every message runs at once, also in the same thread (the default up to 0.15)
+- **interrupt** - abort the current run (its signal is passed to `cogitator.run`), start the new message
 - **collect** - buffer during processing, merge per chat and topic on idle
+
+With a queue, a channel's message handler returns once the message is queued, so a channel that reads its updates one by one (Telegram long polling, the Bluesky and Threads polls) goes on to other chats, button presses and stop buttons while a thread is busy. `injectMessage` still resolves once the message is answered, and `idle()` waits for every queued message. Since the channel has confirmed a queued message to its platform already, `stop()` drains the queues before it stops the channels: it waits up to `drainTimeout` (default 30000 ms) for the queued messages and the runs in progress, then aborts the runs still going and drops what still waits. Messages that come in while it stops are dropped and reported to `onError`, a second `stop()` returns the same promise, and `injectMessage` rejects when its message was not answered (failed run, aborted or dropped by `stop()`).
 
 ## Formatting Pipeline
 
@@ -588,7 +639,7 @@ const scheduler = new HeartbeatScheduler(store, {
 scheduler.start();
 ```
 
-Schedule types: `cron` (recurring, next fire computed with `cron-parser`, honors `timezone`), `recurring` (interval), `fixed` (one-shot). Consecutive failures are carried across reschedules; after `maxRetries` the job is skipped until `enableJob()`. A fired job reaches `onFire` as a message on the `channel` / `channelId` / `userId` stored in its `metadata`, and `staggerMs` adds a random delay before the first poll. Docs: [Scheduler](https://cogitator.app/docs/channels/scheduler).
+Schedule types: `cron` (recurring, next fire computed with `cron-parser`, honors `timezone`), `recurring` (interval), `fixed` (one-shot). Consecutive failures are carried across reschedules, and a one-shot job whose `onFire` throws stays pending to fire again (unless `bestEffort`). After `maxRetries` the job is skipped until `enableJob()`. A fired job reaches `onFire` as a message on the `channel` / `channelId` / `userId` / `topicId` / `conversationId` stored in its `metadata`, and `staggerMs` adds a random delay before the first poll. Docs: [Scheduler](https://cogitator.app/docs/channels/scheduler).
 
 With a store that claims timers (`claimTtl` / `renew` / `release`, e.g. the Redis/Postgres timer stores of `@cogitator-ai/workflows`), the claim is renewed right before a task fires and every `claimTtl / 3` while it runs; `onClaimLost(entry)` reports a claim that is gone (the task is skipped before firing, or another worker may fire it too). Claims are released for disabled tasks, tasks over `maxRetries` and overdue tasks not reached before `stop()`.
 
@@ -628,9 +679,17 @@ await runtime.cleanup();
 
 `hooks` and `approvals` are passed to the gateway; `approvals` is merged over the config's `approvals` block (`approveWords`, `denyWords`, `notAllowedMessage`) and wins, so use it for what YAML cannot hold, such as a custom `format`.
 
+The gateway of a `RuntimeBuilder` uses the defaults: a thread per user per conversation, answered one message at a time. The `session` block of `cogitator.yml` changes them: `threadKey: legacy` keeps the threads stored up to 0.15 (`legacyThreadKey`), and `queueMode` takes any [queue mode](#queue-modes).
+
+```yaml
+session:
+  threadKey: legacy # or conversation (default)
+  queueMode: parallel # sequential (default), interrupt, collect
+```
+
 For a parsed YAML file, validate it first with `new RuntimeBuilder(AssistantConfigSchema.parse(yamlObject), process.env)` (the schema is exported, along with the `AssistantConfigInput` / `AssistantConfigOutput` types).
 
-- **Channels:** the terminal REPL plus `channels.telegram` (`TG_TOKEN` or `TELEGRAM_TOKEN`), `channels.discord` (`DISCORD_TOKEN`) and `channels.slack` (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, optional `SLACK_APP_TOKEN` / `SLACK_PORT`). A configured channel without its token is skipped with a warning. `channels.whatsapp` (`{ ownerIds?, sessionPath? }`, owner ids are phone numbers without `@s.whatsapp.net`, the session defaults to `~/.cogitator/whatsapp-session`) needs `@whiskeysockets/baileys`. `channels.webchat` (`{ port?, path? }`, default `8080` and `/ws`, no `ownerIds`) needs `ws` and starts only with `WEBCHAT_TOKEN` set, and clients connect with `?token=<WEBCHAT_TOKEN>`. `channels.bluesky` (`{ ownerIds?, posts?, directMessages?, pollInterval?, tokenPath? }`, owner ids are DIDs) needs `@atproto/api` and starts with `BLUESKY_HANDLE` and `BLUESKY_APP_PASSWORD`. `channels.threads` (`{ ownerIds?, webhook?: { port, path? }, pollInterval?, tokenPath? }`, owner ids are usernames) starts with `THREADS_ACCESS_TOKEN`, and with `THREADS_APP_SECRET` and `THREADS_VERIFY_TOKEN` for webhooks. Both keep their session or token in `tokenPath` (default `~/.cogitator/tokens.json`).
+- **Channels:** the terminal REPL plus `channels.telegram` (`TG_TOKEN` or `TELEGRAM_TOKEN`), `channels.discord` (`DISCORD_TOKEN`) and `channels.slack` (`SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, optional `SLACK_APP_TOKEN` / `SLACK_PORT`). A configured channel without its token is skipped with a warning. `channels.whatsapp` (`{ ownerIds?, sessionPath? }`, owner ids are phone numbers without `@s.whatsapp.net`, the session defaults to `~/.cogitator/whatsapp-session`) needs `@whiskeysockets/baileys`. `channels.webchat` (`{ port?, path? }`, default `8080` and `/ws`, no `ownerIds`) needs `ws` and starts only with `WEBCHAT_TOKEN` set, and clients connect with `?token=<WEBCHAT_TOKEN>`. `channels.bluesky` (`{ ownerIds?, posts?, directMessages?, pollInterval?, tokenPath? }`, owner ids are DIDs) needs `@atproto/api` and starts with `BLUESKY_HANDLE` and `BLUESKY_APP_PASSWORD`. `channels.threads` (`{ ownerIds?, webhook?: { port, path? }, pollInterval?, tokenPath? }`, owner ids are usernames) starts with `THREADS_ACCESS_TOKEN`, and with `THREADS_APP_SECRET` and `THREADS_VERIFY_TOKEN` for webhooks. Both keep their session or token in `tokenPath` (default `~/.cogitator/tokens.json`). `channels.github` (`{ ownerIds?, webhook?: { port?, path? }, trigger?, repositories?, associations?, authors?, login?, allowBots?, stream? }`, owner ids are numeric user ids, the webhook server defaults to port `8787` at `/github/webhook`) starts with `GITHUB_CHANNEL_TOKEN` (falling back to `GITHUB_TOKEN` with a warning) and `GITHUB_WEBHOOK_SECRET`, and calls `GITHUB_API_URL` when set (GitHub Enterprise Server).
 
 - **Memory:** `memory.adapter: sqlite` (default, `memory.path`, default `~/.cogitator/memory.db`) or `postgres` (`memory.connectionString`, `DATABASE_URL` or `POSTGRES_URL`, requires `pg`). Core facts always live in the SQLite file, as memory items with their history. The knowledge graph (`memory.knowledgeGraph`) and auto-extraction (`memory.autoExtract`) are on by default, and the memory tools keep memory items in the memory store too: `remember` keeps a fact as the user's (an `active` item, a core fact) only when its `quote` is in one of the run user's own messages on the thread's active branch, else as a suggestion, `recall` searches the items of the user and the thread, and `forget` lets go only the run's own that hold the query as whole words (a run without a user keeps its facts in the thread's memory). The assistant's agent id is its `name`, the same across restarts. `memory.compaction.threshold` enables history compaction, hierarchical, keeping about 4000 tokens of the newest turns verbatim.
 - **Fresh context:** the gateway builds an agent per message: instructions (with known user facts) and the `/model` override are resolved each time. The current date and time go to each run as its `brief`, with the input, so they do not change the instructions and their prompt cache. `runtime.agent` is the base agent.
@@ -673,6 +732,12 @@ BLUESKY_APP_PASSWORD=...         # an app password, with DM access to answer mes
 THREADS_ACCESS_TOKEN=...         # a long-lived token
 THREADS_APP_SECRET=...           # webhooks only
 THREADS_VERIFY_TOKEN=...         # webhooks only
+
+# GitHub (a webhook delivers to port 8787 at /github/webhook)
+GITHUB_CHANNEL_TOKEN=github_pat_...  # a separate bot account's token, scoped to the repositories it answers in
+GITHUB_TOKEN=ghp_...             # capabilities.github, and the channel's fallback (with a warning)
+GITHUB_WEBHOOK_SECRET=...        # the secret set on the webhook
+GITHUB_API_URL=...               # GitHub Enterprise Server only, https://<host>/api/v3
 
 # STT (optional, for voice messages — pick one)
 DEEPGRAM_API_KEY=...         # highest priority

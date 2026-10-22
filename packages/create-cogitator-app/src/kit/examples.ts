@@ -115,6 +115,12 @@ const KNOWN_ENV: Record<string, { description: string; example?: string }> = {
     description: 'Bluesky app password (Settings, Privacy and security, App passwords)',
   },
   THREADS_ACCESS_TOKEN: { description: 'Threads long-lived access token, renewed automatically' },
+  GITHUB_CHANNEL_TOKEN: {
+    description:
+      'Token of a separate GitHub bot account, with write access to issues and pull requests of its repositories',
+  },
+  GITHUB_WEBHOOK_SECRET: { description: 'Secret of the GitHub webhook that sends the events' },
+  GITHUB_WEBHOOK_PORT: { description: 'Port the GitHub webhook delivers to', example: '8787' },
   PUBLISH: { description: 'Set to 1 to publish for real instead of a dry run', example: '0' },
   DEEPGRAM_API_KEY: { description: 'Deepgram API key for speech to text' },
   ELEVENLABS_API_KEY: { description: 'ElevenLabs API key for text to speech' },
