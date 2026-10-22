@@ -73,7 +73,9 @@ jobs:
   google:
     name: Google Gemini Integration
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Set the repository variable GEMINI_TESTS to "off" to skip Gemini calls, for example
+    # when the API key has hit its spending cap.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.GEMINI_TESTS != 'off'
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -190,6 +192,6 @@ jobs:
           TEST_MONGODB_URL: mongodb://localhost:27017
           TEST_QDRANT_URL: http://localhost:6333
           TEST_DOCKER: 'true'
-          GOOGLE_API_KEY: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.GOOGLE_API_KEY || '' }}
+          GOOGLE_API_KEY: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.GEMINI_TESTS != 'off' && secrets.GOOGLE_API_KEY || '' }}
           OLLAMA_API_KEY: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.OLLAMA_API_KEY || '' }}
           NODE_OPTIONS: '--max-old-space-size=4096'
