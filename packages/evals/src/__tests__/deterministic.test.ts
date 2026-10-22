@@ -308,7 +308,7 @@ describe('similarity', () => {
   it('respects caseSensitive option', async () => {
     const metric = similarity({ caseSensitive: true });
     const diffCase = await metric(makeResult('Hello', 'hello'));
-    // Distance 1 (H vs h), max length 5 => score = 1 - 1/5 = 0.8
+
     expect(diffCase.score).toBe(0.8);
     expect(diffCase.details).toContain('distance: 1');
 
@@ -328,25 +328,22 @@ describe('similarity', () => {
   });
 
   it('accurately scores typos', async () => {
-    // Single-character typo: 1 deletion / insertion / substitution
     const singleTypo = await similarity()(makeResult('helo', 'hello'));
     expect(singleTypo.score).toBe(0.8);
     expect(singleTypo.details).toContain('distance: 1');
 
-    // Multi-character edit: kitten -> sitting (sub k->s, sub e->i, add g: distance 3, maxLen 7)
     const multiTypo = await similarity()(makeResult('kitten', 'sitting'));
     expect(multiTypo.score).toBeCloseTo(1 - 3 / 7);
     expect(multiTypo.details).toContain('distance: 3');
   });
 
   it('scores 0 or near 0 for unrelated strings', async () => {
-    // Completely disjoint strings: distance = maxLen => score = 0
     const disjoint = await similarity()(makeResult('abc', 'xyz'));
     expect(disjoint.score).toBe(0);
     expect(disjoint.details).toBe('expected "xyz", got "abc" (distance: 3)');
 
     const unrelated = await similarity()(makeResult('apple', 'banana'));
-    // apple vs banana: distance 5, maxLen 6 => score 1/6
+
     expect(unrelated.score).toBeCloseTo(1 / 6);
     expect(unrelated.details).toContain('distance: 5');
   });
@@ -367,27 +364,22 @@ describe('similarity', () => {
   });
 
   it('calculates score based on insertions, deletions, and substitutions', async () => {
-    // Substitution
     const sub = await similarity()(makeResult('cat', 'bat'));
     expect(sub.score).toBeCloseTo(2 / 3);
     expect(sub.details).toContain('distance: 1');
 
-    // Insertion
     const ins = await similarity()(makeResult('cat', 'cats'));
     expect(ins.score).toBe(0.75);
     expect(ins.details).toContain('distance: 1');
 
-    // Deletion
     const del = await similarity()(makeResult('cats', 'cat'));
     expect(del.score).toBe(0.75);
     expect(del.details).toContain('distance: 1');
 
-    // Empty output vs non-empty expected
     const emptyOutput = await similarity()(makeResult('', 'abc'));
     expect(emptyOutput.score).toBe(0);
     expect(emptyOutput.details).toContain('distance: 3');
 
-    // Non-empty output vs empty expected
     const emptyExpected = await similarity()(makeResult('abc', ''));
     expect(emptyExpected.score).toBe(0);
     expect(emptyExpected.details).toContain('distance: 3');
@@ -463,6 +455,11 @@ describe('similarity', () => {
 });
 
 describe('tokenF1', () => {
+  it('drops capitalized articles in case-sensitive mode too', async () => {
+    const score = await tokenF1({ caseSensitive: true })(makeResult('The cat sat', 'cat sat'));
+    expect(score).toEqual({ name: 'tokenF1', score: 1 });
+  });
+
   it('scores 1 when output tokens match expected tokens identically', async () => {
     const metric = tokenF1();
     const score = await metric(makeResult('hello world', 'hello world'));
@@ -507,14 +504,10 @@ describe('tokenF1', () => {
   });
 
   it('calculates partial matches correctly', async () => {
-    // actual: 'red car' (2 tokens), expected: 'red bike' (2 tokens) -> overlap: 1 ('red')
-    // precision = 0.5, recall = 0.5, F1 = 0.5
     const score = await tokenF1()(makeResult('red car', 'red bike'));
     expect(score.score).toBe(0.5);
     expect(score.details).toBe('expected "red bike", got "red car" (precision: 0.5, recall: 0.5)');
 
-    // 'the cat sat' vs 'cat sat down': articles removed -> ['cat', 'sat'] vs ['cat', 'sat', 'down']
-    // overlap = 2, precision = 2/2 = 1, recall = 2/3, F1 = 0.8
     const score2 = await tokenF1()(makeResult('the cat sat', 'cat sat down'));
     expect(score2.score).toBeCloseTo(0.8);
     expect(score2.details).toBe(
@@ -523,23 +516,16 @@ describe('tokenF1', () => {
   });
 
   it('handles duplicate tokens correctly using multiset counts', async () => {
-    // expected has 1 'apple', actual has 3 'apple's -> overlap = 1
-    // precision = 1/3, recall = 1/1 = 1, F1 = (2 * 1/3 * 1) / (1/3 + 1) = 0.5
     const score1 = await tokenF1()(makeResult('apple apple apple', 'apple'));
     expect(score1.score).toBe(0.5);
     expect(score1.details).toBe(
       'expected "apple", got "apple apple apple" (precision: 0.33, recall: 1)'
     );
 
-    // expected has 2 'apple's, actual has 1 'apple' -> overlap = 1
-    // precision = 1/1 = 1, recall = 1/2 = 0.5, F1 = (2 * 1 * 0.5) / 1.5 = 2/3
     const score2 = await tokenF1()(makeResult('apple', 'apple apple'));
     expect(score2.score).toBeCloseTo(2 / 3);
     expect(score2.details).toBe('expected "apple apple", got "apple" (precision: 1, recall: 0.5)');
 
-    // actual: ['cat', 'cat', 'dog'], expected: ['cat', 'dog', 'dog']
-    // overlap: 1 'cat' + 1 'dog' = 2
-    // precision = 2/3, recall = 2/3, F1 = 2/3
     const score3 = await tokenF1()(makeResult('cat cat dog', 'cat dog dog'));
     expect(score3.score).toBeCloseTo(2 / 3);
     expect(score3.details).toBe(

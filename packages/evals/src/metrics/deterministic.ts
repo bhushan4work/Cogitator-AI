@@ -82,11 +82,7 @@ function levenshteinDistance(s1: readonly string[], s2: readonly string[]): numb
     const char1 = s1[i - 1];
     for (let j = 1; j <= n; j++) {
       const cost = char1 === s2[j - 1] ? 0 : 1;
-      curr[j] = Math.min(
-        prev[j] + 1, // deletion
-        curr[j - 1] + 1, // insertion
-        prev[j - 1] + cost // substitution
-      );
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
     }
     const temp = prev;
     prev = curr;
@@ -135,7 +131,7 @@ export function similarity(opts?: MatchOptions): MetricFn {
 function tokenize(text: string, caseSensitive: boolean): string[] {
   const normalized = (caseSensitive ? text : text.toLowerCase())
     .replace(/[!-/:-@[-`{-~]/g, '')
-    .replace(/\b(a|an|the)\b/g, ' ');
+    .replace(/\b(a|an|the)\b/gi, ' ');
   return normalized.split(/\s+/).filter(Boolean);
 }
 
