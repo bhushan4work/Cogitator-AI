@@ -1,30 +1,22 @@
-import type { Tool, ToolInvocationOptions, ToolInvoker } from '@cogitator-ai/types';
-import type { RealtimeTool, RealtimeToolContext } from '../types.js';
+import type { Tool, ToolInvoker } from '@cogitator-ai/types';
+import type {
+  RealtimeApprovalHandler,
+  RealtimeTool,
+  RealtimeToolContext,
+  RealtimeToolsOptions,
+} from '../types.js';
 
-export interface RealtimeToolsOptions {
-  /**
-   * Decides a call that needs approval (`requiresApproval`, or the guardrails), as
-   * `RunOptions.onApproval` does in a run. Without it `guardrails.onToolApproval` decides, and a
-   * call nobody approves does not run: the model gets an error saying it needs approval
-   */
-  onApproval?: ToolInvocationOptions['onApproval'];
-  /** Agent id the tools see in their context (default `'voice'`) */
-  agentId?: string;
-  /**
-   * Thread id the tools see in their context. Defaults to `voice:<sessionId>`, the thread
-   * `createCogitatorRunner` gives the session's agent runs
-   */
-  threadId?: (context: RealtimeToolContext) => string | undefined;
-  /** The user the calls act for */
-  userId?: string;
-}
+export type { RealtimeApprovalHandler, RealtimeToolsOptions };
 
 /**
  * Cogitator tools in the shape a realtime session takes, each call run through
  * `invoker.invokeTool` (a `Cogitator`): arguments validated against the tool's schema, approval
  * asked for calls that need it, the guardrails applied, sandboxed tools run in the sandbox and
  * `tool.timeout` kept, the way an agent run executes them. A call fails with the error the
- * invoker reports, which the model reads, and is cancelled when the session closes.
+ * invoker reports, which the model reads, and is cancelled when the session closes. A call that
+ * needs approval nobody gives is refused, and the model reads that it needs approval. Unlike an
+ * agent run, a realtime session sets no `maxIterations`: the model may call tools as often as it
+ * likes.
  *
  * @example
  * ```ts
@@ -56,13 +48,17 @@ export function createRealtimeTools(
     ...(tool.maxResultLength !== undefined && { maxResultLength: tool.maxResultLength }),
     execute: async (args, context) => {
       const threadId = threadIdOf(context);
+      const userId =
+        typeof options.userId === 'function' ? options.userId(context) : options.userId;
+      const onApproval = options.onApproval;
       const result = await invoker.invokeTool(tool, args, {
         toolCallId: context.callId,
-        agentId: options.agentId ?? 'voice',
+        agentId: options.agentId ?? options.agent?.id ?? 'voice',
         signal: context.signal,
+        ...(options.agent && { agent: options.agent }),
         ...(threadId !== undefined && { threadId }),
-        ...(options.userId !== undefined && { userId: options.userId }),
-        ...(options.onApproval && { onApproval: options.onApproval }),
+        ...(userId !== undefined && { userId }),
+        ...(onApproval && { onApproval: (request) => onApproval(request, context) }),
       });
       if (result.error !== undefined) throw new Error(result.error);
       return result.result;
