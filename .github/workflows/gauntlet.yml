@@ -82,6 +82,7 @@ jobs:
         if: steps.key.outputs.present == 'true'
         with:
           node-version: 22
+          check-latest: true
           cache: pnpm
 
       - uses: oven-sh/setup-bun@v2
