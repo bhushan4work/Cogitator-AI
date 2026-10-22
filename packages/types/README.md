@@ -836,6 +836,15 @@ Memory also works between runs. Its settings and what a pass reports:
 
 `RunMiddlewareContext.memoryAgentId` is the id the run's agent keeps memory under, its configured `id`, else its name, unset for a tool call made with `invokeTool()`. `ContextBuildError.source` may be `observations` too.
 
+Entries can be redacted in place, which forgetting and redacting through a Cogitator build on:
+
+| Type                        | Description                                                                                                                                                                                                                                                                                                                               |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `EntryRedaction`            | What redacting an entry records in its `metadata.redacted`: `at` and an optional `reason`                                                                                                                                                                                                                                                 |
+| `MemoryAdapter.redactEntry` | Optional, in every built-in adapter: the text, tool call arguments and tool results of a `message` or `tool_result` entry become `[redacted]`, its tool calls lose their replay state and argument error, a user message its sender `name`, its place, parent, role and call ids stay, `null` for a missing entry, an event entry refused |
+| `MemoryChange`              | What `onChange` listeners hear: `entry-added`, `entry-deleted`, `entry-redacted` (`entryId`, `threadId`), `thread-cleared` and `thread-deleted`. An exhaustive `switch` over it needs the `entry-redacted` case                                                                                                                           |
+| `MemoryAdapter.forkThread`  | Also lists the fork in the origin's `metadata.memoryForks`, and does not copy the origin's paused run                                                                                                                                                                                                                                     |
+
 ---
 
 ## Knowledge Graph Types

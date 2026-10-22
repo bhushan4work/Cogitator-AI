@@ -81,7 +81,7 @@ async function newEntries(
  * thread that ran at the same time appended after it. A run on another branch (a fork, a replay)
  * does not.
  */
-async function onActivePath(
+export async function onActivePath(
   memory: Required<Pick<MemoryAdapter, 'getPath'>>,
   threadId: string,
   activeLeafId: string | null | undefined,
@@ -183,6 +183,8 @@ export function memoryExtractionMiddleware(
     const memory = deps.memory();
     const place = result.memory;
     if (!memory?.getPath || !isMemoryItemAdapter(memory) || !place?.leafId) return;
+    const getPath = memory.getPath.bind(memory);
+    const leafId = place.leafId;
     if (context.signal.aborted) return;
     if ((failures.get(place.threadId)?.until ?? 0) > Date.now()) return;
     const thread = await memory.getThread(place.threadId);
@@ -245,6 +247,43 @@ export function memoryExtractionMiddleware(
         entries,
         { scope, timeZone },
         {
+          beforeWrite: async (found) => {
+            const onBranch = await memory.getThread(place.threadId);
+            if (
+              !onBranch.success ||
+              onBranch.data === null ||
+              !(await onActivePath({ getPath }, place.threadId, onBranch.data.activeLeafId, leafId))
+            ) {
+              return [];
+            }
+            const standing = new Map<string, boolean>();
+            const stands = async (entryId: string) => {
+              const known = standing.get(entryId);
+              if (known !== undefined) return known;
+              const read = await memory.getEntry(entryId);
+              const kept = read.success && read.data !== null && !read.data.metadata?.redacted;
+              standing.set(entryId, kept);
+              return kept;
+            };
+            const kept: typeof found = [];
+            for (const item of found) {
+              const ids = item.evidence.flatMap((piece) =>
+                piece.entryId === undefined ? [] : [piece.entryId]
+              );
+              let all = true;
+              for (const id of ids) all &&= await stands(id);
+              if (all) kept.push(item);
+            }
+            return kept;
+          },
+          beforeWindow: async () => {
+            const now = await memory.getThread(place.threadId);
+            return (
+              now.success &&
+              now.data !== null &&
+              (await onActivePath({ getPath }, place.threadId, now.data.activeLeafId, leafId))
+            );
+          },
           onWindow: async (own) => {
             const last = own.at(-1);
             if (!last) return;

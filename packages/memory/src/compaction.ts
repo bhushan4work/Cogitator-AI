@@ -227,6 +227,23 @@ export class CompactionService {
   }
 
   /**
+   * Refuses a summary whose entries were deleted or redacted while it was written, such as by a
+   * forget made meanwhile
+   */
+  private async sourcesStand(sessionId: string, compacted: readonly MemoryEntry[]): Promise<void> {
+    for (const entry of compacted) {
+      const read = await this.adapter.getEntry(entry.id);
+      if (!read.success) throw new Error(`Failed to read the thread: ${read.error}`);
+      const redactedSince = !entry.metadata?.redacted && read.data?.metadata?.redacted;
+      if (read.data === null || redactedSince) {
+        throw new Error(
+          `Entries of ${sessionId} were deleted or redacted while it was compacted, compact it again`
+        );
+      }
+    }
+  }
+
+  /**
    * Puts `summary` in place of `entriesToRemove`. On an adapter with branches it adds a
    * `compaction` entry to the active branch that leaves them out of the conversation from the
    * first of `entriesToKeep` on (see {@link compactedHistory}) and deletes nothing. On any other
@@ -247,6 +264,7 @@ export class CompactionService {
     };
 
     const summaryTokens = countMessagesTokens([summaryMessage]);
+    await this.sourcesStand(sessionId, entriesToRemove);
     if (this.adapter.getPath) {
       await this.addCompaction(sessionId, summaryMessage, summaryTokens, {
         firstKeptEntryId: entriesToKeep[0]?.id ?? null,

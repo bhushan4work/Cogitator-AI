@@ -28,6 +28,7 @@ import type {
   MemoryFileAdapter,
   MemoryFileFilter,
   MemoryFileVersion,
+  EntryRedaction,
 } from '@cogitator-ai/types';
 import { createRedisClient, type RedisClient } from '@cogitator-ai/redis';
 import { BranchingMemoryAdapter, entryTypeWanted } from './base';
@@ -287,6 +288,23 @@ for step = 1, tonumber(ARGV[6]) do
 end
 out[1] = current
 return out
+`;
+
+/**
+ * Writes the redacted body of an entry (ARGV[2], without its `parentId`) over KEYS[1] when the
+ * entry still reads ARGV[1], keeping the `parentId` it has last as the tree helpers expect. Returns
+ * 1, 0 when another write changed the entry first, so the caller reads it again, -1 without
+ * the entry.
+ */
+const REDACT_ENTRY = `
+local current = redis.call('GET', KEYS[1])
+if not current then return -1 end
+if current ~= ARGV[1] then return 0 end
+local parent = string.match(current, ',"parentId":([^,]*)}$')
+local body = ARGV[2]
+if parent then body = string.sub(body, 1, -2) .. ',"parentId":' .. parent .. '}' end
+redis.call('SET', KEYS[1], body, 'XX', 'KEEPTTL')
+return 1
 `;
 
 /**
@@ -1326,6 +1344,38 @@ export class RedisAdapter
       const data = await client.get(this.key('entry', entryId));
       return this.success(data === null ? null : readEntry(parseEntry(data), true));
     });
+  }
+
+  async redactEntry(
+    entryId: string,
+    redaction: EntryRedaction
+  ): Promise<MemoryResult<MemoryEntry | null>> {
+    return this.redactThrough(entryId, redaction, (entry) =>
+      this.run(async (client) => {
+        const key = this.key('entry', entry.id);
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const data = await client.get(key);
+          if (data === null) return this.failure(`Entry not found: ${entry.id}`);
+          const { parentId: _parent, ...kept } = parseEntry(data) as ReturnType<
+            typeof parseEntry
+          > & {
+            parentId?: unknown;
+          };
+          const body = {
+            ...kept,
+            message: entry.message,
+            toolCalls: entry.toolCalls,
+            toolResults: entry.toolResults,
+            tokenCount: entry.tokenCount,
+            metadata: entry.metadata,
+          };
+          const reply = Number(await client.eval(REDACT_ENTRY, 1, key, data, JSON.stringify(body)));
+          if (reply === -1) return this.failure(`Entry not found: ${entry.id}`);
+          if (reply === 1) return this.success(undefined);
+        }
+        return this.failure(`Entry ${entry.id} kept changing while it was redacted`);
+      })
+    );
   }
 
   async deleteEntry(entryId: string): Promise<MemoryResult<void>> {

@@ -25,6 +25,8 @@ import type {
   MemoryAdapter,
   MemoryFilesConfig,
   MemoryFileAdapter,
+  GraphAdapter,
+  Thread,
   MemoryItemScope,
   MemoryConsolidationReport,
   HandoffEvent,
@@ -69,11 +71,41 @@ import {
   type SummarizeFn,
   isMemoryFileAdapter,
   isMemoryItemAdapter,
+  FORKS_KEY,
+  MEMORY_USERS_KEY,
+  MemoryCascade,
+  type MemoryCascadeReport,
   MemoryFiles,
   PLAYBOOK_PATH,
   inert,
   parsePlaybook,
 } from '@cogitator-ai/memory';
+
+/** The memory ids a thread's metadata names, see `MEMORY_AGENTS` */
+function memoryAgentsOf(metadata: Record<string, unknown>): string[] {
+  return stringsOf(metadata[MEMORY_AGENTS]);
+}
+
+/** The strings of a metadata list */
+function stringsOf(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : [];
+}
+
+/**
+ * Whose memory a cascade of {@link Cogitator.forget}, {@link Cogitator.redactEntries} or
+ * {@link Cogitator.rewind} goes through, besides the agents its threads name
+ */
+export interface MemoryCascadeCall {
+  /** Agents (or their memory ids) whose items, files, facts and graph to go through */
+  agents?: readonly (Agent | string)[];
+  /** A knowledge graph of your own to go through too */
+  graph?: GraphAdapter;
+  /**
+   * Leave the replies to a user message alone: by default forgetting or redacting a user message
+   * takes the entries that answer it too, as an answer may say again what it said
+   */
+  keepReplies?: boolean;
+}
 
 /** Entries of a thread {@link Cogitator.indexMemory} reads at once */
 const INDEX_PAGE = 500;
@@ -107,6 +139,7 @@ async function playbookNote(
 }
 import { TruncateStrategy } from './context/strategies/index';
 import { sanitizeToolHistory } from './utils/tool-history';
+import { MEMORY_AGENTS, noteThreadRun } from './cogitator/message-builder';
 import { normalizeTurn } from './llm/turn';
 import { withPiiDecisions, withPiiMasking } from './security/pii';
 import { MiddlewarePipeline } from './middleware/pipeline';
@@ -143,6 +176,8 @@ import {
   initializeSecurity,
   initializeContextManager,
   cleanupState,
+  isEmbeddingAdapter,
+  isFactAdapter,
 } from './cogitator/initializers';
 import { CogitatorError, ErrorCode, resolveModelRoute } from '@cogitator-ai/types';
 import {
@@ -1241,6 +1276,7 @@ export class Cogitator implements ToolInvoker {
         await enrichMessagesWithInsights(messages, this.state.reflectionEngine, agentContext);
       }
 
+      const memoryNotes: Promise<void>[] = [];
       const switchTo = (target: Agent, reason: unknown) => {
         const event: HandoffEvent = {
           from: active.name,
@@ -1272,6 +1308,24 @@ export class Cogitator implements ToolInvoker {
           )
         );
         active = target;
+        if (this.state.memoryAdapter && options.useMemory !== false) {
+          memoryNotes.push(
+            noteThreadRun(
+              this.state.memoryAdapter,
+              threadId,
+              {
+                memoryId: memoryAgentId(target),
+                ...(options.userId !== undefined && { userId: options.userId }),
+              },
+              options.onMemoryError
+            ).catch((error: unknown) =>
+              getLogger().warn('Could not note the agent a run handed over to', {
+                threadId,
+                error: error instanceof Error ? error.message : String(error),
+              })
+            )
+          );
+        }
         pipeline = pipelineFor(target);
         ({ registry, targets: handoffTargets } = buildRegistry(target));
         effectiveModel = this.resolveModel(target);
@@ -2075,6 +2129,7 @@ export class Cogitator implements ToolInvoker {
       if (prompt) await this.recordPrompt(prompt, result, Date.now() - startTime);
 
       await runMemory.settled();
+      await Promise.all(memoryNotes);
       if (sentItemIds.length > 0) this.noteRetrieved(sentItemIds, runId);
       await pipeline.afterRun(
         {
@@ -2965,6 +3020,248 @@ export class Cogitator implements ToolInvoker {
       run: { runId, agentId: agent.id, threadId },
       ...(run.since && { since: run.since }),
     });
+  }
+
+  /**
+   * Forgets what a conversation established, in every store memory keeps: `{ entryIds }` deletes
+   * those entries (a user message with the entries that answer it, unless `keepReplies`),
+   * `{ threadId }` the thread, `{ userId }` every thread of the user (by its
+   * `metadata.userId`) and everything kept for the user. With them goes all memory derived from
+   * them: compaction summaries that cover them (the next compaction writes them again), memory
+   * items, facts, graph nodes and edges that stand only on them (those that stand on more lose the
+   * quotes of them), their vectors, memory file versions written at them, and every version of an
+   * observation or a playbook that names an item that went, the playbook in front losing those
+   * rules in a new version. See `MemoryCascade` and the report it returns.
+   *
+   * Items, files, facts and the graph are kept by the memory id of an agent. Each thread names the
+   * agents that ran in it (`metadata.memoryAgentIds`), and their memory is gone through: `agents`
+   * adds others, and is needed for a thread written before threads named them and for a user
+   * without threads. `graph` is a knowledge graph of your own to go through too.
+   *
+   * Paused runs of the threads it touches are dropped, as their messages would bring back what
+   * was forgotten on resume.
+   *
+   * @throws CogitatorError when no memory is configured, or the agents to go through are not known
+   * (a thread that names none, or a user without threads, and no `agents`). A store that fails
+   * part of the way throws its own error, and the call can be made again.
+   */
+  async forget(
+    target: { entryIds: readonly string[] } | { threadId: string } | { userId: string },
+    options: MemoryCascadeCall = {}
+  ): Promise<MemoryCascadeReport> {
+    const { cascade, agentIds } = await this.cascadeFor('forget', options);
+    if ('userId' in target) {
+      const users = await this.withUserAgents(agentIds, target.userId);
+      if (users.length === 0) {
+        throw new CogitatorError({
+          message: 'forget({ userId }) needs the agents whose memory to go through: pass agents',
+          code: ErrorCode.VALIDATION_ERROR,
+        });
+      }
+      const report = await cascade.deleteUser(target.userId, { agentIds: users });
+      await this.dropPausedRuns([...report.threads, ...report.threadsChanged]);
+      return report;
+    }
+    if ('threadId' in target) {
+      const report = await cascade.deleteThread(target.threadId, {
+        agentIds: await this.withThreadAgents(agentIds, [target.threadId]),
+      });
+      await this.dropPausedRuns([target.threadId, ...report.threadsChanged]);
+      return report;
+    }
+    const threads = await this.threadsOf(target.entryIds);
+    const report = await cascade.deleteEntries(target.entryIds, {
+      agentIds: await this.withThreadAgents(agentIds, threads),
+      ...(options.keepReplies && { keepReplies: true }),
+    });
+    await this.dropPausedRuns([...threads, ...report.threadsChanged]);
+    return report;
+  }
+
+  /**
+   * Redacts `entryIds` in place: what they said becomes `[redacted]` while their place in the
+   * thread stays (`MemoryAdapter.redactEntry`), and all memory derived from what they said goes as
+   * with {@link forget}. A compaction entry among them is deleted.
+   *
+   * @throws CogitatorError when no memory is configured, the adapter cannot redact, or a thread
+   * names no agents and `agents` is not passed. A store that fails part of the way throws its own
+   * error, and the call can be made again.
+   */
+  async redactEntries(
+    entryIds: readonly string[],
+    options: MemoryCascadeCall & { reason?: string } = {}
+  ): Promise<MemoryCascadeReport> {
+    const { cascade, agentIds } = await this.cascadeFor('redactEntries', options);
+    const memory = this.state.memoryAdapter;
+    if (!memory?.redactEntry) {
+      throw new CogitatorError({
+        message: `The ${memory?.provider ?? 'configured'} memory adapter cannot redact entries`,
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+    }
+    const threads = await this.threadsOf(entryIds);
+    const report = await cascade.redactEntries(
+      entryIds,
+      { at: new Date(), ...(options.reason !== undefined && { reason: options.reason }) },
+      {
+        agentIds: await this.withThreadAgents(agentIds, threads),
+        ...(options.keepReplies && { keepReplies: true }),
+      }
+    );
+    await this.dropPausedRuns([...threads, ...report.threadsChanged]);
+    return report;
+  }
+
+  /**
+   * Rewinds `threadId` to `toEntryId`, an entry of its active branch: new entries go after it,
+   * and the entries after it stay on a branch of their own. The memory items that stood only on
+   * those entries become `stale` (`staleBecause: { reason: 'rewound' }`), so later runs no longer
+   * take them for what holds. Summaries and memory files of the branch left behind are not seen
+   * from the new one already.
+   *
+   * @throws CogitatorError when no memory is configured, the adapter has no branches, or the thread
+   * names no agents and `agents` is not passed. A store that fails throws its own error, and the
+   * rewind can be made again.
+   */
+  async rewind(
+    threadId: string,
+    toEntryId: string,
+    options: Pick<MemoryCascadeCall, 'agents'> = {}
+  ): Promise<MemoryCascadeReport> {
+    const { cascade, agentIds } = await this.cascadeFor('rewind', options);
+    const memory = this.state.memoryAdapter;
+    if (!memory?.rewind || !memory.getPath) {
+      throw new CogitatorError({
+        message: `The ${memory?.provider ?? 'configured'} memory adapter has no branches to rewind`,
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+    }
+    return cascade.rewind(threadId, toEntryId, {
+      agentIds: await this.withThreadAgents(agentIds, [threadId]),
+    });
+  }
+
+  /** The cascade over this runtime's memory stores, and the memory ids of `options.agents` */
+  private async cascadeFor(
+    method: string,
+    options: MemoryCascadeCall
+  ): Promise<{ cascade: MemoryCascade; agentIds: string[] }> {
+    const memory = await this.getMemory();
+    if (!memory) {
+      throw new CogitatorError({
+        message: `${method} needs memory: set memory.adapter in the Cogitator config`,
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+    }
+    const embeddings =
+      this.state.embeddingStore ?? (isEmbeddingAdapter(memory) ? memory : undefined);
+    const cascade = new MemoryCascade({
+      memory,
+      ...(isMemoryItemAdapter(memory) && { items: memory }),
+      ...(isMemoryFileAdapter(memory) && { files: memory }),
+      ...(isFactAdapter(memory) && { facts: memory }),
+      ...(embeddings && { embeddings }),
+      ...(options.graph && { graph: options.graph }),
+    });
+    const agentIds = [
+      ...new Set([
+        ...(options.agents ?? []).flatMap((agent) =>
+          typeof agent === 'string' ? [agent] : [memoryAgentId(agent), agent.id]
+        ),
+      ]),
+    ];
+    return { cascade, agentIds };
+  }
+
+  /**
+   * Drops the paused runs of `threadIds`: a checkpoint keeps the messages of the run, which would
+   * bring what was forgotten back on resume
+   */
+  private async dropPausedRuns(threadIds: readonly string[]): Promise<void> {
+    const store = this.runCheckpointStore();
+    for (const threadId of new Set(threadIds)) {
+      if (await store.load(threadId)) await store.delete(threadId);
+    }
+  }
+
+  /** The threads `entryIds` are in */
+  private async threadsOf(entryIds: readonly string[]): Promise<string[]> {
+    const memory = this.state.memoryAdapter;
+    if (!memory) return [];
+    const threads = new Set<string>();
+    for (const entryId of entryIds) {
+      const entry = await memory.getEntry(entryId);
+      if (entry.success && entry.data) threads.add(entry.data.threadId);
+    }
+    return [...threads];
+  }
+
+  /**
+   * `agentIds` with the agents of `threadIds` and of the threads forked from them (in turn): the
+   * memory ids the threads name (`metadata.memoryAgentIds`) and their owners. A thread that names
+   * none, written before threads named them, needs `agentIds` from the caller.
+   */
+  private async withThreadAgents(
+    agentIds: readonly string[],
+    threadIds: readonly string[]
+  ): Promise<string[]> {
+    const memory = this.state.memoryAdapter;
+    const all = new Set(agentIds);
+    const queue = [...threadIds];
+    const seen = new Set(queue);
+    for (let threadId = queue.pop(); threadId !== undefined; threadId = queue.pop()) {
+      const thread = await memory?.getThread(threadId);
+      if (!thread?.success || !thread.data) continue;
+      this.addThreadAgents(all, thread.data, agentIds.length === 0);
+      for (const fork of stringsOf(thread.data.metadata[FORKS_KEY])) {
+        if (seen.has(fork)) continue;
+        seen.add(fork);
+        queue.push(fork);
+      }
+    }
+    return [...all];
+  }
+
+  /**
+   * `agentIds` with the agents of every thread `userId` wrote in: the user's own threads, those
+   * that list the user in `metadata.memoryUserIds`, and the threads forked from them. Every
+   * thread is listed to find them.
+   */
+  private async withUserAgents(agentIds: readonly string[], userId: string): Promise<string[]> {
+    const memory = this.state.memoryAdapter;
+    const touched: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await memory?.listThreads({
+        limit: 500,
+        ...(cursor !== undefined && { cursor }),
+      });
+      if (!page?.success) break;
+      for (const thread of page.data.threads) {
+        const wrote =
+          thread.metadata.userId === userId ||
+          stringsOf(thread.metadata[MEMORY_USERS_KEY]).includes(userId);
+        if (wrote) touched.push(thread.id);
+      }
+      cursor = page.data.nextCursor;
+    } while (cursor !== undefined);
+    return this.withThreadAgents(agentIds, touched);
+  }
+
+  /**
+   * Adds to `all` the owner of `thread` and the memory ids it names, refusing a thread that names
+   * none when `required`
+   */
+  private addThreadAgents(all: Set<string>, thread: Thread, required: boolean): void {
+    all.add(thread.agentId);
+    const named = memoryAgentsOf(thread.metadata);
+    if (named.length === 0 && required) {
+      throw new CogitatorError({
+        message: `Thread ${thread.id} does not name the agents whose memory stands on it: pass agents`,
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+    }
+    for (const id of named) all.add(id);
   }
 
   /**

@@ -277,7 +277,11 @@ export class MemoryExtractor {
    * The items of `entries` as written, oldest first. `progress.onWindow` hears of each window
    * once its items are written, with the entries it was the first to read, so a caller can keep
    * its place. A window whose model call fails throws, unless `progress.skip` takes the error
-   * and the window's entries and says to go on without it.
+   * and the window's entries and says to go on without it. When `progress.beforeWindow` says no
+   * before a window's model call, such as for a branch a rewind left, extraction stops there and
+   * returns what it wrote. `progress.beforeWrite` takes the items a window's answer gave before
+   * they are written and returns those to write, such as without the ones whose entries were
+   * forgotten while the model answered.
    */
   async extract(
     entries: readonly MemoryEntry[],
@@ -285,6 +289,8 @@ export class MemoryExtractor {
     progress: {
       onWindow?: (own: MemoryEntry[], items: MemoryItem[]) => Promise<void>;
       skip?: (error: Error, own: MemoryEntry[], index: number) => boolean;
+      beforeWindow?: (own: MemoryEntry[]) => Promise<boolean>;
+      beforeWrite?: (items: NewMemoryItem[]) => Promise<NewMemoryItem[]>;
     } = {}
   ): Promise<MemoryItem[]> {
     const written: MemoryItem[] = [];
@@ -293,9 +299,13 @@ export class MemoryExtractor {
     );
     const windowTokens = this.config.windowTokens ?? DEFAULT_WINDOW_TOKENS;
     for (const [index, { window, own }] of chapterWindows(conversation, windowTokens).entries()) {
+      if (progress.beforeWindow && !(await progress.beforeWindow(own))) break;
       let items: MemoryItem[];
       try {
-        items = await this.config.items.write(await this.read(window, context, windowTokens));
+        const read = await this.read(window, context, windowTokens);
+        items = await this.config.items.write(
+          progress.beforeWrite ? await progress.beforeWrite(read) : read
+        );
       } catch (error) {
         const failure = error instanceof Error ? error : new Error(String(error));
         if (!progress.skip?.(failure, own, index)) {

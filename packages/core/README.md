@@ -72,6 +72,7 @@ console.log(result.output);
 - **Memory Integration** - In-memory, Redis, PostgreSQL, SQLite, MongoDB and Qdrant adapters
 - **Agent Memory Tools** - `search_memory`, `open_turns` and `list_entities` with a citation lock, and memory files under `/memories` through the `memory` tool, Anthropic's own `memory_20250818` on Claude 4 and later through the Anthropic backend, a tool with the same commands everywhere else
 - **Memory Between Runs** - A pre-turn brief of cards quoting their sources (`memory.brief`), observations of entities (`memory.observations`), and a background pass that marks repeats stale and folds lessons into a playbook (`memory.consolidation`, `cog.consolidateMemory()`)
+- **Forget, Redact, Rewind** - `cog.forget()`, `cog.redactEntries()` and `cog.rewind()` take turns, threads or a whole user out of memory with every summary, item, fact, vector and memory file derived from them
 - **26 Built-in Tools** - Web search, SQL, email, GitHub, filesystem, and more
 - **Reflection Engine** - Self-improvement through tool call analysis
 - **Tree-of-Thought** - Advanced reasoning with branch exploration
@@ -1218,6 +1219,28 @@ const other = await cog.run(agent, {
 ```
 
 `result.memory` says where a run wrote (`threadId`, `branchPoint`, `leafId`). A branch needs an adapter with `getPath` (every built-in one) and an entry of the thread, else the run fails with `VALIDATION_ERROR`. The runtime also records session events as entries: `model_change` on a fallback, `approval` when a run pauses, `interrupt` when one is aborted or times out. A paused run resumes on its branch. A run with `activate: false` leaves the thread's paused run alone and is resumed with its checkpoint, not the thread id.
+
+### Forgetting, Redacting and Rewinding
+
+Deleting a turn alone does not forget it: a fact, a summary or a playbook rule memory wrote from it would still reach the next run. These methods follow the lineage of what memory derived into every store:
+
+```typescript
+await cog.forget({ entryIds: [entry.id] }); // the entries, a user message with its replies
+await cog.forget({ threadId: 'chat' }); // a thread
+await cog.forget({ userId: 'ana' }, { agents: [assistant] }); // every thread and everything kept for the user
+await cog.redactEntries([entry.id], { reason: 'the user asked' }); // '[redacted]' in place
+await cog.rewind('chat', earlier.id); // the turns after it stay on their branch, their items go stale
+```
+
+- With deleted or redacted entries go their copies in forks (`metadata.memoryForks`), the compaction summaries that cover or quote them (the next compaction writes them again), the memory items, facts (when the memory adapter is a fact store) and graph nodes and edges (with `graph`) that stand only on them (those that stand on more lose the quotes of them), their vectors, the memory file versions written at them (a file whose version in front was redacted is then deleted, so its path leaves the listing once no version on any branch still holds its text), and every version of an observation or a playbook that names an item or a lesson that went, the playbook in front first written again without those rules. A user message takes its replies, up to the next user message on every branch, unless `keepReplies: true`.
+- `redactEntries` keeps each entry in its place, with its parent, its role and its tool call ids, `[redacted]` in its text, tool arguments and tool results and `reason` in `metadata.redacted`. Its tool calls lose their replay state and argument error, and a user message loses its sender `name`. An event entry among the ids or their replies (`model_change`, `approval`, `interrupt`, `label`, `custom`, or a `compaction` among the ids) is deleted, not redacted, and listed in `entries.deleted`.
+- `forget({ threadId })` also purges the items and entities and redacts the memory file versions kept for that thread alone (their files then deleted), and takes the copies of its entries in its forks. `forget({ userId })` deletes every thread whose `metadata.userId` is the user whole (the messages others wrote in it too), the messages the user wrote in threads of others (those that list the user in `metadata.memoryUserIds`) with their replies, everything of the user's scope, and the facts, graph nodes and edges and embeddings whose `metadata.userId` is the user. It lists every thread to find them.
+- `forget` and `redactEntries` drop the paused runs of the threads they touch (`threads` and `threadsChanged` in the report), also from a `runCheckpoints` store of your own, and a fork does not copy the paused run of its origin.
+- `rewind` deletes nothing: the memory items that stood only on the turns after `toEntryId` become `stale` (`staleBecause: { reason: 'rewound' }`). It marks them before it moves the thread, so one that failed can be made again (a rewind the store refuses leaves them as they were), and a thread that stands at `toEntryId` already is left as it is. Memory extraction and compaction under way stop before their next model call once the run's branch is no longer the active one. Compaction refuses to write a summary whose entries were deleted or redacted while it was written, and extraction drops the items whose entries went while the model answered.
+
+Items, files, facts and the graph are kept by the memory id of an agent (its configured `id`, else its name). Every run notes in the thread's metadata the memory id of its agent and of every agent it hands over to (`metadata.memoryAgentIds`), and the user it ran for (`metadata.memoryUserIds`), and a call goes through the memory of the agents the threads name. A thread written before this release names only the agents that ran in it since, so pass `agents` (agents or their memory ids) for the ones before, and for a user without threads. The lists are read again just before each write, which narrows, but does not close, the window in which two runs writing at once keep only one name. `graph` is a knowledge graph of your own to go through. Each call returns a `MemoryCascadeReport`. `MemoryCascadeCall` (`agents`, `graph`, `keepReplies`) is the type of the options of `forget` and `redactEntries`, and `rewind` takes only `agents`.
+
+All three throw `CogitatorError` (`VALIDATION_ERROR`) when no memory is configured or the agents to go through are not known (a thread that names none and no `agents`, or a user without threads), `redactEntries` also when the adapter cannot redact, and `rewind` also when the adapter has no branches. A store that fails part of the way throws its own error, and the call can be made again, as derived memory goes before the entries.
 
 See [Memory](https://cogitator.app/docs/memory), [Memory Adapters](https://cogitator.app/docs/memory/adapters) and [Runs on Branches](https://cogitator.app/docs/core/cogitator#runs-on-branches).
 

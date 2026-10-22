@@ -17,6 +17,8 @@ import type {
   MemoryChangeListener,
   MemoryEntryType,
   PathQueryOptions,
+  EntryRedaction,
+  ToolCall,
 } from '@cogitator-ai/types';
 import { CONVERSATION_ENTRY_TYPES } from '@cogitator-ai/types';
 
@@ -142,6 +144,33 @@ export abstract class ChangeReportingMemoryAdapter extends BaseMemoryAdapter {
     return result;
   }
 
+  /**
+   * `redactEntry` over a store: reads the entry, leaves it as {@link redactedEntry} says, writes
+   * it back with `replace` and reports the change
+   */
+  protected async redactThrough(
+    entryId: string,
+    redaction: EntryRedaction,
+    replace: (entry: MemoryEntry) => Promise<MemoryResult<void>>
+  ): Promise<MemoryResult<MemoryEntry | null>> {
+    const found = await this.getEntry(entryId);
+    if (!found.success) return found;
+    if (!found.data) return this.success(null);
+    const redacted = redactedEntry(found.data, redaction);
+    if (!redacted) {
+      return this.failure(
+        `Entry ${entryId} is a ${found.data.type ?? 'message'} entry, which cannot be redacted: delete it instead`
+      );
+    }
+    const written = await replace(redacted);
+    if (!written.success) return written;
+    return this.reported(this.success<MemoryEntry | null>(redacted), () => ({
+      type: 'entry-redacted',
+      entryId,
+      threadId: redacted.threadId,
+    }));
+  }
+
   /** Tells the change listeners about `change`; one that throws is logged */
   protected report(change: MemoryChange): void {
     for (const listener of this.changeListeners) {
@@ -161,6 +190,76 @@ export function entryTypeWanted(
 ): boolean {
   if (types === 'all') return true;
   return (types ?? CONVERSATION_ENTRY_TYPES).includes(type ?? 'message');
+}
+
+/**
+ * A tool call with nothing left of what it said: no arguments, and none of the replay state or
+ * argument error a provider may keep the model's own words in
+ */
+function silenced(call: ToolCall): ToolCall {
+  const { replay: _replay, argumentsError: _error, ...kept } = call;
+  return { ...kept, arguments: {} };
+}
+
+/**
+ * The metadata key a thread lists the threads forked from it under, so what is forgotten in it
+ * is found in their copies too. Two forks made of one thread at the same moment may keep only one
+ * of them in the list.
+ */
+export const FORKS_KEY = 'memoryForks';
+
+/**
+ * The metadata key a thread lists the users who wrote in it under, so forgetting a user finds
+ * their messages in threads of others too
+ */
+export const MEMORY_USERS_KEY = 'memoryUserIds';
+
+/** What a redacted entry says in place of what it said */
+export const REDACTED_TEXT = '[redacted]';
+
+/**
+ * `entry` with what it said replaced by {@link REDACTED_TEXT}: its text, the arguments of its tool
+ * calls and the results of its tools, its role and the ids that tie calls to results kept, and
+ * `metadata.redacted` recording `redaction`. Undefined for an entry that is no conversation
+ * entry, such as a compaction.
+ */
+export function redactedEntry(
+  entry: MemoryEntry,
+  redaction: EntryRedaction
+): MemoryEntry | undefined {
+  if (!CONVERSATION_ENTRY_TYPES.includes(entry.type ?? 'message')) return undefined;
+  const { name: sender, ...said } = entry.message;
+  const message = {
+    ...said,
+    content: REDACTED_TEXT,
+    ...(sender !== undefined && entry.message.role !== 'user' && { name: sender }),
+  };
+  if ('toolCalls' in message && Array.isArray(message.toolCalls)) {
+    message.toolCalls = (message.toolCalls as ToolCall[]).map(silenced);
+  }
+  return {
+    ...entry,
+    message,
+    ...(entry.toolCalls && {
+      toolCalls: entry.toolCalls.map(silenced),
+    }),
+    ...(entry.toolResults && {
+      toolResults: entry.toolResults.map((result) => ({
+        callId: result.callId,
+        name: result.name,
+        result: REDACTED_TEXT,
+        ...(result.error !== undefined && { error: REDACTED_TEXT }),
+      })),
+    }),
+    tokenCount: Math.min(entry.tokenCount, 4),
+    metadata: {
+      ...entry.metadata,
+      redacted: {
+        at: redaction.at.toISOString(),
+        ...(redaction.reason !== undefined && { reason: redaction.reason }),
+      },
+    },
+  };
 }
 
 /** An entry without the tool calls and results a read did not ask for */
@@ -289,12 +388,17 @@ export abstract class BranchingMemoryAdapter extends ChangeReportingMemoryAdapte
       includeToolCalls: true,
     });
     if (!path.success) return path;
+    const { pausedRun: _paused, [FORKS_KEY]: _forks, ...metadata } = source.data.metadata;
     const fork = await this.createThread(
       source.data.agentId,
-      { ...source.data.metadata, forkedFrom: { threadId, entryId: atEntryId } },
+      { ...metadata, forkedFrom: { threadId, entryId: atEntryId } },
       newThreadId
     );
     if (!fork.success) return fork;
+    const known = source.data.metadata[FORKS_KEY];
+    const forks = Array.isArray(known) ? known.filter((id) => typeof id === 'string') : [];
+    const noted = await this.updateThread(threadId, { [FORKS_KEY]: [...forks, fork.data.id] });
+    if (!noted.success) return noted;
     let parentId: string | null = null;
     const copies = new Map<string, string>();
     for (const entry of path.data) {

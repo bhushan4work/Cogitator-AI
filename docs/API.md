@@ -220,6 +220,30 @@ class Cogitator {
     agent: Agent,
     run?: { userId?: string; threadId?: string; since?: Date } // since: report.dedupe.through to go on
   ): Promise<MemoryConsolidationReport>;
+  // Deletes entries (a user message with its replies, unless keepReplies), a thread, or every thread
+  // of a user and everything kept for the user, with all memory derived from them and the paused
+  // runs of the threads it touches. Goes through the memory of the agents each thread names
+  // (metadata.memoryAgentIds), agents adds others and is needed for the agents that ran in a
+  // thread before threads named them and for a user without threads. The graph is reached only
+  // with graph. Throws CogitatorError (VALIDATION_ERROR) without memory or when the agents to go
+  // through are not known, a store's own error when it fails part of the way (call it again)
+  forget(
+    target: { entryIds: readonly string[] } | { threadId: string } | { userId: string },
+    options?: MemoryCascadeCall // { agents?: (Agent | string)[]; graph?: GraphAdapter; keepReplies?: boolean }
+  ): Promise<MemoryCascadeReport>;
+  // What the entries said becomes '[redacted]', their place stays, what was derived from them goes,
+  // an event entry among them or their replies is deleted. Also throws when the adapter cannot redact
+  redactEntries(
+    entryIds: readonly string[],
+    options?: MemoryCascadeCall & { reason?: string }
+  ): Promise<MemoryCascadeReport>;
+  // Rewinds the thread to an entry of its active branch, items standing only on the turns after it
+  // go stale. Also throws when the adapter has no branches
+  rewind(
+    threadId: string,
+    toEntryId: string,
+    options?: Pick<MemoryCascadeCall, 'agents'> // { agents? } only
+  ): Promise<MemoryCascadeReport>;
 
   // Versioned instructions and A/B tests
   readonly prompts: PromptRegistry;
@@ -1100,6 +1124,13 @@ interface MemoryAdapter {
   getEntry(entryId: string): Promise<MemoryResult<MemoryEntry | null>>;
   deleteEntry(entryId: string): Promise<MemoryResult<void>>;
   clearThread(threadId: string): Promise<MemoryResult<void>>;
+  // Optional, in every built-in adapter: text, tool arguments and results become '[redacted]',
+  // place, role and call ids stay, metadata.redacted records { at, reason? }. Null for a missing
+  // entry, an event entry such as a compaction refused
+  redactEntry?(
+    entryId: string,
+    redaction: EntryRedaction
+  ): Promise<MemoryResult<MemoryEntry | null>>;
 
   // Lifecycle
   connect(): Promise<MemoryResult<void>>;
@@ -1191,6 +1222,53 @@ await items.markStale(itemIds, { reason: 'duplicate', keptId }, ['active']); // 
 ```
 
 `memoryBriefMiddleware(config, deps)` and `memoryUpkeepMiddleware(config, deps)` from `@cogitator-ai/core` are the run middleware a Cogitator builds from the config, exported for a runtime of your own. See [Between Runs](https://cogitator.app/docs/memory#between-runs).
+
+### Memory cascades
+
+The lineage cascades behind `cog.forget`, `cog.redactEntries` and `cog.rewind`, for stores of your own:
+
+```typescript
+import { MemoryCascade, MemoryItems } from '@cogitator-ai/memory';
+
+// stores: items a MemoryItemAdapter, files a MemoryFileAdapter, all but memory optional
+const cascade = new MemoryCascade({
+  memory,
+  items: memory,
+  files: memory,
+  graph,
+  facts,
+  embeddings,
+});
+const who = { agentIds: ['assistant'], keepReplies: false }; // whose items, files, facts and graph to go through
+
+await cascade.deleteEntries(entryIds, who); // a user message takes its replies unless keepReplies
+await cascade.redactEntries(entryIds, { at: new Date(), reason: 'erasure request' }, who); // needs redactEntry
+await cascade.deleteThread(threadId, who); // also the thread's own items and entities and files, the copies in its forks
+await cascade.deleteUser(userId, who); // its threads whole, its messages in threads of others, its scope, owned facts and graph
+await cascade.rewind(threadId, toEntryId, who); // items standing only on the turns after it marked stale
+
+// MemoryCascadeReport
+interface MemoryCascadeReport {
+  entries: { deleted: string[]; redacted: string[] };
+  threads: string[]; // threads deleted
+  threadsChanged: string[]; // threads that lost or had redacted some of their entries
+  summaries: string[]; // compaction entries deleted, the next compaction writes them again
+  items: { purged: string[]; trimmed: string[]; stale: string[] };
+  entities: string[];
+  facts: { deleted: string[]; trimmed: string[] };
+  graph: { nodes: string[]; edges: string[]; trimmed: string[] };
+  fileVersions: string[]; // memory file versions redacted
+  playbookRules: number; // rules taken out of a playbook in front
+}
+
+// MemoryItems: keeps the evidence pieces keep takes, returns the ids it changed
+await new MemoryItems({ adapter: memory }).reviseEvidence(
+  itemIds,
+  (piece) => !gone.has(piece.entryId ?? '')
+);
+```
+
+With deleted or redacted entries go their replies and their copies in forks (`metadata.memoryForks`, `FORKS_KEY`), the compaction summaries that cover or quote them, the memory items, facts and graph nodes and edges that stand only on them (the others lose those quotes, entities no item is about any more are deleted), their vectors, the memory file versions written at them and every version of an observation or a playbook that names an item or a lesson that went. A file whose version in front was redacted is then deleted. An event entry among the entries to redact or their replies is deleted, not redacted. `deleteUser` finds the user's messages in threads of others by `metadata.memoryUserIds` (`MEMORY_USERS_KEY`), listing every thread. Derived memory goes before the entries, so a cascade that fails part of the way can be made again. `MemoryCascade` reads no `metadata.memoryAgentIds` and drops no paused runs, a Cogitator does both. `redactedEntry(entry, redaction)` and `REDACTED_TEXT` build a redacted entry for an adapter of your own. See [Forgetting, Redacting and Rewinding](https://cogitator.app/docs/memory#forgetting-redacting-and-rewinding).
 
 ---
 

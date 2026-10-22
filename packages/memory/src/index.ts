@@ -8,6 +8,10 @@ export {
   BaseMemoryAdapter,
   ChangeReportingMemoryAdapter,
   BranchingMemoryAdapter,
+  REDACTED_TEXT,
+  FORKS_KEY,
+  MEMORY_USERS_KEY,
+  redactedEntry,
   InMemoryAdapter,
   createMemoryAdapter,
   createEmbeddingAdapter,
@@ -302,6 +306,12 @@ export {
   type PlaybookChange,
   type PlaybookEdit,
 } from './memory-consolidation';
+export {
+  MemoryCascade,
+  type CascadeAgents,
+  type MemoryCascadeOptions,
+  type MemoryCascadeReport,
+} from './memory-cascade';
 export {
   MemoryFiles,
   MemoryFileError,
