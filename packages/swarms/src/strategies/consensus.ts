@@ -39,6 +39,22 @@ interface VoteCount {
   voters: string[];
 }
 
+const TEMPLATE_DECISION =
+  /^[[<(]?\s*(?:your|my)\s+(?:new\s+|updated\s+|final\s+)?(?:decision|vote|answer|choice)\s*[\])>]?[.!]?$/i;
+
+function firstRealDecision(
+  output: string,
+  pattern: RegExp
+): { decision: string; line: string } | null {
+  for (const match of output.matchAll(pattern)) {
+    const decision = match[1].trim();
+    if (decision !== '' && !TEMPLATE_DECISION.test(decision)) {
+      return { decision, line: match[0] };
+    }
+  }
+  return null;
+}
+
 export class ConsensusStrategy extends BaseStrategy {
   private config: ConsensusConfig;
 
@@ -122,9 +138,20 @@ export class ConsensusStrategy extends BaseStrategy {
         const result = await this.coordinator.runAgent(swarmAgent.agent.name, input, agentContext);
         agentResults.set(`${swarmAgent.agent.name}_round${round}`, result);
 
-        const vote =
+        let vote =
           this.findToolVote(swarmAgent, round) ??
           this.extractVote(result.output, swarmAgent, round);
+        if (!vote) {
+          const reminder = await this.coordinator.runAgent(
+            swarmAgent.agent.name,
+            `Your last answer had no vote. Reply with one line in the form VOTE: <your decision>, then a short reason.\n\nThe question: ${options.input}`,
+            agentContext
+          );
+          agentResults.set(`${swarmAgent.agent.name}_round${round}_vote`, reminder);
+          vote =
+            this.findToolVote(swarmAgent, round) ??
+            this.extractVote(reminder.output, swarmAgent, round);
+        }
         if (vote) {
           roundVotes.push(vote);
           allVotes.push(vote);
@@ -205,26 +232,21 @@ export class ConsensusStrategy extends BaseStrategy {
     };
   }
 
+  /**
+   * The vote in an agent's answer: the first `VOTE:` line, else the first `decision:`, `vote:`,
+   * `choose:` or `select:` line. Lines that only repeat the format template from the prompt,
+   * like `VOTE: [your decision]`, are skipped, since small models often echo it back.
+   */
   private extractVote(output: string, agent: SwarmAgent, round: number): Vote | null {
-    const voteMatch = /VOTE:\s*([^\n]+)/i.exec(output);
-    if (!voteMatch) {
-      const decisionMatch = /(?:decision|vote|choose|select):\s*([^\n]+)/i.exec(output);
-      if (!decisionMatch) return null;
-
-      return {
-        agentName: agent.agent.name,
-        decision: decisionMatch[1].trim(),
-        reasoning: output,
-        weight: this.getAgentWeight(agent),
-        round,
-        timestamp: Date.now(),
-      };
-    }
+    const voteMatch = firstRealDecision(output, /VOTE:\s*([^\n]+)/gi);
+    const match =
+      voteMatch ?? firstRealDecision(output, /(?:decision|vote|choose|select):\s*([^\n]+)/gi);
+    if (!match) return null;
 
     return {
       agentName: agent.agent.name,
-      decision: voteMatch[1].trim(),
-      reasoning: output.replace(voteMatch[0], '').trim(),
+      decision: match.decision,
+      reasoning: voteMatch ? output.replace(voteMatch.line, '').trim() : output,
       weight: this.getAgentWeight(agent),
       round,
       timestamp: Date.now(),

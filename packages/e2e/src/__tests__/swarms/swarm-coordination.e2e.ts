@@ -184,7 +184,14 @@ describeE2E('Swarms: Multi-Agent Coordination', () => {
     expect(result.agentResults.size).toBeGreaterThanOrEqual(3);
 
     expect(result.votes).toBeDefined();
-    expect(result.votes!.size).toBeGreaterThanOrEqual(3);
+    expect(result.votes!.size).toBeGreaterThanOrEqual(2);
+
+    const turns = [...result.agentResults.keys()].filter((key) => /_round\d+$/.test(key));
+    for (const turn of turns) {
+      if (!result.votes!.has(turn)) {
+        expect(result.agentResults.has(`${turn}_vote`)).toBe(true);
+      }
+    }
 
     const hasRelevantVote = Array.from(result.votes!.values()).some((v) => {
       const vote = v as { decision: string };

@@ -1,5 +1,20 @@
 # @cogitator-ai/swarms
 
+## 0.14.4
+
+### Patch Changes
+
+- [`dd055e4`](https://github.com/cogitator-ai/Cogitator-AI/commit/dd055e4dd0d1a4ddd4d255bc04117458b03cefd7) - The consensus strategy no longer counts a line that only repeats the vote format, like `VOTE: [your decision]`, as a vote, and asks an agent once more for its vote when an answer has none, before treating the vote as missing.
+
+## 0.14.3
+
+### Patch Changes
+
+- Updated dependencies [[`6cdb9e0`](https://github.com/cogitator-ai/Cogitator-AI/commit/6cdb9e049b6be5f2257cb52e84caaff1ff129357), [`6cdb9e0`](https://github.com/cogitator-ai/Cogitator-AI/commit/6cdb9e049b6be5f2257cb52e84caaff1ff129357)]:
+  - @cogitator-ai/core@0.58.0
+  - @cogitator-ai/types@0.63.0
+  - @cogitator-ai/workflows@0.14.4
+
 ## 0.14.2
 
 ### Patch Changes

@@ -118,6 +118,60 @@ describe('ConsensusStrategy', () => {
         reasoning: expect.stringContaining('reasoning for voting yes'),
       });
     });
+
+    it('skips a line that only echoes the vote format', async () => {
+      coordinator.setAgentResponse('voter-1', 'VOTE: [your decision]\nVOTE: 4\nTwo plus two');
+      coordinator.setAgentResponse('voter-2', 'Decision: <your new decision>\ndecision: 4');
+
+      const strategy = new ConsensusStrategy(coordinator, {
+        onNoConsensus: 'fail',
+        maxRounds: 1,
+        resolution: 'majority',
+        threshold: 0.5,
+      });
+
+      const result = await strategy.execute({ input: 'What is 2+2?' });
+      expect(result.votes?.get('voter-1_round1')).toMatchObject({ decision: '4' });
+      expect(result.votes?.get('voter-2_round1')).toMatchObject({ decision: '4' });
+    });
+
+    it('asks once more for the vote when an answer has none', async () => {
+      coordinator.setAgentResponse('voter-1', (input) =>
+        input.startsWith('Your last answer had no vote') ? 'VOTE: 4' : 'VOTE: [your decision]'
+      );
+      coordinator.setAgentResponse('voter-2', 'VOTE: 4');
+
+      const strategy = new ConsensusStrategy(coordinator, {
+        onNoConsensus: 'fail',
+        maxRounds: 1,
+        resolution: 'unanimous',
+        threshold: 0.5,
+      });
+
+      const result = await strategy.execute({ input: 'What is 2+2?' });
+      expect(coordinator.getCallsFor('voter-1')).toHaveLength(2);
+      expect(coordinator.getCallsFor('voter-1')[1].input).toContain('What is 2+2?');
+      expect(coordinator.getCallsFor('voter-2')).toHaveLength(1);
+      expect(result.votes?.get('voter-1_round1')).toMatchObject({ decision: '4' });
+      expect(result.agentResults.has('voter-1_round1_vote')).toBe(true);
+      expect(result.output).toContain('CONSENSUS REACHED');
+    });
+
+    it('asks for a missing vote only once per turn', async () => {
+      coordinator.setAgentResponse('voter-1', 'I think it is fine');
+      coordinator.setAgentResponse('voter-2', 'VOTE: yes');
+
+      const strategy = new ConsensusStrategy(coordinator, {
+        onNoConsensus: 'fail',
+        maxRounds: 1,
+        resolution: 'majority',
+        threshold: 0.5,
+      });
+
+      const result = await strategy.execute({ input: 'topic' });
+      expect(coordinator.getCallsFor('voter-1')).toHaveLength(2);
+      expect(result.votes?.has('voter-1_round1')).toBe(false);
+    });
   });
 
   describe('majority resolution', () => {

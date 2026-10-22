@@ -311,6 +311,9 @@ importers:
       '@ai-sdk/provider':
         specifier: ^4.0.21
         version: 4.0.21
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
     devDependencies:
       '@cogitator-ai/core':
         specifier: workspace:*
@@ -333,9 +336,6 @@ importers:
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
-      zod:
-        specifier: ^4.6.5
-        version: 4.6.5
 
   packages/browser:
     dependencies:
@@ -362,13 +362,13 @@ importers:
   packages/channels:
     dependencies:
       '@cogitator-ai/browser':
-        specifier: workspace:>=0.4.38
+        specifier: workspace:>=0.4.39
         version: link:../browser
       '@cogitator-ai/core':
         specifier: workspace:*
         version: link:../core
       '@cogitator-ai/mcp':
-        specifier: workspace:^19.5.20
+        specifier: workspace:^19.5.21
         version: link:../mcp
       '@cogitator-ai/memory':
         specifier: workspace:*
@@ -377,7 +377,7 @@ importers:
         specifier: workspace:^18.5.0
         version: link:../models
       '@cogitator-ai/rag':
-        specifier: workspace:>=0.8.12
+        specifier: workspace:>=0.8.13
         version: link:../rag
       '@cogitator-ai/types':
         specifier: workspace:*
@@ -829,6 +829,9 @@ importers:
       '@tetsujs/sse':
         specifier: ^0.6.1
         version: 0.6.1(@tetsujs/core@0.6.1)
+      ai:
+        specifier: ^7.0.127
+        version: 7.0.127(zod@4.6.5)
       create-cogitator-app:
         specifier: workspace:*
         version: link:../create-cogitator-app

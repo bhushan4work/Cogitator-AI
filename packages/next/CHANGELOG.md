@@ -1,5 +1,14 @@
 # @cogitator-ai/next
 
+## 0.9.3
+
+### Patch Changes
+
+- Updated dependencies [[`6cdb9e0`](https://github.com/cogitator-ai/Cogitator-AI/commit/6cdb9e049b6be5f2257cb52e84caaff1ff129357), [`6cdb9e0`](https://github.com/cogitator-ai/Cogitator-AI/commit/6cdb9e049b6be5f2257cb52e84caaff1ff129357)]:
+  - @cogitator-ai/core@0.58.0
+  - @cogitator-ai/types@0.63.0
+  - @cogitator-ai/server-shared@0.9.0
+
 ## 0.9.2
 
 ### Patch Changes

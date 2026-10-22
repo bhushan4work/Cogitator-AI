@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/evals",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Evaluation framework for Cogitator AI agents",
   "keywords": [
     "cogitator",
@@ -26,6 +26,11 @@
       "types": "./dist/vitest.d.ts",
       "import": "./dist/vitest.js",
       "default": "./dist/vitest.js"
+    },
+    "./matchers": {
+      "types": "./dist/matchers.d.ts",
+      "import": "./dist/matchers.js",
+      "default": "./dist/matchers.js"
     }
   },
   "sideEffects": false,
@@ -47,7 +52,7 @@
     "zod": "^4.6.5"
   },
   "peerDependencies": {
-    "@cogitator-ai/core": "workspace:>=0.57.0",
+    "@cogitator-ai/core": "workspace:>=0.58.0",
     "vitest": ">=3.0.0"
   },
   "peerDependenciesMeta": {

@@ -93,6 +93,19 @@ export interface CogitatorToolApprovalRequestContent {
 /** Content of the v3 and v4 models, which can ask for tool approvals. */
 export type CogitatorContentV3 = CogitatorContent | CogitatorToolApprovalRequestContent;
 
+/**
+ * An event of the agent's run as a custom part (v4 only): a handoff to another agent
+ * (`cogitator.handoff`) or a turn moved to a fallback model (`cogitator.model-fallback`), with
+ * what happened in `providerMetadata.cogitator`
+ */
+export interface CogitatorCustomContent {
+  type: 'custom';
+  kind: 'cogitator.handoff' | 'cogitator.model-fallback';
+  providerMetadata: { cogitator: JSONObject };
+}
+
+export type CogitatorContentV4 = CogitatorContentV3 | CogitatorCustomContent;
+
 export type CogitatorStreamPart<TWarning, TUsage, TFinishReason, TExtra = never> =
   | { type: 'stream-start'; warnings: TWarning[] }
   | { type: 'response-metadata'; id?: string; timestamp?: Date; modelId?: string }
@@ -237,7 +250,7 @@ export interface CogitatorLanguageModelV4 extends CogitatorModernLanguageModel<
   CogitatorWarningV3,
   CogitatorUsageV3,
   CogitatorFinishReasonV3,
-  CogitatorContentV3
+  CogitatorContentV4
 > {
   readonly specificationVersion: 'v4';
 }
@@ -275,12 +288,32 @@ export interface CogitatorProviderConfig<
   specificationVersion?: V;
 }
 
-export interface CogitatorProvider<
+/** A provider member a Cogitator provider does not serve: it throws `NoSuchModelError` */
+export type CogitatorUnservedModel = (modelId: string) => never;
+
+/** What a provider of each specification has besides its language models */
+export type CogitatorProviderMembers<V extends CogitatorSpecificationVersion> = V extends 'v1'
+  ? { textEmbeddingModel: CogitatorUnservedModel }
+  : V extends 'v2'
+    ? { textEmbeddingModel: CogitatorUnservedModel; imageModel: CogitatorUnservedModel }
+    : {
+        readonly specificationVersion: V;
+        embeddingModel: CogitatorUnservedModel;
+        imageModel: CogitatorUnservedModel;
+      };
+
+/** A Cogitator provider of one specification, a union of them for a union of versions */
+export type CogitatorProvider<
   V extends CogitatorSpecificationVersion = DefaultSpecificationVersion,
-> {
-  (agentName: string, options?: CogitatorProviderOptions): CogitatorLanguageModel<V>;
-  languageModel(agentName: string, options?: CogitatorProviderOptions): CogitatorLanguageModel<V>;
-}
+> = V extends CogitatorSpecificationVersion
+  ? {
+      (agentName: string, options?: CogitatorProviderOptions): CogitatorLanguageModel<V>;
+      languageModel(
+        agentName: string,
+        options?: CogitatorProviderOptions
+      ): CogitatorLanguageModel<V>;
+    } & CogitatorProviderMembers<V>
+  : never;
 
 export type CogitatorTool<TParams = unknown, TResult = unknown> = Tool<TParams, TResult>;
 

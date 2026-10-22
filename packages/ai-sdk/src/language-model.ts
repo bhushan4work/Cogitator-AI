@@ -19,12 +19,14 @@ import {
   toolResultValue,
   type AgentCallResponseFormat,
   type AgentCallToolChoice,
+  type AgentRunEvent,
   type CallWarning,
   type PreparedAgentCall,
   type PromptMessageLike,
 } from './agent-runner.js';
 import type {
   CogitatorContent,
+  CogitatorCustomContent,
   CogitatorFinishReasonV2,
   CogitatorFinishReasonV3,
   CogitatorGenerateResult,
@@ -56,6 +58,8 @@ interface ModernCallOptions {
   responseFormat?: AgentCallResponseFormat;
   tools?: ReadonlyArray<{ name: string }>;
   toolChoice?: AgentCallToolChoice;
+  /** `providerOptions` of the call: what a provider reads under its own name */
+  providerOptions?: Readonly<Record<string, unknown>>;
   abortSignal?: AbortSignal;
 }
 
@@ -126,6 +130,11 @@ abstract class AgentLanguageModel<
     return [];
   }
 
+  /** An event of the agent's run as a content part, for specifications that have custom parts */
+  protected agentEventPart(_event: AgentRunEvent): TApproval | undefined {
+    return undefined;
+  }
+
   protected exposesToolCall(_toolName: string, _options: TCallOptions): boolean {
     return true;
   }
@@ -145,7 +154,7 @@ abstract class AgentLanguageModel<
   > {
     const prepared = this.prepare(options);
     const content: (CogitatorContent | TApproval)[] = [];
-    const events: ({ call: ToolCall } | { result: ToolResult })[] = [];
+    const events: ({ call: ToolCall } | { result: ToolResult } | { part: TApproval })[] = [];
 
     const toolResults = new Map<string, ToolResult>();
 
@@ -159,6 +168,10 @@ abstract class AgentLanguageModel<
           toolResults.set(toolResult.callId, toolResult);
           if (this.exposesToolCall(toolResult.name, options)) events.push({ result: toolResult });
         },
+        onAgentEvent: (event) => {
+          const part = this.agentEventPart(event);
+          if (part !== undefined) events.push({ part });
+        },
       },
       { stream: false }
     );
@@ -170,8 +183,10 @@ abstract class AgentLanguageModel<
         const preamble = preambles.get(event.call.id);
         if (preamble) content.push({ type: 'text', text: preamble });
         content.push(toolCallContent(event.call));
-      } else {
+      } else if ('result' in event) {
         content.push(toolResultContent(event.result));
+      } else {
+        content.push(event.part);
       }
     }
 
@@ -278,6 +293,12 @@ abstract class AgentLanguageModel<
                 closePart();
                 emit(toolResultContent(toolResult));
               },
+              onAgentEvent: (event) => {
+                const part = this.agentEventPart(event);
+                if (part === undefined) return;
+                closePart();
+                emit(part);
+              },
             },
             { stream: true, signal }
           )
@@ -328,6 +349,7 @@ abstract class AgentLanguageModel<
       unsupportedSettings: this.unsupportedSettings(options),
       reasoningEffort: this.reasoningEffort(options),
       abortSignal: options.abortSignal,
+      providerOptions: options.providerOptions?.cogitator,
     });
   }
 }
@@ -462,7 +484,7 @@ export class AgentLanguageModelV4
     CogitatorWarningV3,
     CogitatorUsageV3,
     CogitatorFinishReasonV3,
-    CogitatorToolApprovalRequestContent
+    CogitatorToolApprovalRequestContent | CogitatorCustomContent
   >
   implements CogitatorLanguageModelV4, LanguageModelV4
 {
@@ -487,4 +509,26 @@ export class AgentLanguageModelV4
   protected approvalRequests(result: RunResult): CogitatorToolApprovalRequestContent[] {
     return v3ApprovalRequests(result);
   }
+
+  protected agentEventPart(event: AgentRunEvent): CogitatorCustomContent {
+    return customPart(event);
+  }
+}
+
+/** An event of the agent's run as a v4 custom part, what happened in its provider metadata */
+function customPart(event: AgentRunEvent): CogitatorCustomContent {
+  if (event.type === 'handoff') {
+    const { from, to, reason } = event.handoff;
+    return {
+      type: 'custom',
+      kind: 'cogitator.handoff',
+      providerMetadata: { cogitator: { from, to, ...(reason !== undefined && { reason }) } },
+    };
+  }
+  const { from, to, error } = event.fallback;
+  return {
+    type: 'custom',
+    kind: 'cogitator.model-fallback',
+    providerMetadata: { cogitator: { from, to, error: error.message } },
+  };
 }
