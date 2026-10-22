@@ -27,6 +27,8 @@ export type MemoryFileAdapterScenario =
   | 'file-batch-whole-or-none'
   | 'file-find-filters'
   | 'file-find-visible-to'
+  | 'file-find-heads'
+  | 'file-withdraw'
   | 'file-redact'
   | 'file-delete'
   | 'file-returns-copies';
@@ -192,6 +194,156 @@ const SCENARIOS: Record<MemoryFileAdapterScenario, (adapter: MemoryFileAdapter) 
         'a prefix with a character outside the basic plane'
       );
       assert.deepEqual(await find({ agentId: `${agentId}-other` }), []);
+    },
+
+    async 'file-find-heads'(adapter) {
+      if (!adapter.findFileHeads) return;
+      const { agentId, id } = scope();
+      const user = { agentId, userId: 'u1' };
+      const agent = { agentId };
+      const v = (name: string, fields: Partial<MemoryFileVersion>) =>
+        version(agentId, id(name), { scope: user, ...fields });
+      const first = v('first', { sequence: 1, createdAt: at(1) });
+      const second = v('second', { sequence: 2, createdAt: at(2) });
+      const onOther = v('other-branch', {
+        sequence: 3,
+        createdAt: at(3),
+        place: { threadId: 't1', entryId: 'e-other' },
+      });
+      const onMine = v('my-branch', {
+        sequence: 4,
+        createdAt: at(4),
+        place: { threadId: 't1', entryId: 'e-mine' },
+      });
+      const elsewhere = v('another-thread', {
+        sequence: 5,
+        createdAt: at(5),
+        place: { threadId: 't2', entryId: 'e-x' },
+      });
+      const wide = version(agentId, id('wide'), { scope: agent, sequence: 1, createdAt: at(6) });
+      const gone = v('gone', {
+        path: '/memories/old.md',
+        sequence: 1,
+        content: null,
+        sha256: null,
+        createdAt: at(7),
+      });
+      const stranger = version(agentId, id('stranger'), {
+        scope: { agentId, userId: 'u2' },
+        path: '/memories/theirs.md',
+        createdAt: at(8),
+      });
+      for (const one of [first, second, onOther, onMine, elsewhere, wide, gone, stranger]) {
+        ok(await adapter.putFileVersions([one]), 'putFileVersions');
+      }
+
+      const everywhere = ok(
+        await adapter.findFileHeads({ agentId, visibleTo: { agentId, userId: 'u1' } }),
+        'findFileHeads'
+      );
+      assert.deepEqual(
+        ids(everywhere),
+        ids([elsewhere, wide, gone]),
+        'the newest of each scope and path'
+      );
+
+      const onBranch = ok(
+        await adapter.findFileHeads({
+          agentId,
+          visibleTo: { agentId, userId: 'u1', threadId: 't1' },
+          place: { threadId: 't1', pathIds: ['e-mine'] },
+        }),
+        'findFileHeads on a branch'
+      );
+      assert.deepEqual(
+        ids(onBranch),
+        ids([elsewhere, wide, gone]),
+        'a version of another thread is seen, the newest one of this branch would be too'
+      );
+
+      const beforeMine = ok(
+        await adapter.findFileHeads({
+          agentId,
+          visibleTo: { agentId, userId: 'u1' },
+          paths: ['/memories/notes.md'],
+          place: { threadId: 't2', pathIds: [] },
+        }),
+        'findFileHeads on another branch of t2'
+      );
+      assert.deepEqual(
+        ids(beforeMine),
+        ids([onMine, wide]),
+        'a version of t2 placed off its branch is not seen, the newest seen one stands'
+      );
+
+      const t1Only = ok(
+        await adapter.findFileHeads({
+          agentId,
+          visibleTo: { agentId, userId: 'u1' },
+          paths: ['/memories/notes.md'],
+          scope: user,
+          place: { threadId: 't1', pathIds: ['e-mine'] },
+        }),
+        'findFileHeads on the branch of e-mine'
+      );
+      assert.deepEqual(ids(t1Only), ids([elsewhere]), 'a version of another thread is seen');
+      ok(await adapter.deleteFileVersions([elsewhere.id]), 'deleteFileVersions');
+      for (const [pathIds, head] of [
+        [['e-mine'], onMine],
+        [['e-other'], onOther],
+        [[], second],
+      ] as const) {
+        const found: MemoryFileVersion[] = ok(
+          await adapter.findFileHeads({
+            agentId,
+            visibleTo: { agentId, userId: 'u1' },
+            paths: ['/memories/notes.md'],
+            scope: user,
+            place: { threadId: 't1', pathIds },
+          }),
+          'findFileHeads on a branch of t1'
+        );
+        assert.deepEqual(
+          ids(found),
+          ids([head]),
+          `the newest version on the branch of ${pathIds.join(', ') || 'no entry'}`
+        );
+      }
+    },
+
+    async 'file-withdraw'(adapter) {
+      if (!adapter.withdrawFileVersions) return;
+      const { agentId, id } = scope();
+      const first = version(agentId, id('first'), { sequence: 1, createdAt: at(1) });
+      const second = version(agentId, id('second'), {
+        sequence: 2,
+        previousId: first.id,
+        createdAt: at(2),
+      });
+      ok(await adapter.putFileVersions([first, second]), 'putFileVersions');
+      const when = at(9);
+
+      ok(
+        await adapter.withdrawFileVersions([second.id, `${second.id}-missing`], when),
+        'withdrawFileVersions'
+      );
+
+      const found = ok(await adapter.findFileVersions({ agentId }), 'findFileVersions');
+      assert.deepEqual(
+        found,
+        [first, { ...second, withdrawn: { at: when } }],
+        'kept with when it was withdrawn'
+      );
+      if (adapter.findFileHeads) {
+        const heads = ok(await adapter.findFileHeads({ agentId }), 'findFileHeads');
+        assert.deepEqual(ids(heads), ids([first]), 'a withdrawn version is never a head');
+      }
+      const third = version(agentId, id('third'), { sequence: 2, createdAt: at(3) });
+      const taken = await adapter.putFileVersions([third]);
+      assert.ok(
+        !taken.success && taken.error === MEMORY_FILE_CONFLICT,
+        'a withdrawn version keeps its sequence'
+      );
     },
 
     async 'file-find-visible-to'(adapter) {

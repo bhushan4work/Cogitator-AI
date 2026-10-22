@@ -157,6 +157,29 @@ export function matchesFileFilter(version: MemoryFileVersion, filter: MemoryFile
   );
 }
 
+/**
+ * Of `versions`, the newest of each scope and path that a run on `place` sees, for a storage that
+ * finds heads in process (see `MemoryFileAdapter.findFileHeads`)
+ */
+export function fileHeads(
+  versions: readonly MemoryFileVersion[],
+  place?: { threadId: string; pathIds: readonly string[] }
+): MemoryFileVersion[] {
+  const onPath = place ? new Set(place.pathIds) : undefined;
+  const heads = new Map<string, MemoryFileVersion>();
+  for (const version of versions) {
+    if (version.withdrawn) continue;
+    const written = version.place;
+    if (place && onPath && written && written.threadId === place.threadId) {
+      if (!onPath.has(written.entryId)) continue;
+    }
+    const key = fileKeyOf(version.scope, version.path);
+    const known = heads.get(key);
+    if (!known || version.sequence > known.sequence) heads.set(key, version);
+  }
+  return [...heads.values()].sort(byFileVersion);
+}
+
 /** Oldest first: by `createdAt`, then `sequence`, then `id`, the order versions are found in */
 export function byFileVersion(a: MemoryFileVersion, b: MemoryFileVersion): number {
   return (
@@ -312,12 +335,19 @@ export class MemoryFiles {
   /** The files the access sees, by path */
   async list(access: MemoryFileAccess, directory = MEMORY_ROOT): Promise<MemoryFile[]> {
     const root = memoryPath(directory);
+    const filter = {
+      agentId: access.scope.agentId,
+      visibleTo: access.visibleTo ?? access.scope,
+      ...(root !== MEMORY_ROOT && { prefix: root }),
+    };
+    const place = access.place;
     const versions = unwrap(
-      await this.adapter.findFileVersions({
-        agentId: access.scope.agentId,
-        visibleTo: access.visibleTo ?? access.scope,
-        ...(root !== MEMORY_ROOT && { prefix: root }),
-      })
+      this.adapter.findFileHeads
+        ? await this.adapter.findFileHeads({
+            ...filter,
+            ...(place && { place: { threadId: place.threadId, pathIds: [...place.pathIds] } }),
+          })
+        : await this.adapter.findFileVersions(filter)
     );
     return this.filesOf(access, versions, root);
   }
@@ -355,7 +385,7 @@ export class MemoryFiles {
     return (await this.list(access, file)).find((found) => found.path === file);
   }
 
-  /** Every version of the file at `path` the access sees, oldest first */
+  /** Every version of the file at `path` on the branch of the access, withdrawn ones too, oldest first */
   async history(access: MemoryFileAccess, path: string): Promise<MemoryFileVersion[]> {
     const file = memoryPath(path);
     const versions = unwrap(
@@ -365,7 +395,7 @@ export class MemoryFiles {
         paths: [file],
       })
     );
-    return versions.filter((version) => this.sees(access, version));
+    return versions.filter((version) => this.onBranch(access, version));
   }
 
   async view(access: MemoryFileAccess, path: string, range?: readonly number[]): Promise<string> {
@@ -671,6 +701,11 @@ export class MemoryFiles {
   }
 
   private sees(access: MemoryFileAccess, version: MemoryFileVersion): boolean {
+    return !version.withdrawn && this.onBranch(access, version);
+  }
+
+  /** Whether `version` lies on the branch of the access, withdrawn or not */
+  private onBranch(access: MemoryFileAccess, version: MemoryFileVersion): boolean {
     const place = access.place;
     const written = version.place;
     if (!place || !written) return true;
@@ -765,8 +800,11 @@ export class MemoryFiles {
           );
         }
         const sequences = this.nextSequences(snapshot, writes);
-        const conflict = await this.write(access, writes, current, sequences);
-        if (!conflict) return;
+        const kept = await this.write(access, writes, current, sequences);
+        if (kept) {
+          await this.keepTree(access, kept, current);
+          return;
+        }
         if (attempt >= WRITE_ATTEMPTS) {
           throw new MemoryFileError(
             `The memory at ${roots[0] ?? MEMORY_ROOT} is being changed by another writer. Try again.`
@@ -774,6 +812,86 @@ export class MemoryFiles {
         }
       }
     });
+  }
+
+  /**
+   * Checks, once `kept` are kept, that no file the change wrote lies under another file or has
+   * files under it that was not there when it was `planned`, which another process writing at the
+   * same time could cause, as each change is planned on what stood before it. Files that stood so
+   * already, each on its own branch or in its own scope, are left to be. A change that broke the
+   * tree is taken back and refused, so the writer tries again on what stands now: its versions are
+   * withdrawn (`withdrawFileVersions`), which keeps the history whole however others wrote on top,
+   * or on a store without it deleted where no later version stands on them. A deletion whose path
+   * another writer has built on since is kept, so taking it back does not raise a file under a
+   * file.
+   */
+  private async keepTree(
+    access: MemoryFileAccess,
+    kept: readonly MemoryFileVersion[],
+    planned: ReadonlyMap<string, MemoryFile>
+  ): Promise<void> {
+    const written = kept
+      .filter((version) => version.content !== null)
+      .map((version) => version.path);
+    if (written.length === 0) return;
+    const filter = { agentId: access.scope.agentId, visibleTo: access.visibleTo ?? access.scope };
+    const place = access.place;
+    const standing = unwrap(
+      this.adapter.findFileHeads
+        ? await this.adapter.findFileHeads({
+            ...filter,
+            ...(place && { place: { threadId: place.threadId, pathIds: [...place.pathIds] } }),
+          })
+        : await this.adapter.findFileVersions(filter)
+    );
+    const paths = this.filesOf(access, standing).map((file) => file.path);
+    const broken = written.find((path) =>
+      paths.some(
+        (other) =>
+          other !== path && !planned.has(other) && (under(other, path) || under(path, other))
+      )
+    );
+    if (broken === undefined) return;
+    const ours = new Set(written);
+    const resurrects = (version: MemoryFileVersion) =>
+      version.content === null &&
+      paths.some(
+        (other) =>
+          !ours.has(other) &&
+          other !== version.path &&
+          (under(other, version.path) || under(version.path, other))
+      );
+    const back = kept.filter((version) => !resurrects(version));
+    const withdraw = this.adapter.withdrawFileVersions?.bind(this.adapter);
+    if (withdraw) {
+      unwrap(
+        await withdraw(
+          back.map((version) => version.id),
+          this.now()
+        )
+      );
+    } else {
+      const heads = unwrap(
+        this.adapter.findFileHeads
+          ? await this.adapter.findFileHeads(filter)
+          : await this.adapter.findFileVersions(filter)
+      );
+      const later = (version: MemoryFileVersion) =>
+        heads.some(
+          (other) =>
+            fileKeyOf(other.scope, other.path) === fileKeyOf(version.scope, version.path) &&
+            other.sequence > version.sequence
+        );
+      const free = back.filter((version) => !later(version)).map((version) => version.id);
+      if (free.length > 0) unwrap(await this.adapter.deleteFileVersions(free));
+    }
+    for (const version of back) {
+      const now = await this.read(access, version.path);
+      access.observe?.(version.path, now?.sha256 ?? null);
+    }
+    throw new MemoryFileError(
+      `Another writer changed the memory around ${broken} at the same time. View it again and try again.`
+    );
   }
 
   /**
@@ -823,7 +941,7 @@ export class MemoryFiles {
     writes: readonly (PlannedWrite & { scope: MemoryItemScope })[],
     current: ReadonlyMap<string, MemoryFile>,
     sequences: Map<string, number>
-  ): Promise<boolean> {
+  ): Promise<MemoryFileVersion[] | undefined> {
     const at = this.now();
     const entryId = access.place?.entryId;
     const versions = writes.map((write): MemoryFileVersion => {
@@ -847,13 +965,13 @@ export class MemoryFiles {
     });
     const put = await this.adapter.putFileVersions(versions);
     if (!put.success) {
-      if (put.error === MEMORY_FILE_CONFLICT) return true;
+      if (put.error === MEMORY_FILE_CONFLICT) return undefined;
       throw new MemoryFileError('The memory store failed to keep the change. Try again later.', {
         cause: new Error(put.error),
       });
     }
     for (const version of versions) access.observe?.(version.path, version.sha256);
-    return false;
+    return versions;
   }
 
   private async exclusive<T>(agentId: string, work: () => Promise<T>): Promise<T> {

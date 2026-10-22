@@ -29,6 +29,7 @@ import type {
   MemoryFileFilter,
   MemoryFileVersion,
   EntryRedaction,
+  MemoryFileHeadFilter,
 } from '@cogitator-ai/types';
 import { createRedisClient, type RedisClient } from '@cogitator-ai/redis';
 import { BranchingMemoryAdapter, entryTypeWanted } from './base';
@@ -39,7 +40,7 @@ import {
 } from '@cogitator-ai/types';
 import { matchesListing, threadListing, threadPage, type ThreadCursor } from './thread-listing';
 import { byRecorded, entityNames, matchesEntityFilter, matchesItemFilter } from '../memory-items';
-import { byFileVersion, fileKeyOf, matchesFileFilter } from '../memory-files';
+import { byFileVersion, fileKeyOf, matchesFileFilter, fileHeads } from '../memory-files';
 import {
   memoryEntityFromJson,
   memoryItemFromJson,
@@ -1635,6 +1636,12 @@ export class RedisAdapter
     });
   }
 
+  async findFileHeads(filter: MemoryFileHeadFilter): Promise<MemoryResult<MemoryFileVersion[]>> {
+    const { place, ...rest } = filter;
+    const found = await this.findFileVersions(rest);
+    return found.success ? this.success(fileHeads(found.data, place)) : found;
+  }
+
   async findFileVersions(filter: MemoryFileFilter): Promise<MemoryResult<MemoryFileVersion[]>> {
     return this.run(async (client) => {
       const source: RecordSource | null = filter.ids
@@ -1672,6 +1679,19 @@ export class RedisAdapter
           },
         });
         await client.eval(SET_IF_PRESENT, 1, key, RECORD_DATA, redacted);
+      }
+      return this.success(undefined);
+    });
+  }
+
+  async withdrawFileVersions(ids: string[], at: Date): Promise<MemoryResult<void>> {
+    return this.run(async (client) => {
+      for (const id of new Set(ids)) {
+        const key = this.key('file', id);
+        const data = await client.eval(READ_FIELD, 1, key, RECORD_DATA);
+        if (typeof data !== 'string') continue;
+        const withdrawn = JSON.stringify({ ...parseFileVersion(data), withdrawn: { at } });
+        await client.eval(SET_IF_PRESENT, 1, key, RECORD_DATA, withdrawn);
       }
       return this.success(undefined);
     });

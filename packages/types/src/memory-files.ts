@@ -44,6 +44,11 @@ export interface MemoryFileVersion {
   createdAt: Date;
   /** When the content of this version was redacted, and why */
   redacted?: { at: Date; reason?: string };
+  /**
+   * When the change that wrote it was taken back: a withdrawn version is never in front, while it
+   * keeps its place in the history, its sequence and what names it as `previousId`
+   */
+  withdrawn?: { at: Date };
 }
 
 /** Which versions a {@link MemoryFileAdapter} finds: all of the given conditions hold */
@@ -61,6 +66,15 @@ export interface MemoryFileFilter {
   visibleTo?: MemoryItemScope;
   /** Versions of exactly this scope. Its `agentId` is not read, the filter's is. */
   scope?: MemoryItemScope;
+}
+
+/** Which heads a {@link MemoryFileAdapter.findFileHeads} finds */
+export interface MemoryFileHeadFilter extends Omit<MemoryFileFilter, 'ids'> {
+  /**
+   * The branch a run stands on: a version placed in `threadId` at an entry that is not among
+   * `pathIds` is not seen, as on another branch of that thread
+   */
+  place?: { threadId: string; pathIds: readonly string[] };
 }
 
 /** What a {@link MemoryFileAdapter} reports when the version's place is taken already */
@@ -88,6 +102,19 @@ export interface MemoryFileAdapter {
   ): Promise<MemoryResult<void>>;
   /** Deletes the versions for good */
   deleteFileVersions(ids: string[]): Promise<MemoryResult<void>>;
+  /**
+   * Marks the versions withdrawn at `at`, and changes nothing else. Missing versions are left
+   * alone. Without it a change that has to be taken back deletes its versions instead.
+   */
+  withdrawFileVersions?(ids: string[], at: Date): Promise<MemoryResult<void>>;
+  /**
+   * The newest version (highest `sequence`) of each scope and path the filter sees, withdrawn
+   * versions left out and deletions included, a version placed in `filter.place.threadId` off its `pathIds` left out, oldest
+   * first by `createdAt`, then `sequence`, then `id` as {@link findFileVersions} gives them, so a
+   * read of the files that stand reads no history. Without it reads go through
+   * {@link findFileVersions}.
+   */
+  findFileHeads?(filter: MemoryFileHeadFilter): Promise<MemoryResult<MemoryFileVersion[]>>;
 }
 
 /**
