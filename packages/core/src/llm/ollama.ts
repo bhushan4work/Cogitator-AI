@@ -29,11 +29,14 @@ import {
 } from './errors';
 import { normalizeTurn, turnFinishReason } from './turn';
 import { fetchImageAsBase64 } from '../utils/image-fetch';
+import { trimTrailingSlashes } from '../utils/url';
 import { getLogger } from '../logger';
 
 interface OllamaConfig {
   baseUrl: string;
   apiKey?: string;
+  /** Headers sent with every chat request. The API key and JSON content type take precedence. */
+  headers?: Record<string, string>;
 }
 
 interface OllamaMessage {
@@ -81,20 +84,16 @@ interface OllamaChatResponse {
 export class OllamaBackend extends BaseLLMBackend {
   readonly provider = 'ollama' as const;
   private baseUrl: string;
-  private apiKey?: string;
+  private readonly headers: Headers;
 
   constructor(config: OllamaConfig) {
     super();
-    this.baseUrl = config.baseUrl.replace(/\/$/, '');
-    this.apiKey = config.apiKey;
-  }
-
-  private get headers(): Record<string, string> {
-    const h: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (this.apiKey) {
-      h.Authorization = `Bearer ${this.apiKey}`;
+    this.baseUrl = trimTrailingSlashes(config.baseUrl);
+    this.headers = new Headers(config.headers);
+    this.headers.set('Content-Type', 'application/json');
+    if (config.apiKey) {
+      this.headers.set('Authorization', `Bearer ${config.apiKey}`);
     }
-    return h;
   }
 
   async chat(request: ChatRequest): Promise<ChatResponse> {
