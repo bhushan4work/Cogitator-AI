@@ -8,6 +8,8 @@ import type {
 import { Agent, tool, type Cogitator } from '@cogitator-ai/core';
 import type { RunOptions, RunResult } from '@cogitator-ai/types';
 import { z } from 'zod';
+import { createProviderRegistry, generateText } from 'ai';
+import { NoSuchModelError } from '@ai-sdk/provider';
 import { createCogitatorProvider, cogitatorModel } from '../provider';
 import type { LanguageModelV1CallOptions } from '../v1-types';
 import { collect, createAgent, createFakeCogitator, modelOf } from './helpers';
@@ -72,6 +74,51 @@ describe('createCogitatorProvider', () => {
     expect(() => provider('gamma')).toThrow(
       'Agent "gamma" not found. Available agents: alpha, beta'
     );
+    try {
+      provider('gamma');
+    } catch (error) {
+      expect(NoSuchModelError.isInstance(error)).toBe(true);
+      expect(error).toMatchObject({ modelId: 'gamma', modelType: 'languageModel' });
+    }
+  });
+
+  it('carries the members of its specification, serving no embedding or image models', () => {
+    const { cogitator } = createFakeCogitator();
+    const agents = [createAgent('writer')];
+    const v4 = createCogitatorProvider(cogitator, { agents, specificationVersion: 'v4' });
+    const v3 = createCogitatorProvider(cogitator, { agents, specificationVersion: 'v3' });
+    const v2 = createCogitatorProvider(cogitator, { agents, specificationVersion: 'v2' });
+    const v1 = createCogitatorProvider(cogitator, { agents, specificationVersion: 'v1' });
+
+    expect(v4.specificationVersion).toBe('v4');
+    expect(v3.specificationVersion).toBe('v3');
+    expect(v2).not.toHaveProperty('specificationVersion');
+    for (const unserved of [
+      () => v4.embeddingModel('e'),
+      () => v4.imageModel('i'),
+      () => v3.embeddingModel('e'),
+      () => v2.textEmbeddingModel('e'),
+      () => v2.imageModel('i'),
+      () => v1.textEmbeddingModel('e'),
+    ]) {
+      expect(unserved).toThrow(NoSuchModelError);
+    }
+  });
+
+  it('serves its agents through an AI SDK provider registry', async () => {
+    const { cogitator, run } = createFakeCogitator();
+    const registry = createProviderRegistry({
+      cogitator: createCogitatorProvider(cogitator, { agents: [createAgent('writer')] }),
+    });
+
+    const { text } = await generateText({
+      model: registry.languageModel('cogitator:writer'),
+      prompt: 'Hi',
+    });
+
+    expect(text.length).toBeGreaterThan(0);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(() => registry.embeddingModel('cogitator:writer')).toThrow(NoSuchModelError);
   });
 
   it('defaults to the specification of the installed ai package', () => {
@@ -182,7 +229,7 @@ describe('LanguageModelV2', () => {
     expect(result.content[1]).toMatchObject({ type: 'tool-result', result: 'boom', isError: true });
   });
 
-  it('turns a multi-turn prompt into a labelled transcript and ignores system messages', async () => {
+  it('passes earlier turns as the run history and leaves system messages out', async () => {
     const { cogitator, run } = createFakeCogitator();
     const model = cogitatorModel(cogitator, createAgent('test'), V2);
 
@@ -197,10 +244,85 @@ describe('LanguageModelV2', () => {
       })
     );
 
-    expect(run.mock.calls[0][1].input).toBe('User: What is 2+2?\n\nAssistant: 4\n\nUser: And 3+3?');
+    expect(run.mock.calls[0][1]).toMatchObject({
+      input: 'And 3+3?',
+      history: [
+        { role: 'user', content: 'What is 2+2?' },
+        { role: 'assistant', content: '4' },
+      ],
+      saveHistory: false,
+    });
+    expect(run.mock.calls[0][1].threadId).toBeUndefined();
     expect(result.warnings).toEqual([
       { type: 'other', message: expect.stringContaining('System messages are not forwarded') },
     ]);
+  });
+
+  it('runs on the thread providerOptions.cogitator names, with its memory as the history', async () => {
+    const { cogitator, run } = createFakeCogitator();
+    const model = cogitatorModel(cogitator, createAgent('test'), V2);
+
+    await model.doGenerate(
+      v2Call({
+        prompt: [
+          { role: 'user', content: [{ type: 'text', text: 'What is 2+2?' }] },
+          { role: 'assistant', content: [{ type: 'text', text: '4' }] },
+          { role: 'user', content: [{ type: 'text', text: 'And 3+3?' }] },
+        ],
+        providerOptions: { cogitator: { threadId: 'thread-7', userId: 'ada' } },
+      })
+    );
+
+    const options = run.mock.calls[0][1];
+    expect(options).toMatchObject({
+      input: 'And 3+3?',
+      threadId: 'thread-7',
+      userId: 'ada',
+      saveHistory: true,
+    });
+    expect(options.history).toBeUndefined();
+  });
+
+  it('takes saveHistory from providerOptions.cogitator', async () => {
+    const { cogitator, run } = createFakeCogitator();
+    const model = cogitatorModel(cogitator, createAgent('test'), V2);
+
+    await model.doGenerate(
+      v2Call({ providerOptions: { cogitator: { threadId: 't', saveHistory: false } } })
+    );
+    await model.doGenerate(v2Call({ providerOptions: { cogitator: { saveHistory: true } } }));
+
+    expect(run.mock.calls[0][1].saveHistory).toBe(false);
+    expect(run.mock.calls[1][1].saveHistory).toBe(true);
+  });
+
+  it('refuses providerOptions.cogitator fields of the wrong type and a prompt without a user turn', async () => {
+    const { cogitator, run } = createFakeCogitator();
+    const model = cogitatorModel(cogitator, createAgent('test'), V2);
+
+    await expect(
+      model.doGenerate(v2Call({ providerOptions: { cogitator: { threadId: '  ' } } }))
+    ).rejects.toThrow('threadId must be a non-empty string');
+    await expect(
+      model.doGenerate(v2Call({ providerOptions: { cogitator: { saveHistory: 'yes' } } }))
+    ).rejects.toThrow('saveHistory must be a boolean');
+    await expect(
+      model.doGenerate(
+        v2Call({ prompt: [{ role: 'assistant', content: [{ type: 'text', text: 'Hi' }] }] })
+      )
+    ).rejects.toThrow('The prompt must end with a user message');
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('reads providerOptions.cogitator from providerMetadata on ai@4', async () => {
+    const { cogitator, run } = createFakeCogitator();
+    const model = cogitatorModel(cogitator, createAgent('test'), { specificationVersion: 'v1' });
+
+    await model.doGenerate(
+      v1Call({ providerMetadata: { cogitator: { threadId: 'thread-4', userId: 'grace' } } })
+    );
+
+    expect(run.mock.calls[0][1]).toMatchObject({ threadId: 'thread-4', userId: 'grace' });
   });
 
   it('warns about dropped non-text user content', async () => {

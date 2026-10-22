@@ -230,7 +230,66 @@ describe('toolChoice', () => {
 });
 
 describe('conversation history', () => {
-  it('passes tool calls and results of earlier turns to the agent', async () => {
+  it('keeps text written after a tool call with the call when its result comes later', async () => {
+    const { model, requests } = modelWith('Done.');
+    await model.doGenerate({
+      prompt: [
+        { role: 'user', content: [{ type: 'text', text: 'Count them' }] },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool-call', toolCallId: 'c9', toolName: 'count', input: {} },
+            { type: 'text', text: 'Counting now.' },
+          ],
+        },
+        {
+          role: 'tool',
+          content: [
+            {
+              type: 'tool-result',
+              toolCallId: 'c9',
+              toolName: 'count',
+              output: { type: 'json', value: { n: 3 } },
+            },
+          ],
+        },
+        { role: 'user', content: [{ type: 'text', text: 'And now?' }] },
+      ],
+    });
+
+    expect(requests[0].messages.slice(1, 4)).toEqual([
+      { role: 'user', content: 'Count them' },
+      {
+        role: 'assistant',
+        content: 'Counting now.',
+        toolCalls: [{ id: 'c9', name: 'count', arguments: {} }],
+      },
+      { role: 'tool', content: '{"n":3}', toolCallId: 'c9', name: 'count' },
+    ]);
+  });
+
+  it('leaves out an earlier user turn that held no text', async () => {
+    const { model, requests } = modelWith('Nice picture.');
+    await model.doGenerate({
+      prompt: [
+        {
+          role: 'user',
+          content: [
+            { type: 'file', mediaType: 'image/png', data: { type: 'data', data: 'iVBORw0KGgo=' } },
+          ],
+        },
+        { role: 'assistant', content: [{ type: 'text', text: 'I cannot see images.' }] },
+        { role: 'user', content: [{ type: 'text', text: 'Fine, describe a cat.' }] },
+      ],
+    });
+
+    expect(requests[0].messages.slice(1, 3)).toEqual([
+      { role: 'assistant', content: 'I cannot see images.' },
+      { role: 'user', content: 'Fine, describe a cat.' },
+    ]);
+  });
+
+  it('passes earlier turns as messages, tool calls and their results included', async () => {
     const { model, requests } = modelWith('It found 3 orders.');
     await model.doGenerate({
       prompt: [
@@ -269,12 +328,22 @@ describe('conversation history', () => {
       ],
     });
 
-    const input = requests[0].messages.filter((m) => m.role === 'user').at(-1)?.content;
-    expect(input).toContain('[called tool search with {"q":"orders"}]');
-    expect(input).toContain('[tool search returned: {"ids":["A-1","A-2","A-3"]}]');
-    expect(input).toContain('Found it.');
-    expect(input).toContain('Tool: [tool count failed: quota exceeded]');
-    expect(input).toContain('User: What exactly did the search return?');
+    expect(requests[0].messages.slice(1, 6)).toEqual([
+      { role: 'user', content: 'Find my orders' },
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'old_1', name: 'search', arguments: { q: 'orders' } }],
+      },
+      {
+        role: 'tool',
+        content: '{"ids":["A-1","A-2","A-3"]}',
+        toolCallId: 'old_1',
+        name: 'search',
+      },
+      { role: 'assistant', content: 'Found it.' },
+      { role: 'user', content: 'What exactly did the search return?' },
+    ]);
   });
 });
 

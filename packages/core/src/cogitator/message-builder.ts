@@ -138,10 +138,12 @@ export async function buildInitialMessages(
     userContent,
     formatTurnContext(options.brief === undefined ? [] : [options.brief])
   );
+  const history = givenHistory(options.history);
 
   if (!memoryAdapter || options.useMemory === false) {
     return [
       { role: 'system', content: agent.instructions },
+      ...(history ?? []),
       { role: 'user', content: turnInput },
     ];
   }
@@ -205,7 +207,7 @@ export async function buildInitialMessages(
       threadId,
       agentId: agent.id,
       memoryAgentId: memoryAgentId(agent),
-      ...(options.branch && { leafId: options.branch.fromEntryId }),
+      ...(history ? { leafId: null } : options.branch && { leafId: options.branch.fromEntryId }),
       userId: options.userId,
       systemPrompt: agent.instructions,
       currentInput: options.input,
@@ -214,7 +216,6 @@ export async function buildInitialMessages(
       ...(typeof timeZone === 'string' && { timeZone }),
       ...(contextBudget !== undefined && { maxTokens: contextBudget, reserveTokens: 0 }),
     });
-    onContext?.(ctx);
     for (const warning of ctx.warnings ?? []) {
       getLogger().warn(warning, { agent: agent.name, threadId });
     }
@@ -227,10 +228,32 @@ export async function buildInitialMessages(
         options.onMemoryError
       );
     }
-    const history = ctx.memoryContext ? ctx.messages.slice(0, -1) : ctx.messages;
+    const turn: Message = {
+      role: 'user',
+      content: withMemoryContext(userContent, ctx.memoryContext),
+    };
+    if (history) {
+      const messages: Message[] = [
+        { role: 'system', content: agent.instructions },
+        ...history,
+        turn,
+      ];
+      onContext?.({ ...ctx, messages });
+      return messages;
+    }
+    onContext?.(ctx);
+    const recalled = ctx.memoryContext ? ctx.messages.slice(0, -1) : ctx.messages;
     return [
-      ...withInstructions(cacheEndOnLast(sanitizeToolHistory(history)), agent.instructions),
-      { role: 'user', content: withMemoryContext(userContent, ctx.memoryContext) },
+      ...withInstructions(cacheEndOnLast(sanitizeToolHistory(recalled)), agent.instructions),
+      turn,
+    ];
+  }
+
+  if (history) {
+    return [
+      { role: 'system', content: agent.instructions },
+      ...history,
+      { role: 'user', content: withIndex(turnInput, userContent, index, options) },
     ];
   }
 
@@ -268,6 +291,25 @@ export async function buildInitialMessages(
     { role: 'system', content: agent.instructions },
     { role: 'user', content: withIndex(turnInput, userContent, index, options) },
   ];
+}
+
+/**
+ * The conversation the caller gave the run (`history`), cleaned of tool calls without results
+ * like a history from memory, or undefined when it gave none
+ *
+ * @throws CogitatorError when it holds a system message: the agent's instructions are the
+ * system prompt
+ */
+function givenHistory(history: RunOptions['history']): Message[] | undefined {
+  if (history === undefined) return undefined;
+  if (history.some((message) => message.role === 'system')) {
+    throw new CogitatorError({
+      message:
+        'history must not hold system messages: the agent instructions are the system prompt',
+      code: ErrorCode.VALIDATION_ERROR,
+    });
+  }
+  return sanitizeToolHistory(history);
 }
 
 /** What memory holds for the run, such as its memory files, or nothing when it fails to load */
