@@ -352,10 +352,7 @@ export const semverToolSchema = z.object({
     .string()
     .optional()
     .describe('Semantic version string to parse, compare, test, or bump'),
-  version2: z
-    .string()
-    .optional()
-    .describe('Second semantic version string for compare operation'),
+  version2: z.string().optional().describe('Second semantic version string for compare operation'),
   other: z
     .string()
     .optional()
@@ -533,9 +530,7 @@ export function createSlugTool(options?: { timeout?: number }): Tool<SlugToolInp
   });
 }
 
-export function createSemverTool(options?: {
-  timeout?: number;
-}): Tool<SemverToolInput, unknown> {
+export function createSemverTool(options?: { timeout?: number }): Tool<SemverToolInput, unknown> {
   return defineWasmTool({
     name: 'semver',
     description:

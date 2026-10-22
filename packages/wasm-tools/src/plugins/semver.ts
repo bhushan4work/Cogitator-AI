@@ -363,9 +363,7 @@ function parseRange(rangeStr: unknown): Comparator[][] {
       const lMajor = parseInt(lm[1], 10);
       const lMinor = isWild(lm[2]) ? 0 : parseInt(lm[2], 10);
       const lPatch = isWild(lm[3]) ? 0 : parseInt(lm[3], 10);
-      const leftVer = parseSemver(
-        `${lMajor}.${lMinor}.${lPatch}${lm[4] ? `-${lm[4]}` : ''}`
-      );
+      const leftVer = parseSemver(`${lMajor}.${lMinor}.${lPatch}${lm[4] ? `-${lm[4]}` : ''}`);
       const comps: Comparator[] = [{ op: '>=', ver: leftVer }];
 
       if (isWild(rm[2])) {
@@ -434,11 +432,7 @@ function satisfiesRange(versionStr: unknown, rangeStr: unknown): boolean {
   });
 }
 
-function bumpVersion(
-  versionStr: unknown,
-  releaseType: unknown,
-  identifier?: string
-): string {
+function bumpVersion(versionStr: unknown, releaseType: unknown, identifier?: string): string {
   const v = parseSemver(versionStr);
   const rel = typeof releaseType === 'string' ? releaseType.toLowerCase() : '';
 
@@ -529,9 +523,7 @@ function bumpVersion(
       );
   }
 
-  return `${major}.${minor}.${patch}${
-    prerelease.length > 0 ? `-${prerelease.join('.')}` : ''
-  }`;
+  return `${major}.${minor}.${patch}${prerelease.length > 0 ? `-${prerelease.join('.')}` : ''}`;
 }
 
 export function semver(): number {
@@ -550,9 +542,7 @@ export function semver(): number {
 
     const operation = input.operation;
     if (!operation) {
-      throw new Error(
-        'operation is required (must be one of: parse, compare, satisfies, bump)'
-      );
+      throw new Error('operation is required (must be one of: parse, compare, satisfies, bump)');
     }
 
     const version = input.version ?? input.version1;

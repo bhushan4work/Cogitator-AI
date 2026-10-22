@@ -143,12 +143,12 @@ describe('semver plugin: compare', () => {
   });
 
   it('prerelease has lower precedence than normal version', () => {
-    expect(
-      semver({ operation: 'compare', version: '1.0.0-alpha', version2: '1.0.0' }).result
-    ).toBe(-1);
-    expect(
-      semver({ operation: 'compare', version: '1.0.0', version2: '1.0.0-alpha' }).result
-    ).toBe(1);
+    expect(semver({ operation: 'compare', version: '1.0.0-alpha', version2: '1.0.0' }).result).toBe(
+      -1
+    );
+    expect(semver({ operation: 'compare', version: '1.0.0', version2: '1.0.0-alpha' }).result).toBe(
+      1
+    );
   });
 
   it('implements SemVer section 11 precedence sequence', () => {
@@ -318,36 +318,60 @@ describe('semver plugin: satisfies', () => {
 
   it('returns error for malformed versions and ranges in satisfies', () => {
     expect(semver({ operation: 'satisfies', version: 'bad', range: '^1.0.0' }).error).toBeDefined();
-    expect(semver({ operation: 'satisfies', version: '1.2.3', range: 'invalid-range' }).error).toBeDefined();
+    expect(
+      semver({ operation: 'satisfies', version: '1.2.3', range: 'invalid-range' }).error
+    ).toBeDefined();
     expect(semver({ operation: 'satisfies', version: '1.2.3', range: '>' }).error).toBeDefined();
-    expect(semver({ operation: 'satisfies', version: '1.2.3', range: '1.0.0 ||' }).error).toBeDefined();
-    expect(semver({ operation: 'satisfies', version: '1.2.3', range: '|| 1.0.0' }).error).toBeDefined();
+    expect(
+      semver({ operation: 'satisfies', version: '1.2.3', range: '1.0.0 ||' }).error
+    ).toBeDefined();
+    expect(
+      semver({ operation: 'satisfies', version: '1.2.3', range: '|| 1.0.0' }).error
+    ).toBeDefined();
   });
 });
 
 describe('semver plugin: bump', () => {
   it('bumps major version', () => {
     expect(semver({ operation: 'bump', version: '1.2.3', release: 'major' }).version).toBe('2.0.0');
-    expect(semver({ operation: 'bump', version: '1.0.0-alpha.1', release: 'major' }).version).toBe('1.0.0');
-    expect(semver({ operation: 'bump', version: '1.2.0-alpha.1', release: 'major' }).version).toBe('2.0.0');
+    expect(semver({ operation: 'bump', version: '1.0.0-alpha.1', release: 'major' }).version).toBe(
+      '1.0.0'
+    );
+    expect(semver({ operation: 'bump', version: '1.2.0-alpha.1', release: 'major' }).version).toBe(
+      '2.0.0'
+    );
   });
 
   it('bumps minor version', () => {
     expect(semver({ operation: 'bump', version: '1.2.3', release: 'minor' }).version).toBe('1.3.0');
-    expect(semver({ operation: 'bump', version: '1.2.0-beta.1', release: 'minor' }).version).toBe('1.2.0');
-    expect(semver({ operation: 'bump', version: '1.2.3-beta.1', release: 'minor' }).version).toBe('1.3.0');
+    expect(semver({ operation: 'bump', version: '1.2.0-beta.1', release: 'minor' }).version).toBe(
+      '1.2.0'
+    );
+    expect(semver({ operation: 'bump', version: '1.2.3-beta.1', release: 'minor' }).version).toBe(
+      '1.3.0'
+    );
   });
 
   it('bumps patch version', () => {
     expect(semver({ operation: 'bump', version: '1.2.3', release: 'patch' }).version).toBe('1.2.4');
-    expect(semver({ operation: 'bump', version: '1.2.3-rc.1', release: 'patch' }).version).toBe('1.2.3');
+    expect(semver({ operation: 'bump', version: '1.2.3-rc.1', release: 'patch' }).version).toBe(
+      '1.2.3'
+    );
   });
 
   it('bumps prerelease without identifier', () => {
-    expect(semver({ operation: 'bump', version: '1.2.3', release: 'prerelease' }).version).toBe('1.2.4-0');
-    expect(semver({ operation: 'bump', version: '1.2.4-0', release: 'prerelease' }).version).toBe('1.2.4-1');
-    expect(semver({ operation: 'bump', version: '1.2.4-alpha', release: 'prerelease' }).version).toBe('1.2.4-alpha.0');
-    expect(semver({ operation: 'bump', version: '1.2.4-alpha.0', release: 'prerelease' }).version).toBe('1.2.4-alpha.1');
+    expect(semver({ operation: 'bump', version: '1.2.3', release: 'prerelease' }).version).toBe(
+      '1.2.4-0'
+    );
+    expect(semver({ operation: 'bump', version: '1.2.4-0', release: 'prerelease' }).version).toBe(
+      '1.2.4-1'
+    );
+    expect(
+      semver({ operation: 'bump', version: '1.2.4-alpha', release: 'prerelease' }).version
+    ).toBe('1.2.4-alpha.0');
+    expect(
+      semver({ operation: 'bump', version: '1.2.4-alpha.0', release: 'prerelease' }).version
+    ).toBe('1.2.4-alpha.1');
   });
 
   it('bumps prerelease with identifier', () => {
@@ -402,7 +426,9 @@ describe('semver plugin: bump', () => {
   it('returns error for malformed input in bump', () => {
     expect(semver({ operation: 'bump', version: 'bad', release: 'patch' }).error).toBeDefined();
     expect(semver({ operation: 'bump', version: '1.2.3' }).error).toBeDefined();
-    expect(semver({ operation: 'bump', version: '1.2.3', release: 'invalid' as any }).error).toBeDefined();
+    expect(
+      semver({ operation: 'bump', version: '1.2.3', release: 'invalid' as any }).error
+    ).toBeDefined();
   });
 });
 

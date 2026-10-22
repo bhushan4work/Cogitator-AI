@@ -513,9 +513,7 @@ describe('schema validation', () => {
   });
 
   it('semverToolSchema accepts valid operations and validates operation enum', () => {
-    expect(
-      semverToolSchema.safeParse({ operation: 'parse', version: '1.2.3' }).success
-    ).toBe(true);
+    expect(semverToolSchema.safeParse({ operation: 'parse', version: '1.2.3' }).success).toBe(true);
     expect(
       semverToolSchema.safeParse({
         operation: 'compare',
