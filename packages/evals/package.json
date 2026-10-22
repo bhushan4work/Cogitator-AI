@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/evals",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Evaluation framework for Cogitator AI agents",
   "keywords": [
     "cogitator",
