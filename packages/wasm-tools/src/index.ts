@@ -363,10 +363,6 @@ export const semverToolSchema = z.object({
     .enum(['major', 'minor', 'patch', 'prerelease'])
     .optional()
     .describe('Release type for bump operation ("major", "minor", "patch", or "prerelease")'),
-  type: z
-    .enum(['major', 'minor', 'patch', 'prerelease'])
-    .optional()
-    .describe('Alternative name for release type in bump operation'),
   identifier: z
     .string()
     .optional()

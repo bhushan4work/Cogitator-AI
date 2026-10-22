@@ -1,34 +1,25 @@
 interface SemverInput {
   operation?: 'parse' | 'compare' | 'satisfies' | 'bump';
   version?: string;
-  version1?: string;
   version2?: string;
   range?: string;
   release?: 'major' | 'minor' | 'patch' | 'prerelease';
-  type?: 'major' | 'minor' | 'patch' | 'prerelease';
   identifier?: string;
-  prereleaseIdentifier?: string;
 }
 
 interface SemverOutput {
   error?: string;
 
-  // parse
   major?: number;
   minor?: number;
   patch?: number;
   prerelease?: (string | number)[];
   build?: string[];
-  buildMetadata?: string[];
-  metadata?: string[];
 
-  // compare
   comparison?: -1 | 0 | 1;
 
-  // satisfies
   satisfies?: boolean;
 
-  // bump
   version?: string;
 }
 
@@ -43,7 +34,7 @@ interface ParsedSemver {
 }
 
 interface Comparator {
-  op: string; // '*', '=', '>', '>=', '<', '<='
+  op: string;
   ver: ParsedSemver | null;
 }
 
@@ -115,8 +106,6 @@ function compareSemver(v1: ParsedSemver, v2: ParsedSemver): -1 | 0 | 1 {
     return v1.patch > v2.patch ? 1 : -1;
   }
 
-  // When major, minor, patch are equal:
-  // Pre-release vs normal
   const p1 = v1.prerelease;
   const p2 = v2.prerelease;
 
@@ -124,21 +113,18 @@ function compareSemver(v1: ParsedSemver, v2: ParsedSemver): -1 | 0 | 1 {
     return 0;
   }
   if (p1.length > 0 && p2.length === 0) {
-    return -1; // 1.0.0-alpha < 1.0.0
+    return -1;
   }
   if (p1.length === 0 && p2.length > 0) {
-    return 1; // 1.0.0 > 1.0.0-alpha
+    return 1;
   }
 
-  // Both have prereleases: SemVer Spec section 11
   const len = Math.max(p1.length, p2.length);
   for (let i = 0; i < len; i++) {
     if (i >= p1.length) {
-      // p1 is smaller set -> lower precedence
       return -1;
     }
     if (i >= p2.length) {
-      // p2 is smaller set -> p1 has higher precedence
       return 1;
     }
 
@@ -155,13 +141,12 @@ function compareSemver(v1: ParsedSemver, v2: ParsedSemver): -1 | 0 | 1 {
       return (id1 as number) > (id2 as number) ? 1 : -1;
     }
     if (isNum1 && !isNum2) {
-      // Numeric identifiers always have lower precedence than non-numeric identifiers
       return -1;
     }
     if (!isNum1 && isNum2) {
       return 1;
     }
-    // Both non-numeric -> ASCII order
+
     return (id1 as string) > (id2 as string) ? 1 : -1;
   }
 
@@ -359,7 +344,7 @@ function parseRange(rangeStr: unknown): Comparator[][] {
 
   return setStrings.map((setStr) => {
     let s = setStr.trim();
-    // Check for hyphen range: e.g. 1.2.3 - 2.3.4
+
     const hyphenMatch = /^\s*([0-9a-zA-Z.*+-]+)\s+-\s+([0-9a-zA-Z.*+-]+)\s*$/.exec(s);
     if (hyphenMatch) {
       const left = hyphenMatch[1];
@@ -391,7 +376,6 @@ function parseRange(rangeStr: unknown): Comparator[][] {
       return comps;
     }
 
-    // Collapse spaces between operators and versions (e.g. ">= 1.0.0" -> ">=1.0.0")
     s = s.replace(/([<>=~^]+)\s+/g, '$1');
     const tokens = s.split(/\s+/).filter(Boolean);
     if (tokens.length === 0) {
@@ -410,9 +394,6 @@ function satisfiesRange(versionStr: unknown, rangeStr: unknown): boolean {
   const rangeSets = parseRange(rangeStr);
 
   return rangeSets.some((compSet) => {
-    // SemVer prerelease isolation rule:
-    // A version with prerelease tag only satisfies a range set if at least one
-    // comparator in the same set has a prerelease tag with identical [major, minor, patch].
     if (v.prerelease.length > 0) {
       const hasMatchingPrereleaseComp = compSet.some(
         (c) =>
@@ -453,7 +434,6 @@ function bumpVersion(versionStr: unknown, releaseType: unknown, identifier?: str
   switch (rel) {
     case 'major':
       if (v.prerelease.length > 0 && v.minor === 0 && v.patch === 0) {
-        // 1.0.0-alpha bumped to major becomes 1.0.0
         major = v.major;
       } else {
         major = v.major + 1;
@@ -464,7 +444,6 @@ function bumpVersion(versionStr: unknown, releaseType: unknown, identifier?: str
 
     case 'minor':
       if (v.prerelease.length > 0 && v.patch === 0) {
-        // 1.2.0-alpha bumped to minor becomes 1.2.0
         minor = v.minor;
       } else {
         minor = v.minor + 1;
@@ -474,7 +453,6 @@ function bumpVersion(versionStr: unknown, releaseType: unknown, identifier?: str
 
     case 'patch':
       if (v.prerelease.length > 0) {
-        // 1.2.3-alpha bumped to patch becomes 1.2.3
         patch = v.patch;
       } else {
         patch = v.patch + 1;
@@ -484,11 +462,9 @@ function bumpVersion(versionStr: unknown, releaseType: unknown, identifier?: str
     case 'prerelease': {
       const id = identifier && identifier.trim() !== '' ? identifier.trim() : undefined;
       if (v.prerelease.length === 0) {
-        // Normal version: increment patch and attach prerelease
         patch = v.patch + 1;
         prerelease = id ? [id, 0] : [0];
       } else {
-        // Existing prerelease
         if (id) {
           if (v.prerelease[0] === id) {
             const next = [...v.prerelease];
@@ -554,7 +530,7 @@ export function semver(): number {
       throw new Error('operation is required (must be one of: parse, compare, satisfies, bump)');
     }
 
-    const version = input.version ?? input.version1;
+    const version = input.version;
 
     switch (operation) {
       case 'parse': {
@@ -568,8 +544,6 @@ export function semver(): number {
           patch: parsed.patch,
           prerelease: parsed.prerelease,
           build: parsed.build,
-          buildMetadata: parsed.build,
-          metadata: parsed.build,
           version: parsed.version,
         };
         Host.outputString(JSON.stringify(output));
@@ -604,11 +578,11 @@ export function semver(): number {
       }
 
       case 'bump': {
-        const release = input.release ?? input.type;
+        const release = input.release;
         if (version === undefined || release === undefined) {
           throw new Error('bump operation requires version and release type');
         }
-        const id = input.identifier ?? input.prereleaseIdentifier;
+        const id = input.identifier;
         const bumped = bumpVersion(version, release, id);
         const output: SemverOutput = {
           version: bumped,

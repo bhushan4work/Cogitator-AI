@@ -4,22 +4,16 @@ import { runPlugin, pluginCall } from '../helpers/run-plugin';
 interface SemverOutput {
   error?: string;
 
-  // parse
   major?: number;
   minor?: number;
   patch?: number;
   prerelease?: (string | number)[];
   build?: string[];
-  buildMetadata?: string[];
-  metadata?: string[];
 
-  // compare
   comparison?: -1 | 0 | 1;
 
-  // satisfies
   satisfies?: boolean;
 
-  // bump
   version?: string;
 }
 
@@ -64,7 +58,9 @@ describe('semver plugin: parse', () => {
     expect(res.patch).toBe(0);
     expect(res.prerelease).toEqual([]);
     expect(res.build).toEqual(['20130313144700']);
-    expect(res.buildMetadata).toEqual(['20130313144700']);
+    expect(Object.keys(res).sort()).toEqual(
+      ['build', 'major', 'minor', 'patch', 'prerelease', 'version'].sort()
+    );
   });
 
   it('parses version with both prerelease and build metadata', () => {
@@ -77,7 +73,6 @@ describe('semver plugin: parse', () => {
     expect(res.patch).toBe(0);
     expect(res.prerelease).toEqual(['beta', 2]);
     expect(res.build).toEqual(['exp', 'sha', '5114f85']);
-    expect(res.buildMetadata).toEqual(['exp', 'sha', '5114f85']);
   });
 
   it('accepts optional leading v prefix', () => {
@@ -330,17 +325,14 @@ describe('semver plugin: satisfies', () => {
   });
 
   it('handles prerelease isolation in ranges', () => {
-    // Prereleases do not satisfy range unless range explicitly opts into matching prerelease tuple
     expect(satisfies('1.2.3-alpha.1', '^1.0.0')).toBe(false);
     expect(satisfies('1.2.3-alpha.1', '>=1.0.0')).toBe(false);
     expect(satisfies('1.2.3-alpha.1', '*')).toBe(false);
 
-    // Matching major.minor.patch with prerelease comparator satisfies
     expect(satisfies('1.2.3-alpha.1', '^1.2.3-alpha')).toBe(true);
     expect(satisfies('1.2.3-alpha.2', '^1.2.3-alpha.1')).toBe(true);
     expect(satisfies('1.2.3-beta.1', '^1.2.3-alpha.1')).toBe(true);
 
-    // Prerelease on higher version does not satisfy
     expect(satisfies('1.2.4-alpha.1', '^1.2.3-alpha')).toBe(false);
   });
 
@@ -449,22 +441,16 @@ describe('semver plugin: bump', () => {
     ).toBe('1.2.4');
   });
 
-  it('supports type as alias for release', () => {
-    expect(
-      semver({
-        operation: 'bump',
-        version: '1.2.3',
-        type: 'minor',
-      }).version
-    ).toBe('1.3.0');
+  it('requires release and ignores other names for it', () => {
+    expect(semver({ operation: 'bump', version: '1.2.3', type: 'minor' }).error).toBe(
+      'bump operation requires version and release type'
+    );
   });
 
   it('returns error for malformed input in bump', () => {
     expect(semver({ operation: 'bump', version: 'bad', release: 'patch' }).error).toBeDefined();
     expect(semver({ operation: 'bump', version: '1.2.3' }).error).toBeDefined();
-    expect(
-      semver({ operation: 'bump', version: '1.2.3', release: 'invalid' as any }).error
-    ).toBeDefined();
+    expect(semver({ operation: 'bump', version: '1.2.3', release: 'invalid' }).error).toBeDefined();
   });
 });
 
