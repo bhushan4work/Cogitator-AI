@@ -127,6 +127,23 @@ describe('OpenAIRealtimeAdapter', () => {
       });
     });
 
+    it('uses G.711 μ-law in both directions with audioFormat pcmu', async () => {
+      adapter = new OpenAIRealtimeAdapter(createConfig({ audioFormat: 'pcmu' }));
+      await adapter.connect();
+
+      const sent = JSON.parse(mockWs.send.mock.calls[0]![0] as string);
+      expect(sent.session.audio.input.format).toEqual({ type: 'audio/pcmu' });
+      expect(sent.session.audio.output.format).toEqual({ type: 'audio/pcmu' });
+    });
+
+    it('keeps PCM16 at 24 kHz with audioFormat pcm', async () => {
+      adapter = new OpenAIRealtimeAdapter(createConfig({ audioFormat: 'pcm' }));
+      await adapter.connect();
+
+      const sent = JSON.parse(mockWs.send.mock.calls[0]![0] as string);
+      expect(sent.session.audio.input.format).toEqual({ type: 'audio/pcm', rate: 24000 });
+    });
+
     it('uses default voice "marin" when none specified', async () => {
       adapter = new OpenAIRealtimeAdapter(createConfig());
       await adapter.connect();
@@ -702,6 +719,155 @@ describe('OpenAIRealtimeAdapter', () => {
 
       adapter.sendText('should not send');
       expect(mockWs.send).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('truncate()', () => {
+    function audioDelta(itemId: string, bytes: number): string {
+      return JSON.stringify({
+        type: 'response.output_audio.delta',
+        item_id: itemId,
+        content_index: 0,
+        delta: Buffer.alloc(bytes).toString('base64'),
+      });
+    }
+
+    function truncations(): unknown[] {
+      return mockWs.send.mock.calls
+        .map((call) => JSON.parse(call[0] as string))
+        .filter((event) => event.type === 'conversation.item.truncate');
+    }
+
+    it('truncates the item being played where the listener stopped hearing it', async () => {
+      adapter = new OpenAIRealtimeAdapter(createConfig({ audioFormat: 'pcmu' }));
+      await adapter.connect();
+      mockWs.emit('message', audioDelta('item_1', 1600));
+      mockWs.emit('message', audioDelta('item_1', 1600));
+
+      adapter.truncate(150);
+      adapter.truncate(100);
+      expect(truncations()).toEqual([
+        {
+          type: 'conversation.item.truncate',
+          item_id: 'item_1',
+          content_index: 0,
+          audio_end_ms: 150,
+        },
+      ]);
+    });
+
+    it('places each item on the timeline of all the audio emitted', async () => {
+      adapter = new OpenAIRealtimeAdapter(createConfig());
+      await adapter.connect();
+      mockWs.emit('message', audioDelta('item_1', 48 * 400));
+      mockWs.emit('message', audioDelta('item_2', 48 * 100));
+
+      adapter.truncate(450);
+      expect(truncations()).toEqual([
+        expect.objectContaining({ item_id: 'item_2', audio_end_ms: 50 }),
+      ]);
+    });
+
+    it('truncates the item playing at the position and the items after it at 0', async () => {
+      adapter = new OpenAIRealtimeAdapter(createConfig({ audioFormat: 'pcmu' }));
+      await adapter.connect();
+      mockWs.emit('message', audioDelta('item_a', 3200));
+      mockWs.emit('message', audioDelta('item_b', 1600));
+
+      adapter.truncate(150);
+      expect(truncations()).toEqual([
+        expect.objectContaining({ item_id: 'item_a', audio_end_ms: 150 }),
+        expect.objectContaining({ item_id: 'item_b', audio_end_ms: 0 }),
+      ]);
+    });
+
+    it('drops audio of a truncated item that still arrives', async () => {
+      adapter = new OpenAIRealtimeAdapter(createConfig({ audioFormat: 'pcmu' }));
+      await adapter.connect();
+      const audio = vi.fn();
+      adapter.on('audio', audio);
+      mockWs.emit('message', audioDelta('item_a', 1600));
+      adapter.truncate(100);
+      mockWs.emit('message', audioDelta('item_a', 1600));
+      mockWs.emit('message', audioDelta('item_c', 800));
+      expect(audio.mock.calls.map(([chunk]) => (chunk as Buffer).length)).toEqual([1600, 800]);
+
+      adapter.truncate(250);
+      expect(truncations()).toEqual([
+        expect.objectContaining({ item_id: 'item_a', audio_end_ms: 100 }),
+        expect.objectContaining({ item_id: 'item_c', audio_end_ms: 50 }),
+      ]);
+    });
+
+    it('cuts the item of an active response at its end, dropping what still arrives', async () => {
+      adapter = new OpenAIRealtimeAdapter(createConfig({ audioFormat: 'pcmu' }));
+      await adapter.connect();
+      const audio = vi.fn();
+      adapter.on('audio', audio);
+      mockWs.emit('message', JSON.stringify({ type: 'response.created' }));
+      mockWs.emit('message', audioDelta('item_a', 800));
+      adapter.truncate(5_000);
+      mockWs.emit('message', audioDelta('item_a', 800));
+      expect(truncations()).toEqual([
+        expect.objectContaining({ item_id: 'item_a', audio_end_ms: 100 }),
+      ]);
+      expect(audio).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves an item that was heard to its end', async () => {
+      adapter = new OpenAIRealtimeAdapter(createConfig({ audioFormat: 'pcmu' }));
+      await adapter.connect();
+      mockWs.emit('message', audioDelta('item_1', 800));
+      adapter.truncate(100);
+      adapter.truncate(5_000);
+      expect(truncations()).toEqual([]);
+    });
+  });
+
+  describe('sendText() during a response', () => {
+    function sentTypes(): string[] {
+      return mockWs.send.mock.calls.map((call) => JSON.parse(call[0] as string).type as string);
+    }
+
+    it('creates the new response once the active one ended', async () => {
+      adapter = new OpenAIRealtimeAdapter(createConfig());
+      await adapter.connect();
+      mockWs.emit('message', JSON.stringify({ type: 'response.created' }));
+      mockWs.send.mockClear();
+
+      adapter.interrupt();
+      adapter.sendText('new question');
+      expect(sentTypes()).toEqual(['response.cancel', 'conversation.item.create']);
+
+      mockWs.emit(
+        'message',
+        JSON.stringify({ type: 'response.done', response: { status: 'cancelled' } })
+      );
+      expect(sentTypes()).toEqual([
+        'response.cancel',
+        'conversation.item.create',
+        'response.create',
+      ]);
+    });
+
+    it('creates it anyway when the active response does not end in time', async () => {
+      vi.useFakeTimers();
+      try {
+        adapter = new OpenAIRealtimeAdapter(createConfig());
+        const connecting = adapter.connect();
+        await vi.advanceTimersByTimeAsync(1);
+        await connecting;
+        mockWs.emit('message', JSON.stringify({ type: 'response.created' }));
+        mockWs.send.mockClear();
+
+        adapter.sendText('new question');
+        await vi.advanceTimersByTimeAsync(2_999);
+        expect(sentTypes()).toEqual(['conversation.item.create']);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(sentTypes()).toEqual(['conversation.item.create', 'response.create']);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

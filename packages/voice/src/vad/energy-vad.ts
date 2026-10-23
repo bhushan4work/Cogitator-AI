@@ -12,7 +12,7 @@ export class EnergyVAD implements VADProvider {
 
   private readonly threshold: number;
   private readonly silenceDuration: number;
-  private readonly sampleRate: number;
+  readonly sampleRate: number;
 
   private state: 'idle' | 'speaking' = 'idle';
   private speechSamples = 0;
@@ -58,6 +58,15 @@ export class EnergyVAD implements VADProvider {
     }
 
     return { type: 'speech', probability: 0 };
+  }
+
+  /** A VAD with the same settings and a fresh state, one per session */
+  clone(): EnergyVAD {
+    return new EnergyVAD({
+      threshold: this.threshold,
+      silenceDuration: this.silenceDuration,
+      sampleRate: this.sampleRate,
+    });
   }
 
   reset(): void {

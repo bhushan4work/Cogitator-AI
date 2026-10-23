@@ -1,7 +1,19 @@
 import { EventEmitter } from 'node:events';
 import { nanoid } from 'nanoid';
-import type { STTStream, VADEvent, VoicePipelineConfig, VoiceTurn } from '../types.js';
+import type {
+  RawAudioFormat,
+  STTStream,
+  STTStreamOptions,
+  TTSOptions,
+  VADEvent,
+  VADProvider,
+  VoicePipelineConfig,
+  VoicePlayback,
+  VoiceTurn,
+} from '../types.js';
 import { pcm16ToFloat32 } from '../audio.js';
+import { mulawToFloat32, mulawToPcm16 } from '../codec.js';
+import { Resampler } from '../resampler.js';
 import { AsyncQueue } from '../async-queue.js';
 import { DEFAULT_SETTLE_TIMEOUT, bounded } from '../timing.js';
 import { SentenceSplitter, maxSentenceLength } from './sentence-splitter.js';
@@ -21,6 +33,28 @@ interface PipelineSessionEvents {
 
 export interface PipelineSessionOptions {
   sessionId?: string;
+  /**
+   * Format of the audio `pushAudio` gets, such as μ-law at 8 kHz from a phone call. The STT
+   * stream is opened at its rate, and gets μ-law as is when the provider lists it in
+   * `streamEncodings`, decoded to PCM16 otherwise. The VAD gets the audio decoded, resampled to
+   * its `sampleRate` when that differs. Without it, `pushAudio` takes PCM16 at the rates the STT
+   * and VAD were configured for.
+   */
+  input?: RawAudioFormat;
+  /** TTS options of this session, over the pipeline's `ttsOptions` */
+  ttsOptions?: TTSOptions;
+  /**
+   * Where the session's audio is played, when the transport learns what the listener heard. The
+   * session marks the end of each spoken sentence, stays `speaking` until the marks come back,
+   * drops the queued audio (`clear`) when a turn is stopped, and settles a streamed turn with
+   * only the sentences whose marks were played.
+   */
+  playback?: VoicePlayback;
+}
+
+interface SpokenSegment {
+  text: string;
+  played: Promise<boolean>;
 }
 
 const ABORTED: unique symbol = Symbol('aborted');
@@ -64,20 +98,45 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | typ
   });
 }
 
+/** Frees a VAD the session made, whatever its `dispose` does */
+function disposeVAD(vad: VADProvider | undefined): void {
+  try {
+    vad?.dispose?.();
+  } catch {
+    return;
+  }
+}
+
+/** The text of the segments played, up to the first one that was not */
+async function heard(segments: SpokenSegment[]): Promise<{ spoken: string; heardAll: boolean }> {
+  let spoken = '';
+  for (const segment of segments) {
+    if (!(await segment.played)) return { spoken, heardAll: false };
+    spoken += segment.text;
+  }
+  return { spoken, heardAll: true };
+}
+
 /**
  * One voice conversation: audio in, through the VAD and STT, to the agent, and its answer back
  * as audio. With a runner that streams (`VoiceAgentRunner.stream`) the answer is spoken sentence
  * by sentence while it is generated, `agent_response_delta` carries each piece of text and
  * `agent_response` the whole answer once it is generated. When such a turn ends, the runner's
- * `settle` hears what was spoken: the sentences whose audio was sent in full.
+ * `settle` hears what was spoken: the sentences whose audio was sent in full, or with a
+ * `playback` (a phone call) the sentences the listener played.
  */
 export class PipelineSession extends EventEmitter<PipelineSessionEvents> {
   readonly id: string;
   private readonly stt: VoicePipelineConfig['stt'];
   private readonly tts: VoicePipelineConfig['tts'];
-  private readonly vad: VoicePipelineConfig['vad'];
+  private readonly vad: VADProvider | undefined;
+  private readonly ownsVAD: boolean;
   private readonly agent: VoicePipelineConfig['agent'];
   private readonly ttsOptions: VoicePipelineConfig['ttsOptions'];
+  private readonly input: RawAudioFormat | undefined;
+  private readonly sttEncodesInput: boolean;
+  private readonly vadResampler: Resampler | null;
+  private readonly playback: VoicePlayback | undefined;
   private readonly bargeIn: boolean;
   private readonly maxSentenceLength: number;
   private readonly settleTimeout: number;
@@ -94,9 +153,21 @@ export class PipelineSession extends EventEmitter<PipelineSessionEvents> {
     this.id = options.sessionId ?? nanoid();
     this.stt = config.stt;
     this.tts = config.tts;
-    this.vad = config.vad;
+    this.ownsVAD = typeof config.vad === 'function';
+    this.vad = typeof config.vad === 'function' ? config.vad() : config.vad;
     this.agent = config.agent;
-    this.ttsOptions = config.ttsOptions;
+    this.ttsOptions = options.ttsOptions
+      ? { ...config.ttsOptions, ...options.ttsOptions }
+      : config.ttsOptions;
+    this.input = options.input;
+    this.sttEncodesInput =
+      this.input?.encoding !== 'mulaw' || (config.stt.streamEncodings ?? []).includes('mulaw');
+    const vadRate = this.vad?.sampleRate;
+    this.vadResampler =
+      this.input && vadRate !== undefined && vadRate !== this.input.sampleRate
+        ? new Resampler(this.input.sampleRate, vadRate)
+        : null;
+    this.playback = options.playback;
     this.bargeIn = config.bargeIn ?? false;
     this.maxSentenceLength = maxSentenceLength(config.maxSentenceLength);
     this.settleTimeout = config.settleTimeout ?? DEFAULT_SETTLE_TIMEOUT;
@@ -109,9 +180,10 @@ export class PipelineSession extends EventEmitter<PipelineSessionEvents> {
     return this.state;
   }
 
-  pushAudio(chunk: Buffer): void {
+  pushAudio(input: Buffer): void {
     if (this.closed) return;
 
+    const chunk = this.sttEncodesInput ? input : mulawToPcm16(input);
     if (!this.vad) {
       this.handleNoVAD(chunk);
       return;
@@ -119,7 +191,7 @@ export class PipelineSession extends EventEmitter<PipelineSessionEvents> {
 
     let eventOrPromise: VADEvent | Promise<VADEvent>;
     try {
-      eventOrPromise = this.vad.process(pcm16ToFloat32(chunk));
+      eventOrPromise = this.vad.process(this.vadSamples(input));
     } catch (err) {
       this.emitError(err);
       return;
@@ -164,6 +236,7 @@ export class PipelineSession extends EventEmitter<PipelineSessionEvents> {
     if (this.closed) return;
     this.closed = true;
     this.turn.abort();
+    this.playback?.clear();
     this.discardStream();
     this.state = 'idle';
 
@@ -171,12 +244,17 @@ export class PipelineSession extends EventEmitter<PipelineSessionEvents> {
       await this.activeProcessing.catch(() => {});
     }
     await bounded(this.settling, this.settleTimeout);
+    if (this.ownsVAD) {
+      await this.vadQueue;
+      disposeVAD(this.vad);
+    }
 
     this.removeAllListeners();
   }
 
   private stopTurn(): void {
     this.turn.abort();
+    this.playback?.clear();
     this.turn = new AbortController();
     this.discardStream();
     this.state = 'idle';
@@ -243,8 +321,23 @@ export class PipelineSession extends EventEmitter<PipelineSessionEvents> {
     }
   }
 
+  private vadSamples(input: Buffer): Float32Array {
+    const samples =
+      this.input?.encoding === 'mulaw' ? mulawToFloat32(input) : pcm16ToFloat32(input);
+    return this.vadResampler ? this.vadResampler.process(samples) : samples;
+  }
+
+  private streamOptions(): STTStreamOptions | undefined {
+    if (!this.input) return undefined;
+    return {
+      sampleRate: this.input.sampleRate,
+      encoding: this.sttEncodesInput ? this.input.encoding : 'pcm16',
+    };
+  }
+
   private openStream(): void {
-    const stream = this.stt.createStream();
+    const options = this.streamOptions();
+    const stream = options ? this.stt.createStream(options) : this.stt.createStream();
     this.stream = stream;
 
     stream.on('partial', (text: string) => {
@@ -315,6 +408,7 @@ export class PipelineSession extends EventEmitter<PipelineSessionEvents> {
         this.state = 'speaking';
         const completed = await this.speak(content, signal);
         if (!completed) return;
+        if (this.playback && !(await this.playback.mark())) return;
       }
 
       if (!this.isCurrent(signal)) return;
@@ -384,7 +478,7 @@ export class PipelineSession extends EventEmitter<PipelineSessionEvents> {
       generated = done;
     }, fail);
 
-    let spoken = '';
+    const segments: SpokenSegment[] = [];
     let spokeAll = false;
     try {
       for (;;) {
@@ -399,7 +493,10 @@ export class PipelineSession extends EventEmitter<PipelineSessionEvents> {
           this.state = 'speaking';
           if (!(await this.speak(words, stop.signal))) break;
         }
-        spoken += next.value;
+        segments.push({
+          text: next.value,
+          played: this.playback && words.length > 0 ? this.playback.mark() : Promise.resolve(true),
+        });
       }
     } catch (err) {
       fail(err);
@@ -412,7 +509,10 @@ export class PipelineSession extends EventEmitter<PipelineSessionEvents> {
     await generation;
     signal.removeEventListener('abort', stopOnAbort);
 
-    const outcome = { spoken, interrupted: !(generated && spokeAll && !failure) };
+    const { spoken, heardAll } = this.playback
+      ? await heard(segments)
+      : { spoken: segments.map((segment) => segment.text).join(''), heardAll: true };
+    const outcome = { spoken, interrupted: !(generated && spokeAll && !failure && heardAll) };
     held.settled = Promise.resolve()
       .then(() => turn.settle?.(outcome))
       .catch((err: unknown) => this.emitError(err));

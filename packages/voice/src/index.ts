@@ -13,6 +13,7 @@ export type {
   TTSProvider,
   VADEvent,
   VADProvider,
+  VADFactory,
   VoicePipelineConfig,
   VoiceAgentRunner,
   VoiceRunContext,
@@ -26,6 +27,10 @@ export type {
   VoiceAgentConfig,
   TranscribeResult,
   VoiceAudioFormat,
+  RawAudioEncoding,
+  RawAudioFormat,
+  RealtimeAudioFormat,
+  VoicePlayback,
 } from './types.js';
 
 export {
@@ -39,6 +44,18 @@ export {
   audioMimeType,
   type DetectedAudioFormat,
 } from './audio.js';
+
+export {
+  MULAW_SILENCE,
+  linearToMulaw,
+  mulawToLinear,
+  float32ToMulaw,
+  mulawToFloat32,
+  pcm16ToMulaw,
+  mulawToPcm16,
+} from './codec.js';
+export { Resampler, resampleBandLimited, type ResamplerOptions } from './resampler.js';
+export { AudioTranscoder } from './transcoder.js';
 
 export { OpenAISTT, type OpenAISTTConfig } from './stt/index.js';
 export { DeepgramSTT, type DeepgramSTTConfig } from './stt/index.js';
@@ -70,7 +87,14 @@ export {
   type WebSocketTransportOptions,
 } from './transport/index.js';
 
-export { VoiceAgent } from './voice-agent.js';
+export {
+  VoiceAgent,
+  type TwilioCall,
+  type TwilioStreamOptions,
+  type TwilioTransportConfig,
+} from './voice-agent.js';
+
+export * from './telephony/index.js';
 export {
   createCogitatorRunner,
   type CogitatorLike,

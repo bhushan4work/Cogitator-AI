@@ -51,9 +51,34 @@ describe('SileroVAD', () => {
     expect(vad.name).toBe('silero');
   });
 
-  it('throws if process() called before init()', async () => {
-    const samples = new Float32Array(512);
-    await expect(vad.process(samples)).rejects.toThrow('must call init()');
+  it('loads the model on the first process() when init() was not called', async () => {
+    await expect(vad.process(new Float32Array(512))).resolves.toEqual({ type: 'silence' });
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('handles overlapping process() calls one after another', async () => {
+    const v8 = new SileroVAD({ modelPath: '/fake/silero_vad.onnx', sampleRate: 8000 });
+    await v8.init();
+    mockRun.mockClear();
+    let fed = 0;
+    mockRun.mockImplementation(async (feeds: Record<string, { data: ArrayLike<number> }>) => {
+      fed += feeds.input!.data.length;
+      await new Promise((resolve) => setImmediate(resolve));
+      return {
+        output: { data: new Float32Array([0.1]) },
+        hn: { data: new Float32Array(128) },
+        cn: { data: new Float32Array(128) },
+      };
+    });
+    await Promise.all(Array.from({ length: 16 }, () => v8.process(new Float32Array(160))));
+    expect(mockRun).toHaveBeenCalledTimes(Math.floor((16 * 160) / 256));
+    expect(fed).toBe(10 * 256);
+  });
+
+  it('fails the call when the model cannot be loaded, and loads it on a later call', async () => {
+    mockCreate.mockRejectedValueOnce(new Error('bad model'));
+    await expect(vad.process(new Float32Array(512))).rejects.toThrow('bad model');
+    await expect(vad.process(new Float32Array(512))).resolves.toEqual({ type: 'silence' });
   });
 
   it('init() creates inference session with model path', async () => {
@@ -185,5 +210,35 @@ describe('SileroVAD', () => {
     await vad.process(new Float32Array(512));
 
     expect(mockRun).toHaveBeenCalledTimes(2);
+  });
+
+  describe('clone()', () => {
+    it('shares the loaded model and keeps a state of its own', async () => {
+      await vad.init();
+      const other = vad.clone();
+      expect(other).not.toBe(vad);
+      expect(other.sampleRate).toBe(vad.sampleRate);
+
+      mockModelOutput(0.9);
+      expect((await vad.process(new Float32Array(512))).type).toBe('speech_start');
+      mockModelOutput(0.1);
+      expect((await other.process(new Float32Array(512))).type).toBe('silence');
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('loads the model once for a template and clones made before init', async () => {
+      const early = vad.clone();
+      await Promise.all([vad.init(), early.init()]);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+      const late = vad.clone();
+      await expect(late.process(new Float32Array(512))).resolves.toEqual({ type: 'silence' });
+    });
+
+    it('lets a clone load the model the template has not loaded yet', async () => {
+      const early = vad.clone();
+      await early.init();
+      await expect(vad.process(new Float32Array(512))).resolves.toEqual({ type: 'silence' });
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { WebSocket } from 'ws';
-import type { RealtimeSessionConfig } from '../types.js';
+import type { RawAudioFormat, RealtimeSessionConfig } from '../types.js';
+import { AudioTranscoder } from '../transcoder.js';
 import {
   assertRealtimeTools,
   realtimeToolError,
@@ -13,7 +14,22 @@ const DEFAULT_VOICE = 'Puck';
 const BASE_URL =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
 const CONNECT_TIMEOUT_MS = 30_000;
-const INPUT_MIME_TYPE = 'audio/pcm;rate=16000';
+const INPUT_RATE = 16000;
+const INPUT_MIME_TYPE = `audio/pcm;rate=${INPUT_RATE}`;
+const DEFAULT_OUTPUT_RATE = 24000;
+/**
+ * A transcript of the user that comes this long after the previous one, or after one marked
+ * `finished`, starts a new utterance; a closer one continues the previous utterance
+ */
+const UTTERANCE_GAP_MS = 1_500;
+const MULAW_8K: RawAudioFormat = { encoding: 'mulaw', sampleRate: 8000 };
+
+/** The rate of a `audio/pcm;rate=N` MIME type */
+function pcmRate(mimeType: string | undefined): number {
+  const match = /rate=(\d+)/.exec(mimeType ?? '');
+  const rate = match ? Number(match[1]) : NaN;
+  return Number.isInteger(rate) && rate > 0 ? rate : DEFAULT_OUTPUT_RATE;
+}
 
 interface GeminiRealtimeEvents {
   connected: [];
@@ -34,7 +50,7 @@ interface GeminiPart {
 
 interface GeminiServerContent {
   modelTurn?: { parts?: GeminiPart[] };
-  inputTranscription?: { text?: string };
+  inputTranscription?: { text?: string; finished?: boolean };
   outputTranscription?: { text?: string };
   interrupted?: boolean;
   turnComplete?: boolean;
@@ -68,8 +84,9 @@ function rawDataToString(data: WebSocket.RawData): string {
 }
 
 /**
- * Gemini Live API adapter. Input audio is PCM16 mono at 16kHz,
- * output audio is PCM16 mono at 24kHz.
+ * Gemini Live API adapter. Input audio is PCM16 mono at 16kHz, output audio is PCM16 mono at
+ * 24kHz. With `audioFormat: 'pcmu'` both are G.711 μ-law at 8 kHz: the adapter decodes and
+ * resamples the input to 16 kHz, and resamples and encodes the model's audio.
  */
 export class GeminiRealtimeAdapter extends EventEmitter<GeminiRealtimeEvents> {
   private readonly config: RealtimeSessionConfig;
@@ -83,12 +100,20 @@ export class GeminiRealtimeAdapter extends EventEmitter<GeminiRealtimeEvents> {
   private assistantText = '';
   private calls: AbortController | null = null;
   private readonly runningCalls = new Map<string, AbortController>();
+  private readonly inputTranscoder: AudioTranscoder | null;
+  private outputTranscoder: AudioTranscoder | null = null;
+  private utteranceOpen = false;
+  private lastUserTranscriptAt = 0;
 
   constructor(config: RealtimeSessionConfig) {
     super();
     assertRealtimeTools(config.tools);
     this.config = config;
     this.model = config.model ?? DEFAULT_MODEL;
+    this.inputTranscoder =
+      config.audioFormat === 'pcmu'
+        ? new AudioTranscoder(MULAW_8K, { encoding: 'pcm16', sampleRate: INPUT_RATE })
+        : null;
   }
 
   get isConnected(): boolean {
@@ -185,9 +210,11 @@ export class GeminiRealtimeAdapter extends EventEmitter<GeminiRealtimeEvents> {
   }
 
   pushAudio(chunk: Buffer): void {
+    const audio = this.inputTranscoder ? this.inputTranscoder.push(chunk) : chunk;
+    if (audio.length === 0) return;
     this.send({
       realtimeInput: {
-        audio: { mimeType: INPUT_MIME_TYPE, data: chunk.toString('base64') },
+        audio: { mimeType: INPUT_MIME_TYPE, data: audio.toString('base64') },
       },
     });
   }
@@ -204,8 +231,12 @@ export class GeminiRealtimeAdapter extends EventEmitter<GeminiRealtimeEvents> {
   interrupt(): void {
     if (this.modelTurnActive) {
       this.interrupting = true;
+      this.outputTranscoder?.reset();
     }
   }
+
+  /** Gemini keeps no truncatable audio items: it drops an interrupted answer itself */
+  truncate(_playedMs: number): void {}
 
   close(): void {
     const ws = this.ws;
@@ -257,6 +288,7 @@ export class GeminiRealtimeAdapter extends EventEmitter<GeminiRealtimeEvents> {
     const inputText = content.inputTranscription?.text;
     if (inputText) {
       this.userTranscript += inputText;
+      this.trackUtterance(content.inputTranscription?.finished === true);
     }
 
     const outputText = content.outputTranscription?.text;
@@ -273,7 +305,7 @@ export class GeminiRealtimeAdapter extends EventEmitter<GeminiRealtimeEvents> {
     for (const part of parts) {
       if (part.thought) continue;
       if (part.inlineData?.data && !this.interrupting) {
-        this.emit('audio', Buffer.from(part.inlineData.data, 'base64'));
+        this.emitAudio(Buffer.from(part.inlineData.data, 'base64'), part.inlineData.mimeType);
       }
       if (part.text) {
         this.assistantText += part.text;
@@ -281,19 +313,63 @@ export class GeminiRealtimeAdapter extends EventEmitter<GeminiRealtimeEvents> {
     }
 
     if (content.interrupted) {
+      this.outputTranscoder?.reset();
       this.flushAssistantTranscript();
       this.modelTurnActive = false;
       this.interrupting = false;
+      this.utteranceOpen = true;
+      this.lastUserTranscriptAt = Date.now();
       this.emit('speech_start');
     }
 
     if (content.turnComplete) {
+      this.flushOutputAudio();
       this.flushUserTranscript();
       this.flushAssistantTranscript();
       this.modelTurnActive = false;
       this.interrupting = false;
       this.emit('turn_end');
     }
+  }
+
+  private emitAudio(audio: Buffer, mimeType: string | undefined): void {
+    if (this.config.audioFormat !== 'pcmu') {
+      this.emit('audio', audio);
+      return;
+    }
+    const rate = pcmRate(mimeType);
+    if (this.outputTranscoder?.from.sampleRate !== rate) {
+      this.flushOutputAudio();
+      this.outputTranscoder = new AudioTranscoder(
+        { encoding: 'pcm16', sampleRate: rate },
+        MULAW_8K
+      );
+    }
+    const encoded = this.outputTranscoder.push(audio);
+    if (encoded.length > 0) this.emit('audio', encoded);
+  }
+
+  /** Emits the end of the model's audio the resampler still holds */
+  private flushOutputAudio(): void {
+    if (!this.outputTranscoder) return;
+    const tail = this.outputTranscoder.flush();
+    if (tail.length > 0 && !this.interrupting) this.emit('audio', tail);
+  }
+
+  /**
+   * `speech_start` for new speech of the user. While the model generates, only Gemini's
+   * `interrupted` counts: transcripts come independently of the model's output, so one that
+   * arrives then may be the tail of the utterance being answered. When the model is not
+   * generating, the first transcript of a new utterance counts (one after a `finished`
+   * transcript or after a pause of `UTTERANCE_GAP_MS`), which also catches the user speaking
+   * while the model's last answer still plays.
+   */
+  private trackUtterance(finished: boolean): void {
+    const now = Date.now();
+    const continues = this.utteranceOpen && now - this.lastUserTranscriptAt < UTTERANCE_GAP_MS;
+    this.lastUserTranscriptAt = now;
+    this.utteranceOpen = !finished;
+    if (!continues && !this.modelTurnActive) this.emit('speech_start');
   }
 
   private flushUserTranscript(): void {
@@ -310,6 +386,9 @@ export class GeminiRealtimeAdapter extends EventEmitter<GeminiRealtimeEvents> {
   }
 
   private resetTurn(): void {
+    this.utteranceOpen = false;
+    this.outputTranscoder?.reset();
+    this.inputTranscoder?.reset();
     this.modelTurnActive = false;
     this.interrupting = false;
     this.userTranscript = '';

@@ -39,6 +39,8 @@ vi.mock('ws', async () => {
 });
 
 import { GeminiRealtimeAdapter } from '../../realtime/gemini-realtime.js';
+import { float32ToPcm16 } from '../../audio.js';
+import { mulawToFloat32 } from '../../codec.js';
 
 function createConfig(overrides?: Partial<RealtimeSessionConfig>): RealtimeSessionConfig {
   return {
@@ -673,6 +675,176 @@ describe('GeminiRealtimeAdapter', () => {
       mockWs.readyState = 3;
 
       adapter.sendText('should not send');
+      expect(mockWs.send).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('audioFormat pcmu', () => {
+    function pcm24k(seconds: number): Buffer {
+      const samples = new Float32Array(24000 * seconds);
+      for (let i = 0; i < samples.length; i++) {
+        samples[i] = 0.4 * Math.sin((2 * Math.PI * 440 * i) / 24000);
+      }
+      return float32ToPcm16(samples);
+    }
+
+    it('decodes μ-law input and sends it as 16 kHz PCM', async () => {
+      adapter = new GeminiRealtimeAdapter(createConfig({ audioFormat: 'pcmu' }));
+      await adapter.connect();
+      mockWs.send.mockClear();
+
+      for (let i = 0; i < 10; i++) adapter.pushAudio(Buffer.alloc(160, 0xff));
+
+      const sent = mockWs.send.mock.calls.map(
+        (call) => JSON.parse(call[0] as string).realtimeInput.audio
+      );
+      expect(sent.every((audio) => audio.mimeType === 'audio/pcm;rate=16000')).toBe(true);
+      const bytes = sent.reduce(
+        (total, audio) => total + Buffer.from(audio.data as string, 'base64').length,
+        0
+      );
+      expect(bytes).toBeGreaterThan(2 * 320 * 10 - 400);
+      expect(bytes).toBeLessThanOrEqual(2 * 320 * 10);
+    });
+
+    it('turns the 24 kHz output into 8 kHz μ-law, its tail included at the end of the turn', async () => {
+      adapter = new GeminiRealtimeAdapter(createConfig({ audioFormat: 'pcmu' }));
+      await adapter.connect();
+      const audio: Buffer[] = [];
+      adapter.on('audio', (chunk) => audio.push(chunk));
+
+      const pcm = pcm24k(1);
+      for (let offset = 0; offset < pcm.length; offset += 4801) {
+        mockWs.emit(
+          'message',
+          JSON.stringify({
+            serverContent: {
+              modelTurn: {
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'audio/pcm;rate=24000',
+                      data: pcm.subarray(offset, offset + 4801).toString('base64'),
+                    },
+                  },
+                ],
+              },
+            },
+          })
+        );
+      }
+      mockWs.emit('message', JSON.stringify({ serverContent: { turnComplete: true } }));
+
+      expect(Buffer.concat(audio)).toHaveLength(8000);
+      const decoded = mulawToFloat32(Buffer.concat(audio));
+      const peak = decoded.slice(400, 7600).reduce((max, s) => Math.max(max, Math.abs(s)), 0);
+      expect(peak).toBeGreaterThan(0.35);
+      expect(peak).toBeLessThan(0.45);
+    });
+  });
+
+  describe('speech_start', () => {
+    const user = (text: string, finished?: boolean) =>
+      mockWs.emit(
+        'message',
+        JSON.stringify({
+          serverContent: { inputTranscription: { text, ...(finished && { finished }) } },
+        })
+      );
+    const model = () =>
+      mockWs.emit(
+        'message',
+        JSON.stringify({
+          serverContent: {
+            modelTurn: {
+              parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: 'AAAA' } }],
+            },
+          },
+        })
+      );
+    const complete = () =>
+      mockWs.emit('message', JSON.stringify({ serverContent: { turnComplete: true } }));
+
+    it('fires once for an utterance whose transcript keeps coming while the model answers', async () => {
+      adapter = new GeminiRealtimeAdapter(createConfig({ audioFormat: 'pcmu' }));
+      await adapter.connect();
+      const started = vi.fn();
+      adapter.on('speech_start', started);
+
+      user('What is');
+      model();
+      user(' the weather?');
+      model();
+      user(' today');
+      expect(started).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores a late tail of the answered utterance after the model finished', async () => {
+      adapter = new GeminiRealtimeAdapter(createConfig());
+      await adapter.connect();
+      const started = vi.fn();
+      adapter.on('speech_start', started);
+
+      user('Hello');
+      model();
+      complete();
+      user(' there');
+      expect(started).toHaveBeenCalledTimes(1);
+    });
+
+    it('fires for new speech after the model finished, once the last utterance ended', async () => {
+      adapter = new GeminiRealtimeAdapter(createConfig());
+      await adapter.connect();
+      const started = vi.fn();
+      adapter.on('speech_start', started);
+
+      user('Hello there', true);
+      model();
+      complete();
+      user('Wait');
+      user(' a moment');
+      expect(started).toHaveBeenCalledTimes(2);
+    });
+
+    it('fires for speech after a pause when no transcript was marked finished', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        adapter = new GeminiRealtimeAdapter(createConfig());
+        await adapter.connect();
+        const started = vi.fn();
+        adapter.on('speech_start', started);
+
+        user('Hello');
+        model();
+        complete();
+        vi.setSystemTime(Date.now() + 1_500);
+        user('Wait');
+        expect(started).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('counts only an interruption as barge-in while the model generates', async () => {
+      adapter = new GeminiRealtimeAdapter(createConfig());
+      await adapter.connect();
+      const started = vi.fn();
+      adapter.on('speech_start', started);
+
+      user('Tell me a story', true);
+      model();
+      user('Stop');
+      expect(started).toHaveBeenCalledTimes(1);
+      mockWs.emit('message', JSON.stringify({ serverContent: { interrupted: true } }));
+      user(' please');
+      expect(started).toHaveBeenCalledTimes(2);
+    });
+
+    it('has nothing to truncate', async () => {
+      adapter = new GeminiRealtimeAdapter(createConfig());
+      await adapter.connect();
+      mockWs.send.mockClear();
+      adapter.truncate(100);
       expect(mockWs.send).not.toHaveBeenCalled();
     });
   });

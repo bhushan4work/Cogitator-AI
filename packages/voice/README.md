@@ -29,9 +29,10 @@ Full documentation: [cogitator.app/docs/voice](https://cogitator.app/docs/voice)
 - **2 TTS Providers** - OpenAI (gpt-4o-mini-tts) and ElevenLabs (eleven_flash_v2_5, ~75ms latency)
 - **2 VAD Providers** - Energy-based (zero deps) and Silero (ONNX neural network)
 - **WebSocket Transport** - Built-in server for browser/mobile clients
+- **Phone Calls** - Twilio Media Streams with signed upgrades, one-time session tokens, barge-in and memory of only what the caller heard
 - **Agent Tools** - Drop-in `transcribe_audio` and `speak_text` tools for any Cogitator agent
 - **Interruption Handling** - explicit interrupts, opt-in barge-in in pipeline mode (`bargeIn`) and provider VAD in realtime mode
-- **Audio Utilities** - PCM/WAV conversion, resampling, RMS calculation
+- **Audio Utilities** - PCM/WAV conversion, G.711 μ-law, band-limited resampling, RMS calculation
 
 ---
 
@@ -140,7 +141,7 @@ Docs: [TTS providers](https://cogitator.app/docs/voice/tts-providers).
 | `OpenAITTS`     | `gpt-4o-mini-tts`   | Yes       | alloy, ash, ballad, coral, echo, fable, onyx, nova, sage, shimmer, verse, marin, cedar | Also supports `tts-1`, `tts-1-hd`. Supports `instructions` for voice style control      |
 | `ElevenLabsTTS` | `eleven_flash_v2_5` | Yes       | By voice ID                                                                            | ~75ms latency. Also supports `eleven_turbo_v2_5`, `eleven_multilingual_v2`, `eleven_v3` |
 
-Default output is MP3. `format: 'pcm16'` returns raw PCM16 mono at **24kHz** for both providers. ElevenLabs supports `speed` (0.7–1.2) but not `wav`/`aac` output.
+Default output is MP3. `format: 'pcm16'` returns raw PCM16 mono at **24kHz** for both providers, and `format: 'mulaw'` returns G.711 μ-law at 8 kHz from ElevenLabs (OpenAI TTS has no μ-law, a phone call transcodes its PCM16). Each provider lists its raw formats and their rates in `rawSampleRates`. ElevenLabs supports `speed` (0.7 to 1.2) but not `wav`/`aac` output.
 
 ### OpenAI TTS
 
@@ -192,6 +193,8 @@ Docs: [VAD](https://cogitator.app/docs/voice/vad).
 | ----------- | -------- | ------------------ | ---------- | ------------------------------------------------- |
 | `EnergyVAD` | Basic    | None               | Fast       | RMS energy threshold, good for quiet environments |
 | `SileroVAD` | High     | `onnxruntime-node` | ~3ms/frame | Neural network, works in noisy environments       |
+
+A VAD keeps the state of one audio stream, so every session of a pipeline gets its own: pass a factory (`vad: () => new EnergyVAD()`) or an instance with `clone()`, which both built-in VADs have (a Silero clone shares the loaded model). The session frees a VAD it made with `dispose()` when it closes, and a `SileroVAD` loads its model on the first `process()` when `init()` was not called. An instance without `clone` is shared by all sessions, with a warning, and concurrent sessions then mix their audio in it.
 
 ### Energy VAD
 
@@ -610,6 +613,84 @@ What is not the same as a text run:
 
 ---
 
+## Telephony with Twilio
+
+A phone call becomes a voice session of the agent through a bidirectional [Twilio Media Stream](https://www.twilio.com/docs/voice/media-streams). Your voice webhook answers the call with TwiML that connects it to the stream, and `VoiceAgent.attachTwilio` serves the stream on the same HTTP server:
+
+```typescript
+import http from 'node:http';
+import {
+  VoiceAgent,
+  DeepgramSTT,
+  ElevenLabsTTS,
+  EnergyVAD,
+  TwilioSessionTokens,
+  createCogitatorRunner,
+  twilioStreamTwiml,
+  validateTwilioWebhook,
+} from '@cogitator-ai/voice';
+
+const authToken = process.env.TWILIO_AUTH_TOKEN!;
+const webhookUrl = 'https://voice.example.com/voice';
+const streamUrl = 'wss://voice.example.com/twilio';
+const tokens = new TwilioSessionTokens();
+
+const voiceAgent = new VoiceAgent({
+  mode: 'pipeline',
+  agent: createCogitatorRunner(cogitator, agent),
+  stt: new DeepgramSTT({ apiKey: process.env.DEEPGRAM_API_KEY! }),
+  tts: new ElevenLabsTTS({ apiKey: process.env.ELEVENLABS_API_KEY! }),
+  vad: () => new EnergyVAD({ sampleRate: 8000 }),
+  bargeIn: true,
+});
+
+const server = http.createServer((req, res) => {
+  if (req.method !== 'POST' || req.url !== '/voice') return void res.writeHead(404).end();
+  let body = '';
+  req.setEncoding('utf8');
+  req.on('data', (chunk: string) => (body += chunk));
+  req.on('end', () => {
+    const signature = req.headers['x-twilio-signature'];
+    const valid = validateTwilioWebhook({
+      authToken,
+      signature: Array.isArray(signature) ? signature[0] : signature,
+      url: webhookUrl,
+      body,
+    });
+    if (!valid) return void res.writeHead(403).end();
+    const params = new URLSearchParams(body);
+    const token = tokens.issue({
+      callSid: params.get('CallSid') ?? undefined,
+      metadata: { from: params.get('From') ?? 'unknown' },
+    });
+    res.writeHead(200, { 'Content-Type': 'text/xml' });
+    res.end(twilioStreamTwiml({ url: streamUrl, token }));
+  });
+});
+
+voiceAgent.attachTwilio(server, { authToken, streamUrl, tokens });
+voiceAgent.on('call_start', (call) => console.log(call.callSid, call.grant?.metadata.from));
+server.listen(8080);
+```
+
+Each stream is checked twice. The WebSocket upgrade must carry a valid `X-Twilio-Signature`: an HMAC-SHA1 with your Auth Token over the stream URL, with or without a trailing slash, compared in constant time. That signature covers only the URL, so it is the same for every call and could be replayed: it keeps strangers out, and the real gate is the one-time token the webhook issued. It travels as a `<Parameter>` (Twilio allows no query string in the stream URL) and comes back in the stream's `start` event. A token expires after a minute (`ttl`), works once, and with `callSid` works only for that call, so a replayed or foreign stream is closed with 1008. A socket that sends no `start` within `startTimeout` (10 seconds) is closed too, messages are capped at 64 KiB (`maxPayload`), and a binary frame, malformed JSON or event, or a second `start` closes the stream. Tokens live in memory: with several instances, check a shared store in `authorize` instead. A server that accepts upgrades itself calls `verifyTwilioUpgrade(req, { authToken, streamUrl })` and then `voiceAgent.handleTwilio(ws, { tokens })`, capping connections and message size itself.
+
+The caller's audio is G.711 μ-law at 8 kHz:
+
+- **Pipeline mode**: a VAD is required, since Twilio never says when the caller stopped speaking, and each call gets its own (a factory, or a `clone()` of the instance). An STT that lists `mulaw` in `streamEncodings` gets the audio as is (Deepgram streams with `encoding=mulaw&sample_rate=8000`), any other gets it decoded to 8 kHz PCM16. The VAD gets it decoded and resampled to its `sampleRate` (give Silero `sampleRate: 8000` for 256-sample windows). The answer is asked from the TTS as μ-law when its `rawSampleRates` lists `mulaw: 8000` (ElevenLabs `ulaw_8000`), else as PCM16 (OpenAI TTS at 24 kHz) and resampled and encoded on the way out.
+- **Realtime mode**: the session runs with `audioFormat: 'pcmu'`. OpenAI Realtime takes and returns `audio/pcmu` natively, the Gemini adapter decodes the call's audio to 16 kHz PCM and turns the model's 24 kHz audio into μ-law.
+
+Audio goes back as `media` messages of 20 ms, followed by `mark`s. Twilio echoes a mark once the audio before it was played, so the server knows what the caller actually heard rather than what it sent. A mark whose echo does not come within the duration of the audio before it plus `markTimeoutMargin` (3 seconds) counts as not heard.
+
+- In pipeline mode each spoken sentence is marked. A turn ends (`turn_end`) when its last mark comes back, a barge-in or an interrupt sends `clear`, which drops the audio Twilio still holds, and a streamed turn settles with only the sentences whose marks were played. With `createCogitatorRunner`, the conversation keeps only what the caller heard.
+- In realtime mode the audio is marked every 200 ms and at the end of each turn (`turn_end` there still means the model finished, not that the caller heard it). When the caller speaks (OpenAI's `speech_started`, or Gemini's transcription of the caller, also after the model finished while its audio still plays), the call's audio is cleared and the OpenAI answer is truncated (`conversation.item.truncate`) at the last mark that was played, later audio items at 0, and their audio still on its way is dropped, so the model's context holds what the caller heard. Gemini counts a transcript of the caller only when the model is not generating and it starts a new utterance, so the late tail of the question being answered does not cut the answer.
+
+Key presses come as `dtmf` events (`voiceAgent.on('dtmf', (sessionId, digit) => ...)`), and `dtmfInput` turns them into text the agent gets as the caller's input, interrupting the answer being played first. The session ends when Twilio stops the stream (the caller hung up), and `close()` closes every call.
+
+`TwilioMediaStream` is the stream on its own: Twilio's events in, `sendAudio`, `mark()` and `clear()` out, with any `inbound` and `outbound` audio format. `validateTwilioSignature` and `twilioSignature` check other webhooks, and `validateTwilioWebhook` also checks JSON bodies through `bodySHA256`. `twilioStreamTwiml` escapes every value and takes an optional `statusCallback`.
+
+---
+
 ## Agent Integration
 
 `createCogitatorRunner(cogitator, agent, options?)` connects a Cogitator agent to the voice pipeline and to `VoiceAgent`. Its runner offers:
@@ -684,32 +765,54 @@ const format = detectAudioFormat(fileBuffer); // 'wav' | 'mp3' | 'ogg' | 'flac' 
 if (format) audioMimeType(format); // e.g. 'audio/wav'
 ```
 
+`resample` filters with a Kaiser-windowed sinc low-pass (cutoff at 90% of the lower Nyquist frequency, over 100 dB down from 4.2 kHz when going from 24 kHz to 8 kHz), so downsampling does not alias. Rates that are not integers fall back to linear interpolation. For a stream cut in chunks, a `Resampler` keeps the filter's state across chunks, and `AudioTranscoder` converts between PCM16 and μ-law at any rates:
+
+```typescript
+import {
+  Resampler,
+  AudioTranscoder,
+  linearToMulaw,
+  mulawToLinear,
+  float32ToMulaw,
+  mulawToFloat32,
+} from '@cogitator-ai/voice';
+
+const resampler = new Resampler(24000, 8000);
+const out = resampler.process(chunk); // any chunk size, call flush() at the end of the stream
+
+const toPhone = new AudioTranscoder(
+  { encoding: 'pcm16', sampleRate: 24000 },
+  { encoding: 'mulaw', sampleRate: 8000 }
+);
+const mulaw = Buffer.concat([toPhone.push(pcm), toPhone.flush()]);
+```
+
 ---
 
 ## Configuration Reference
 
 ### `VoiceAgentConfig`
 
-| Field               | Type                              | Required      | Description                                                            |
-| ------------------- | --------------------------------- | ------------- | ---------------------------------------------------------------------- |
-| `agent`             | `VoiceAgentRunner`                | Yes           | `createCogitatorRunner(...)` or any `{ run(input, ctx) }`              |
-| `mode`              | `'pipeline' \| 'realtime'`        | Yes           | Processing mode                                                        |
-| `stt`               | `STTProvider`                     | Pipeline only | Speech-to-text provider                                                |
-| `tts`               | `TTSProvider`                     | Pipeline only | Text-to-speech provider                                                |
-| `vad`               | `VADProvider`                     | No            | Voice activity detection                                               |
-| `ttsOptions`        | `TTSOptions`                      | No            | Pipeline only: options passed to every TTS call                        |
-| `bargeIn`           | `boolean`                         | No            | Pipeline only: user speech stops the reply (default false)             |
-| `maxSentenceLength` | `number`                          | No            | Pipeline only: longest streamed piece sent to TTS (250)                |
-| `settleTimeout`     | `number`                          | No            | Pipeline only: longest wait in ms for a turn to settle (10 000)        |
-| `realtimeProvider`  | `'openai' \| 'gemini'`            | Realtime only | Realtime API provider                                                  |
-| `realtimeApiKey`    | `string`                          | Realtime only | API key for realtime provider                                          |
-| `realtimeModel`     | `string`                          | No            | Model override                                                         |
-| `instructions`      | `string`                          | No            | Realtime instructions (defaults to `agent.instructions`)               |
-| `tools`             | `RealtimeTool[]`                  | No            | Realtime tools, replace the agent's own (`[]` for none)                |
-| `agentTools`        | `boolean \| RealtimeToolsOptions` | No            | Realtime: the agent's own tools when `tools` is not set (default true) |
-| `toolImages`        | `boolean`                         | No            | Realtime: send images tools return to the model                        |
-| `voice`             | `string`                          | No            | Voice for realtime                                                     |
-| `transport`         | `WebSocketTransportConfig`        | No            | Transport options                                                      |
+| Field               | Type                               | Required      | Description                                                            |
+| ------------------- | ---------------------------------- | ------------- | ---------------------------------------------------------------------- |
+| `agent`             | `VoiceAgentRunner`                 | Yes           | `createCogitatorRunner(...)` or any `{ run(input, ctx) }`              |
+| `mode`              | `'pipeline' \| 'realtime'`         | Yes           | Processing mode                                                        |
+| `stt`               | `STTProvider`                      | Pipeline only | Speech-to-text provider                                                |
+| `tts`               | `TTSProvider`                      | Pipeline only | Text-to-speech provider                                                |
+| `vad`               | `VADProvider \| () => VADProvider` | No            | Voice activity detection, one per session (a factory or a clone)       |
+| `ttsOptions`        | `TTSOptions`                       | No            | Pipeline only: options passed to every TTS call                        |
+| `bargeIn`           | `boolean`                          | No            | Pipeline only: user speech stops the reply (default false)             |
+| `maxSentenceLength` | `number`                           | No            | Pipeline only: longest streamed piece sent to TTS (250)                |
+| `settleTimeout`     | `number`                           | No            | Pipeline only: longest wait in ms for a turn to settle (10 000)        |
+| `realtimeProvider`  | `'openai' \| 'gemini'`             | Realtime only | Realtime API provider                                                  |
+| `realtimeApiKey`    | `string`                           | Realtime only | API key for realtime provider                                          |
+| `realtimeModel`     | `string`                           | No            | Model override                                                         |
+| `instructions`      | `string`                           | No            | Realtime instructions (defaults to `agent.instructions`)               |
+| `tools`             | `RealtimeTool[]`                   | No            | Realtime tools, replace the agent's own (`[]` for none)                |
+| `agentTools`        | `boolean \| RealtimeToolsOptions`  | No            | Realtime: the agent's own tools when `tools` is not set (default true) |
+| `toolImages`        | `boolean`                          | No            | Realtime: send images tools return to the model                        |
+| `voice`             | `string`                           | No            | Voice for realtime                                                     |
+| `transport`         | `WebSocketTransportConfig`         | No            | Transport options                                                      |
 
 ### `OpenAISTTConfig`
 
@@ -768,7 +871,24 @@ if (format) audioMimeType(format); // e.g. 'audio/wav'
 | ---------------- | ------------------------------------------------------- | -------- | ----------------------------------------------------------------------------------------------------- |
 | `path`           | `string`                                                | `/voice` | WebSocket endpoint path                                                                               |
 | `maxConnections` | `number`                                                | `100`    | Maximum concurrent connections                                                                        |
+| `maxPayload`     | `number`                                                | 100 MiB  | Largest message a client may send, in bytes                                                           |
 | `verifyClient`   | `(req) => boolean \| { code, message } \| Promise<...>` | —        | Authorize upgrades: `false` rejects with 401, `{ code, message }` with that status, throwing with 500 |
+
+### `TwilioTransportConfig`
+
+The options of `attachTwilio`. `handleTwilio` takes `tokens`, `authorize`, `dtmfInput` and `startTimeout`.
+
+| Field            | Type                                     | Default             | Description                                              |
+| ---------------- | ---------------------------------------- | ------------------- | -------------------------------------------------------- |
+| `authToken`      | `string`                                 | required            | Account Auth Token, the key of `X-Twilio-Signature`      |
+| `streamUrl`      | `string`                                 | required            | Public `wss://` URL of the stream, as in the TwiML       |
+| `path`           | `string`                                 | path of `streamUrl` | Path served on the HTTP server                           |
+| `tokens`         | `TwilioSessionTokens`                    | -                   | One-time tokens checked on `start` (this or `authorize`) |
+| `authorize`      | `(start) => boolean \| Promise<boolean>` | -                   | Custom check of the `start` event, after the token       |
+| `dtmfInput`      | `(digit, call) => string \| undefined`   | -                   | Turns a key press into text input for the agent          |
+| `startTimeout`   | `number`                                 | `10000`             | Longest wait for the stream's `start`, in ms             |
+| `maxConnections` | `number`                                 | `100`               | Most concurrent streams                                  |
+| `maxPayload`     | `number`                                 | `65536`             | Largest message Twilio may send, in bytes                |
 
 ---
 
@@ -780,6 +900,7 @@ See [`examples/voice/`](https://github.com/cogitator-ai/Cogitator-AI/tree/main/e
 - **02-realtime.ts** — Realtime session with tool calling (Gemini Live or OpenAI Realtime)
 - **03-voice-agent.ts** — WebSocket `VoiceAgent` with Deepgram STT, ElevenLabs TTS and EnergyVAD
 - **04-realtime-voice-agent.ts** — Realtime `VoiceAgent` (Gemini Live) with a server-side tool and a WebSocket client
+- **05-twilio-phone-agent.ts** - A phone agent: the TwiML webhook and a Twilio media stream on one HTTP server
 
 ---
 
