@@ -1,5 +1,12 @@
 # @cogitator-ai/test-utils
 
+## 0.12.6
+
+### Patch Changes
+
+- Updated dependencies [[`4c4ad3a`](https://github.com/cogitator-ai/Cogitator-AI/commit/4c4ad3a898675f7730236d1b2c6482b2fe108b32)]:
+  - @cogitator-ai/types@0.67.0
+
 ## 0.12.5
 
 ### Patch Changes
