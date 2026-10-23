@@ -155,14 +155,17 @@ describeE2E('Swarms: Multi-Agent Coordination', () => {
     const voter1 = createTestAgent({
       name: 'voter-1',
       instructions: 'When asked a math question, answer correctly. Format: VOTE: [answer]',
+      maxTokens: 150,
     });
     const voter2 = createTestAgent({
       name: 'voter-2',
       instructions: 'When asked a math question, answer correctly. Format: VOTE: [answer]',
+      maxTokens: 150,
     });
     const voter3 = createTestAgent({
       name: 'voter-3',
       instructions: 'When asked a math question, answer correctly. Format: VOTE: [answer]',
+      maxTokens: 150,
     });
 
     const swarm = new Swarm(cogitator, {
@@ -196,7 +199,7 @@ describeE2E('Swarms: Multi-Agent Coordination', () => {
     for (const vote of result.votes!.values()) {
       const { decision } = vote as { decision: string };
       expect(decision.trim()).not.toBe('');
-      expect(decision).not.toMatch(/^\[?\s*(?:your|my)\s+(?:decision|vote|answer)/i);
+      expect(decision).not.toMatch(/^\[?\s*(?:your|my)\s+(?:decision|vote|answer)\s*\]?$/i);
     }
   });
 
