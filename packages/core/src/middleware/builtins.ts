@@ -18,6 +18,8 @@ import {
   type PiiVault,
 } from '../security/pii';
 import { toolPartsToText, toolResultParts } from '../tool-content';
+import { keepThroughCompaction, pinnedNotes } from '../cogitator/harness';
+import { countMessagesTokens } from '../context/strategies/token-utils';
 
 /**
  * Keeps personal data from the model per `security.pii`: in `mask` and `redact` mode every model
@@ -175,7 +177,10 @@ export function guardrailsMiddleware(
 
 /**
  * Compresses the run's conversation per `context` before a turn that would pass the context
- * manager's threshold for the run's model. The Cogitator adds it from `context`.
+ * manager's threshold for the run's model. What the agent must not lose is kept: the
+ * instructions of the skills it activated (`use_skill`) and its todo list (`write_todos`) come
+ * back as system messages when the compression dropped them. The Cogitator adds it from
+ * `context`.
  */
 export function compactionMiddleware(manager: ContextManager): RunMiddleware {
   return {
@@ -183,8 +188,9 @@ export function compactionMiddleware(manager: ContextManager): RunMiddleware {
     async beforeModel({ messages, model }) {
       const conversation = [...messages];
       if (!manager.shouldCompress(conversation, model)) return;
-      const compressed = await manager.compress(conversation, model);
-      return { messages: compressed.messages };
+      const reserve = countMessagesTokens(pinnedNotes(conversation));
+      const compressed = await manager.compress(conversation, model, reserve);
+      return { messages: keepThroughCompaction(conversation, compressed.messages) };
     },
   };
 }
