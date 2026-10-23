@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/swarms",
-  "version": "0.14.12",
+  "version": "0.14.13",
   "description": "Multi-agent swarm coordination for Cogitator",
   "keywords": [
     "cogitator",
