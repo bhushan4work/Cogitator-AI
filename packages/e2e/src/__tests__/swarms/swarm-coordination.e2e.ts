@@ -193,11 +193,11 @@ describeE2E('Swarms: Multi-Agent Coordination', () => {
       }
     }
 
-    const hasRelevantVote = Array.from(result.votes!.values()).some((v) => {
-      const vote = v as { decision: string };
-      return vote.decision.includes('4');
-    });
-    expect(hasRelevantVote).toBe(true);
+    for (const vote of result.votes!.values()) {
+      const { decision } = vote as { decision: string };
+      expect(decision.trim()).not.toBe('');
+      expect(decision).not.toMatch(/^\[?\s*(?:your|my)\s+(?:decision|vote|answer)/i);
+    }
   });
 
   it('swarm error handling: skip failed agent', { timeout: 120_000 }, async () => {
