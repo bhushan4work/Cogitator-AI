@@ -1,5 +1,14 @@
 # @cogitator-ai/fastify
 
+## 0.11.7
+
+### Patch Changes
+
+- Updated dependencies [[`091fa9e`](https://github.com/cogitator-ai/Cogitator-AI/commit/091fa9e659341bc0f39344e46ec0c56ba0338f83)]:
+  - @cogitator-ai/types@0.69.0
+  - @cogitator-ai/core@0.61.0
+  - @cogitator-ai/server-shared@0.9.6
+
 ## 0.11.6
 
 ### Patch Changes
