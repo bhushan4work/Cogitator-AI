@@ -175,6 +175,9 @@ describeE2E('Swarms: Multi-Agent Coordination', () => {
         resolution: 'majority',
         onNoConsensus: 'escalate',
       },
+      resources: {
+        perAgent: { timeout: 240_000 },
+      },
     });
 
     const result = await swarm.run({
