@@ -8,6 +8,7 @@ export {
   DEFAULT_DENY_WORDS,
   DEFAULT_NOT_ALLOWED_MESSAGE,
   DEFAULT_EXPIRED_MESSAGE,
+  DEFAULT_STOPPING_MESSAGE,
   APPROVE_ACTION,
   DENY_ACTION,
 } from './approvals';
@@ -95,6 +96,7 @@ export * from './channels/bluesky/index';
 export * from './channels/threads/index';
 export * from './channels/github/index';
 export * from './channels/email/index';
+export * from './channels/teams/index';
 
 export { SimpleTimerStore } from './simple-timer-store';
 export type { TimerStoreOptions } from './simple-timer-store';

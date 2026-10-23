@@ -17,6 +17,7 @@ export type ChannelType =
   | 'threads'
   | 'github'
   | 'email'
+  | 'teams'
   | (string & {});
 
 export type AttachmentType = 'image' | 'file' | 'audio' | 'video';
@@ -44,8 +45,8 @@ export interface ChannelMessage {
   /**
    * The topic or thread inside the chat the message was posted in: a Telegram forum topic or a
    * topic of a private chat, the `ts` of the Slack thread of a channel message, the first comment
-   * of a GitHub review thread, the first `Message-ID` of an email thread. Replies go to the same
-   * topic.
+   * of a GitHub review thread, the first `Message-ID` of an email thread, the root message of a
+   * Microsoft Teams channel thread. Replies go to the same topic.
    */
   topicId?: string;
   /**
@@ -119,6 +120,11 @@ export interface ChannelAction {
   readonly channelId: string;
   readonly userId: string;
   userName?: string;
+  /**
+   * The group the button was pressed in (`ChannelMessage.groupId`): set in group chats and
+   * channels, so a press is checked by the group policy like a message there
+   */
+  groupId?: string;
   /** The message the button is under */
   messageId?: string;
   /** The topic of the message the button is under (`ChannelMessage.topicId`) */
