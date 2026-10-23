@@ -270,7 +270,7 @@ async function modelCheck(
     let models;
     try {
       models = await listOllamaModels(baseUrl, {
-        apiKey: env.OLLAMA_API_KEY,
+        apiKey: config?.llm?.providers?.ollama?.apiKey ?? env.OLLAMA_API_KEY,
         headers: config?.llm?.providers?.ollama?.headers,
         timeoutMs: 3000,
       });

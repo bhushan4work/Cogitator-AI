@@ -1,19 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { configuredOllamaHeaders, listOllamaModels, pullOllamaModel, resolveOllamaUrl } = vi.hoisted(
-  () => ({
-    configuredOllamaHeaders: vi.fn(),
-    listOllamaModels: vi.fn(),
-    pullOllamaModel: vi.fn(),
-    resolveOllamaUrl: vi.fn(),
-  })
-);
+const { resolveOllamaConnection, listOllamaModels, pullOllamaModel } = vi.hoisted(() => ({
+  resolveOllamaConnection: vi.fn(),
+  listOllamaModels: vi.fn(),
+  pullOllamaModel: vi.fn(),
+}));
 
 vi.mock('../utils/ollama.js', () => ({
-  configuredOllamaHeaders,
+  resolveOllamaConnection,
   listOllamaModels,
   pullOllamaModel,
-  resolveOllamaUrl,
 }));
 
 import { formatSize, formatDate, modelsCommand } from '../commands/models.js';
@@ -24,7 +20,7 @@ const ago = (days: number) => new Date(NOW.getTime() - days * DAY).toISOString()
 
 beforeEach(() => {
   vi.clearAllMocks();
-  resolveOllamaUrl.mockReturnValue('http://localhost:11434');
+  resolveOllamaConnection.mockReturnValue({ baseUrl: 'http://localhost:11434' });
   listOllamaModels.mockResolvedValue([]);
   pullOllamaModel.mockResolvedValue(undefined);
 });
@@ -34,21 +30,29 @@ afterEach(() => {
 });
 
 describe('modelsCommand', () => {
-  it('forwards configured Ollama headers when listing models', async () => {
+  it('forwards configured Ollama credentials when listing models', async () => {
     const headers = { 'X-Gateway-Key': 'secret' };
-    configuredOllamaHeaders.mockReturnValue(headers);
+    resolveOllamaConnection.mockReturnValue({
+      baseUrl: 'http://localhost:11434',
+      apiKey: 'config-key',
+      headers,
+    });
 
     await modelsCommand.parseAsync(['--json'], { from: 'user' });
 
-    expect(listOllamaModels).toHaveBeenCalledWith(
-      'http://localhost:11434',
-      expect.objectContaining({ headers })
-    );
+    expect(listOllamaModels).toHaveBeenCalledWith('http://localhost:11434', {
+      apiKey: 'config-key',
+      headers,
+    });
   });
 
-  it('forwards configured Ollama headers when pulling a model', async () => {
+  it('forwards configured Ollama credentials when pulling a model', async () => {
     const headers = { 'X-Gateway-Key': 'secret' };
-    configuredOllamaHeaders.mockReturnValue(headers);
+    resolveOllamaConnection.mockReturnValue({
+      baseUrl: 'http://localhost:11434',
+      apiKey: 'config-key',
+      headers,
+    });
 
     await modelsCommand.parseAsync(['--pull', 'qwen3:8b', '--json'], { from: 'user' });
 
@@ -56,7 +60,19 @@ describe('modelsCommand', () => {
       'http://localhost:11434',
       'qwen3:8b',
       expect.any(Function),
-      expect.objectContaining({ headers })
+      { apiKey: 'config-key', headers }
+    );
+  });
+
+  it('passes an explicit --url to the shared config helper', async () => {
+    resolveOllamaConnection.mockReturnValue({ baseUrl: 'http://other.example' });
+
+    await modelsCommand.parseAsync(['--url', 'http://other.example', '--json'], { from: 'user' });
+
+    expect(resolveOllamaConnection).toHaveBeenCalledWith({ url: 'http://other.example' });
+    expect(listOllamaModels).toHaveBeenCalledWith(
+      'http://other.example',
+      expect.objectContaining({})
     );
   });
 });

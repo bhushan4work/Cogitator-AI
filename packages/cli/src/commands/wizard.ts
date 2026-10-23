@@ -13,7 +13,7 @@ import {
 import { printBanner } from '../utils/logger.js';
 import { examplesHelp } from '../utils/cli.js';
 import { mergeEnvContent, parseDotenv } from '../utils/env.js';
-import { DEFAULT_OLLAMA_URL, resolveOllamaUrl } from '../utils/ollama.js';
+import { DEFAULT_OLLAMA_URL, resolveOllamaConnection, resolveOllamaUrl } from '../utils/ollama.js';
 import {
   API_KEY_ENV,
   fetchOllamaModelOptions,
@@ -395,10 +395,17 @@ export const wizardCommand = new Command('wizard')
 
     const modelSpinner = p.spinner();
     modelSpinner.start('Fetching available models...');
-    const modelOptions =
-      provider === 'ollama'
-        ? await fetchOllamaModelOptions(ollamaUrl, ollamaApiKey)
-        : await fetchProviderModels(provider);
+    let modelOptions;
+    if (provider === 'ollama') {
+      const connection = resolveOllamaConnection({ url: ollamaUrl });
+      modelOptions = await fetchOllamaModelOptions(
+        connection.baseUrl,
+        ollamaApiKey ?? connection.apiKey,
+        connection.headers
+      );
+    } else {
+      modelOptions = await fetchProviderModels(provider);
+    }
     modelSpinner.stop(`Found ${chalk.cyan(modelOptions.length)} models`);
 
     const existingModel =

@@ -147,7 +147,7 @@ describe('runDoctor', () => {
     expect(model?.fix).toContain('platform.openai.com');
   });
 
-  it('sends configured Ollama headers when checking models', async () => {
+  it('sends configured Ollama headers and lets the config apiKey replace custom authorization', async () => {
     const dir = await project({ provider: 'ollama', model: 'llama3.2' });
     for (const name of [
       '@cogitator-ai/core',
@@ -165,8 +165,10 @@ describe('runDoctor', () => {
         '  providers:',
         '    ollama:',
         '      baseUrl: http://ollama.example',
+        '      apiKey: config-key',
         '      headers:',
         '        X-Gateway-Key: secret',
+        '        authorization: Bearer custom',
         '',
       ].join('\n')
     );
@@ -177,14 +179,16 @@ describe('runDoctor', () => {
 
     const checks = await runDoctor({
       projectDir: dir,
-      env: {},
+      env: { OLLAMA_API_KEY: 'env-key' },
       nodeVersion: 'v24.1.0',
       probe: true,
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
       'http://ollama.example/api/tags',
-      expect.objectContaining({ headers: { 'X-Gateway-Key': 'secret' } })
+      expect.objectContaining({
+        headers: { 'X-Gateway-Key': 'secret', Authorization: 'Bearer config-key' },
+      })
     );
     expect(checks.find((c) => c.id === 'model')).toMatchObject({ status: 'pass' });
   });

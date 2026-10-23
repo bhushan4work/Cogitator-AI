@@ -1,21 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { dirname, join } from 'node:path';
 
-const {
-  checkDocker,
-  findDockerCompose,
-  composePs,
-  configuredOllamaHeaders,
-  listOllamaModels,
-  resolveOllamaUrl,
-} = vi.hoisted(() => ({
-  checkDocker: vi.fn(),
-  findDockerCompose: vi.fn(),
-  composePs: vi.fn(),
-  configuredOllamaHeaders: vi.fn(),
-  listOllamaModels: vi.fn(),
-  resolveOllamaUrl: vi.fn(),
-}));
+const { checkDocker, findDockerCompose, composePs, listOllamaModels, resolveOllamaConnection } =
+  vi.hoisted(() => ({
+    checkDocker: vi.fn(),
+    findDockerCompose: vi.fn(),
+    composePs: vi.fn(),
+    listOllamaModels: vi.fn(),
+    resolveOllamaConnection: vi.fn(),
+  }));
 
 vi.mock('../utils/docker.js', () => ({
   checkDocker,
@@ -24,9 +17,8 @@ vi.mock('../utils/docker.js', () => ({
 }));
 
 vi.mock('../utils/ollama.js', () => ({
-  configuredOllamaHeaders,
   listOllamaModels,
-  resolveOllamaUrl,
+  resolveOllamaConnection,
 }));
 
 import { collectStatus } from '../commands/status.js';
@@ -36,9 +28,8 @@ describe('collectStatus', () => {
     checkDocker.mockReset();
     findDockerCompose.mockReset();
     composePs.mockReset();
-    configuredOllamaHeaders.mockReset().mockReturnValue(undefined);
     listOllamaModels.mockReset();
-    resolveOllamaUrl.mockReset().mockReturnValue('http://localhost:11434');
+    resolveOllamaConnection.mockReset().mockReturnValue({ baseUrl: 'http://localhost:11434' });
   });
 
   it('reports Docker unavailable without querying compose', async () => {
@@ -133,7 +124,7 @@ describe('collectStatus', () => {
   });
 
   it('marks Ollama as not running when the helper is unreachable', async () => {
-    vi.stubEnv('OLLAMA_API_KEY', 'k');
+    resolveOllamaConnection.mockReturnValue({ baseUrl: 'http://localhost:11434', apiKey: 'k' });
     checkDocker.mockReturnValue(false);
     listOllamaModels.mockRejectedValue(new Error('ECONNREFUSED'));
 
@@ -145,20 +136,24 @@ describe('collectStatus', () => {
       headers: undefined,
       timeoutMs: 3000,
     });
-    vi.unstubAllEnvs();
   });
 
-  it('forwards the configured Ollama headers to the reachability probe', async () => {
+  it('forwards the configured Ollama credentials to the reachability probe', async () => {
     const headers = { 'X-Gateway-Key': 'secret' };
-    configuredOllamaHeaders.mockReturnValue(headers);
+    resolveOllamaConnection.mockReturnValue({
+      baseUrl: 'http://localhost:11434',
+      apiKey: 'config-key',
+      headers,
+    });
     checkDocker.mockReturnValue(false);
     listOllamaModels.mockResolvedValue([]);
 
     await collectStatus();
 
-    expect(listOllamaModels).toHaveBeenCalledWith(
-      'http://localhost:11434',
-      expect.objectContaining({ headers })
-    );
+    expect(listOllamaModels).toHaveBeenCalledWith('http://localhost:11434', {
+      apiKey: 'config-key',
+      headers,
+      timeoutMs: 3000,
+    });
   });
 });

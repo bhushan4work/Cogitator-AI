@@ -8,10 +8,9 @@ import ora from 'ora';
 import { log } from '../utils/logger.js';
 import { CommandError, errorMessage, examplesHelp, printJson } from '../utils/cli.js';
 import {
-  configuredOllamaHeaders,
   listOllamaModels,
   pullOllamaModel,
-  resolveOllamaUrl,
+  resolveOllamaConnection,
   type OllamaModelInfo,
 } from '../utils/ollama.js';
 
@@ -168,14 +167,23 @@ export const modelsCommand = new Command('models')
     ])
   )
   .action(async (options: { pull?: string; url?: string; json?: boolean }) => {
-    const baseUrl = resolveOllamaUrl(process.env, options.url);
-    const apiKey = process.env.OLLAMA_API_KEY;
-    const headers = configuredOllamaHeaders();
+    const connection = resolveOllamaConnection({ url: options.url });
 
     if (options.pull) {
-      await pullModel(baseUrl, options.pull, apiKey, headers, options.json === true);
+      await pullModel(
+        connection.baseUrl,
+        options.pull,
+        connection.apiKey,
+        connection.headers,
+        options.json === true
+      );
       return;
     }
 
-    await listModels(baseUrl, apiKey, headers, options.json === true);
+    await listModels(
+      connection.baseUrl,
+      connection.apiKey,
+      connection.headers,
+      options.json === true
+    );
   });

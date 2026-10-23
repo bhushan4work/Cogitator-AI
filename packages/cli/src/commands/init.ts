@@ -22,7 +22,7 @@ import {
 } from 'create-cogitator-app';
 import { printBanner } from '../utils/logger.js';
 import { errorMessage, EXIT, examplesHelp } from '../utils/cli.js';
-import { resolveOllamaUrl } from '../utils/ollama.js';
+import { resolveOllamaConnection } from '../utils/ollama.js';
 import {
   API_KEY_ENV,
   fetchOllamaModelOptions,
@@ -229,10 +229,17 @@ async function collectAnswers(nameArg?: string): Promise<InitAnswers> {
 
   const spinner = p.spinner();
   spinner.start('Fetching available models...');
-  const modelOptions =
-    provider === 'ollama'
-      ? await fetchOllamaModelOptions(resolveOllamaUrl(), process.env.OLLAMA_API_KEY)
-      : await fetchProviderModels(provider);
+  let modelOptions;
+  if (provider === 'ollama') {
+    const connection = resolveOllamaConnection();
+    modelOptions = await fetchOllamaModelOptions(
+      connection.baseUrl,
+      connection.apiKey,
+      connection.headers
+    );
+  } else {
+    modelOptions = await fetchProviderModels(provider);
+  }
   spinner.stop(`Found ${modelOptions.length} models`);
 
   const model = answer(await p.select({ message: 'Default model', options: modelOptions }));

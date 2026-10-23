@@ -1,4 +1,5 @@
-import { loadConfig, resolveOllamaHost } from '@cogitator-ai/config';
+import { resolveOllamaHost } from '@cogitator-ai/config';
+import { findConfig, loadRunConfig } from './run-config.js';
 
 export const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
 
@@ -20,13 +21,46 @@ export interface OllamaRequestOptions {
   headers?: Record<string, string>;
 }
 
-/** Custom headers from `llm.providers.ollama.headers` in the project config. */
-export function configuredOllamaHeaders(): Record<string, string> | undefined {
-  try {
-    return loadConfig({ skipEnv: true }).llm?.providers?.ollama?.headers;
-  } catch {
-    return undefined;
+export interface OllamaConnection {
+  baseUrl: string;
+  apiKey?: string;
+  headers?: Record<string, string>;
+}
+
+export interface OllamaConnectionOptions {
+  /** A flag that overrides the URL of the config, such as `models --url`. */
+  url?: string;
+  cwd?: string;
+}
+
+/**
+ * The Ollama server and credentials the CLI uses, loaded the way `run` loads them:
+ * the `.env` next to the config file (or in `cwd`), `COGITATOR_CONFIG`, environment
+ * variables and `cogitator.yml`. An explicit `url` wins over the config. Config
+ * credentials are used only for the server the config names, so an explicit URL
+ * never receives them. Config errors are thrown, not hidden.
+ */
+export function resolveOllamaConnection(options: OllamaConnectionOptions = {}): OllamaConnection {
+  const cwd = options.cwd ?? process.cwd();
+  const env = process.env;
+  const configPath = findConfig(undefined, env, cwd);
+  if (env.COGITATOR_CONFIG && !configPath) {
+    throw new Error(`COGITATOR_CONFIG points to a missing file: ${env.COGITATOR_CONFIG}`);
   }
+
+  const { config } = loadRunConfig(configPath, cwd);
+  const ollama = config.llm?.providers?.ollama;
+  const baseUrl = resolveOllamaUrl(env, options.url ?? ollama?.baseUrl);
+  const configUrl = resolveOllamaUrl({}, ollama?.baseUrl);
+  const usesConfigServer = configUrl === baseUrl;
+  const apiKey = (usesConfigServer ? ollama?.apiKey : undefined) ?? env.OLLAMA_API_KEY;
+  const headers = usesConfigServer ? ollama?.headers : undefined;
+
+  return {
+    baseUrl,
+    ...(apiKey ? { apiKey } : {}),
+    ...(headers ? { headers } : {}),
+  };
 }
 
 /**
