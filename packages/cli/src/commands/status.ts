@@ -8,11 +8,18 @@ import chalk from 'chalk';
 import { log } from '../utils/logger.js';
 import { errorMessage, examplesHelp, printJson } from '../utils/cli.js';
 import { findDockerCompose, checkDocker, composePs } from '../utils/docker.js';
-import { listOllamaModels, resolveOllamaUrl } from '../utils/ollama.js';
+import { configuredOllamaHeaders, listOllamaModels, resolveOllamaUrl } from '../utils/ollama.js';
 
-async function checkOllama(baseUrl: string): Promise<boolean> {
+async function checkOllama(
+  baseUrl: string,
+  headers: Record<string, string> | undefined
+): Promise<boolean> {
   try {
-    await listOllamaModels(baseUrl, { apiKey: process.env.OLLAMA_API_KEY, timeoutMs: 3000 });
+    await listOllamaModels(baseUrl, {
+      apiKey: process.env.OLLAMA_API_KEY,
+      headers,
+      timeoutMs: 3000,
+    });
     return true;
   } catch {
     return false;
@@ -57,7 +64,7 @@ export async function collectStatus(): Promise<StatusReport> {
     }
   }
   const url = resolveOllamaUrl();
-  return { docker, ollama: { url, running: await checkOllama(url) } };
+  return { docker, ollama: { url, running: await checkOllama(url, configuredOllamaHeaders()) } };
 }
 
 function printStatus(report: StatusReport): void {

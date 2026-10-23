@@ -1,9 +1,65 @@
-import { describe, it, expect } from 'vitest';
-import { formatSize, formatDate } from '../commands/models.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+const { configuredOllamaHeaders, listOllamaModels, pullOllamaModel, resolveOllamaUrl } = vi.hoisted(
+  () => ({
+    configuredOllamaHeaders: vi.fn(),
+    listOllamaModels: vi.fn(),
+    pullOllamaModel: vi.fn(),
+    resolveOllamaUrl: vi.fn(),
+  })
+);
+
+vi.mock('../utils/ollama.js', () => ({
+  configuredOllamaHeaders,
+  listOllamaModels,
+  pullOllamaModel,
+  resolveOllamaUrl,
+}));
+
+import { formatSize, formatDate, modelsCommand } from '../commands/models.js';
 
 const DAY = 1000 * 60 * 60 * 24;
 const NOW = new Date('2026-10-02T12:00:00Z');
 const ago = (days: number) => new Date(NOW.getTime() - days * DAY).toISOString();
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  resolveOllamaUrl.mockReturnValue('http://localhost:11434');
+  listOllamaModels.mockResolvedValue([]);
+  pullOllamaModel.mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+describe('modelsCommand', () => {
+  it('forwards configured Ollama headers when listing models', async () => {
+    const headers = { 'X-Gateway-Key': 'secret' };
+    configuredOllamaHeaders.mockReturnValue(headers);
+
+    await modelsCommand.parseAsync(['--json'], { from: 'user' });
+
+    expect(listOllamaModels).toHaveBeenCalledWith(
+      'http://localhost:11434',
+      expect.objectContaining({ headers })
+    );
+  });
+
+  it('forwards configured Ollama headers when pulling a model', async () => {
+    const headers = { 'X-Gateway-Key': 'secret' };
+    configuredOllamaHeaders.mockReturnValue(headers);
+
+    await modelsCommand.parseAsync(['--pull', 'qwen3:8b', '--json'], { from: 'user' });
+
+    expect(pullOllamaModel).toHaveBeenCalledWith(
+      'http://localhost:11434',
+      'qwen3:8b',
+      expect.any(Function),
+      expect.objectContaining({ headers })
+    );
+  });
+});
 
 describe('formatSize', () => {
   it('formats bytes less than 1 GB as MB', () => {

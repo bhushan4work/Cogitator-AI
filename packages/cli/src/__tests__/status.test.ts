@@ -1,14 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { dirname, join } from 'node:path';
 
-const { checkDocker, findDockerCompose, composePs, listOllamaModels, resolveOllamaUrl } =
-  vi.hoisted(() => ({
-    checkDocker: vi.fn(),
-    findDockerCompose: vi.fn(),
-    composePs: vi.fn(),
-    listOllamaModels: vi.fn(),
-    resolveOllamaUrl: vi.fn(),
-  }));
+const {
+  checkDocker,
+  findDockerCompose,
+  composePs,
+  configuredOllamaHeaders,
+  listOllamaModels,
+  resolveOllamaUrl,
+} = vi.hoisted(() => ({
+  checkDocker: vi.fn(),
+  findDockerCompose: vi.fn(),
+  composePs: vi.fn(),
+  configuredOllamaHeaders: vi.fn(),
+  listOllamaModels: vi.fn(),
+  resolveOllamaUrl: vi.fn(),
+}));
 
 vi.mock('../utils/docker.js', () => ({
   checkDocker,
@@ -17,6 +24,7 @@ vi.mock('../utils/docker.js', () => ({
 }));
 
 vi.mock('../utils/ollama.js', () => ({
+  configuredOllamaHeaders,
   listOllamaModels,
   resolveOllamaUrl,
 }));
@@ -28,6 +36,7 @@ describe('collectStatus', () => {
     checkDocker.mockReset();
     findDockerCompose.mockReset();
     composePs.mockReset();
+    configuredOllamaHeaders.mockReset().mockReturnValue(undefined);
     listOllamaModels.mockReset();
     resolveOllamaUrl.mockReset().mockReturnValue('http://localhost:11434');
   });
@@ -133,8 +142,23 @@ describe('collectStatus', () => {
     expect(report.ollama).toEqual({ url: 'http://localhost:11434', running: false });
     expect(listOllamaModels).toHaveBeenCalledWith('http://localhost:11434', {
       apiKey: 'k',
+      headers: undefined,
       timeoutMs: 3000,
     });
     vi.unstubAllEnvs();
+  });
+
+  it('forwards the configured Ollama headers to the reachability probe', async () => {
+    const headers = { 'X-Gateway-Key': 'secret' };
+    configuredOllamaHeaders.mockReturnValue(headers);
+    checkDocker.mockReturnValue(false);
+    listOllamaModels.mockResolvedValue([]);
+
+    await collectStatus();
+
+    expect(listOllamaModels).toHaveBeenCalledWith(
+      'http://localhost:11434',
+      expect.objectContaining({ headers })
+    );
   });
 });

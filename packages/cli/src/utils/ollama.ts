@@ -1,4 +1,4 @@
-import { resolveOllamaHost } from '@cogitator-ai/config';
+import { loadConfig, resolveOllamaHost } from '@cogitator-ai/config';
 
 export const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
 
@@ -17,6 +17,16 @@ export interface OllamaPullProgress {
 export interface OllamaRequestOptions {
   apiKey?: string;
   timeoutMs?: number;
+  headers?: Record<string, string>;
+}
+
+/** Custom headers from `llm.providers.ollama.headers` in the project config. */
+export function configuredOllamaHeaders(): Record<string, string> | undefined {
+  try {
+    return loadConfig({ skipEnv: true }).llm?.providers?.ollama?.headers;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -36,10 +46,19 @@ export function resolveOllamaUrl(
   return DEFAULT_OLLAMA_URL;
 }
 
-function buildHeaders(apiKey: string | undefined, json: boolean): Record<string, string> {
+function buildHeaders(
+  options: Pick<OllamaRequestOptions, 'apiKey' | 'headers'>,
+  json: boolean
+): Record<string, string> {
   const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(options.headers ?? {})) {
+    const lower = name.toLowerCase();
+    if (json && lower === 'content-type') continue;
+    if (options.apiKey && lower === 'authorization') continue;
+    headers[name] = value;
+  }
   if (json) headers['Content-Type'] = 'application/json';
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  if (options.apiKey) headers.Authorization = `Bearer ${options.apiKey}`;
   return headers;
 }
 
@@ -61,7 +80,7 @@ export async function listOllamaModels(
   options: OllamaRequestOptions = {}
 ): Promise<OllamaModelInfo[]> {
   const res = await fetch(`${baseUrl}/api/tags`, {
-    headers: buildHeaders(options.apiKey, false),
+    headers: buildHeaders(options, false),
     signal: AbortSignal.timeout(options.timeoutMs ?? 5000),
   });
   if (!res.ok) {
@@ -112,11 +131,11 @@ export async function pullOllamaModel(
   baseUrl: string,
   model: string,
   onProgress: (progress: OllamaPullProgress) => void,
-  options: Pick<OllamaRequestOptions, 'apiKey'> = {}
+  options: Pick<OllamaRequestOptions, 'apiKey' | 'headers'> = {}
 ): Promise<void> {
   const res = await fetch(`${baseUrl}/api/pull`, {
     method: 'POST',
-    headers: buildHeaders(options.apiKey, true),
+    headers: buildHeaders(options, true),
     body: JSON.stringify({ model, stream: true }),
   });
 

@@ -19,16 +19,28 @@ const MODEL_DIMENSIONS: Record<string, number> = {
   'snowflake-arctic-embed': 1024,
 };
 
+function buildHeaders(custom: Record<string, string> | undefined): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(custom ?? {})) {
+    if (name.toLowerCase() === 'content-type') continue;
+    headers[name] = value;
+  }
+  headers['Content-Type'] = 'application/json';
+  return headers;
+}
+
 export class OllamaEmbeddingService implements EmbeddingService {
   readonly model: string;
   readonly dimensions: number;
 
   private baseUrl: string;
+  private readonly headers: Record<string, string>;
 
   constructor(config: Omit<OllamaEmbeddingConfig, 'provider'> = {}) {
     this.model = config.model ?? 'nomic-embed-text';
     this.baseUrl = config.baseUrl ?? 'http://localhost:11434';
     this.dimensions = config.dimensions ?? MODEL_DIMENSIONS[this.model] ?? 768;
+    this.headers = buildHeaders(config.headers);
   }
 
   async embed(text: string): Promise<number[]> {
@@ -38,9 +50,7 @@ export class OllamaEmbeddingService implements EmbeddingService {
 
     const response = await fetchWithRetry(`${this.baseUrl}/api/embed`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: this.headers,
       body: JSON.stringify({
         model: this.model,
         input: text,
@@ -71,9 +81,7 @@ export class OllamaEmbeddingService implements EmbeddingService {
 
     const response = await fetchWithRetry(`${this.baseUrl}/api/embed`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: this.headers,
       body: JSON.stringify({
         model: this.model,
         input: texts,

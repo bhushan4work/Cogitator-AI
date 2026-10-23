@@ -8,6 +8,7 @@ import ora from 'ora';
 import { log } from '../utils/logger.js';
 import { CommandError, errorMessage, examplesHelp, printJson } from '../utils/cli.js';
 import {
+  configuredOllamaHeaders,
   listOllamaModels,
   pullOllamaModel,
   resolveOllamaUrl,
@@ -44,6 +45,7 @@ export function formatDate(isoDate: string, now: Date = new Date()): string {
 async function listModels(
   baseUrl: string,
   apiKey: string | undefined,
+  headers: Record<string, string> | undefined,
   json: boolean
 ): Promise<void> {
   const spinner = ora({
@@ -53,7 +55,7 @@ async function listModels(
 
   let models: OllamaModelInfo[];
   try {
-    models = await listOllamaModels(baseUrl, { apiKey });
+    models = await listOllamaModels(baseUrl, { apiKey, headers });
   } catch (error) {
     spinner.fail('Cannot connect to Ollama');
     throw new CommandError(`Cannot connect to Ollama at ${baseUrl}: ${errorMessage(error)}`, {
@@ -107,6 +109,7 @@ async function pullModel(
   baseUrl: string,
   model: string,
   apiKey: string | undefined,
+  headers: Record<string, string> | undefined,
   json: boolean
 ) {
   if (!json) {
@@ -133,7 +136,7 @@ async function pullModel(
           console.log(line);
         }
       },
-      { apiKey }
+      { apiKey, headers }
     );
   } catch (error) {
     if (process.stdout.isTTY && lastLine) console.log();
@@ -167,11 +170,12 @@ export const modelsCommand = new Command('models')
   .action(async (options: { pull?: string; url?: string; json?: boolean }) => {
     const baseUrl = resolveOllamaUrl(process.env, options.url);
     const apiKey = process.env.OLLAMA_API_KEY;
+    const headers = configuredOllamaHeaders();
 
     if (options.pull) {
-      await pullModel(baseUrl, options.pull, apiKey, options.json === true);
+      await pullModel(baseUrl, options.pull, apiKey, headers, options.json === true);
       return;
     }
 
-    await listModels(baseUrl, apiKey, options.json === true);
+    await listModels(baseUrl, apiKey, headers, options.json === true);
   });

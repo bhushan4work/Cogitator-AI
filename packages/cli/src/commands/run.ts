@@ -53,9 +53,13 @@ export function pickOllamaModel(available: readonly string[]): string | null {
   return `ollama/${preferred ?? available[0]}`;
 }
 
-async function detectOllamaModel(baseUrl: string, apiKey?: string): Promise<string | null> {
+export async function detectOllamaModel(
+  baseUrl: string,
+  apiKey?: string,
+  headers?: Record<string, string>
+): Promise<string | null> {
   try {
-    const models = await listOllamaModels(baseUrl, { apiKey, timeoutMs: 3000 });
+    const models = await listOllamaModels(baseUrl, { apiKey, headers, timeoutMs: 3000 });
     return pickOllamaModel(models.map((m) => m.name));
   } catch {
     return null;
@@ -307,8 +311,11 @@ export const runCommand = new Command('run')
       const ollama = config.llm?.providers?.ollama;
       const baseUrl = resolveOllamaUrl(process.env, ollama?.baseUrl);
       model =
-        (await detectOllamaModel(baseUrl, ollama?.apiKey ?? process.env.OLLAMA_API_KEY)) ??
-        undefined;
+        (await detectOllamaModel(
+          baseUrl,
+          ollama?.apiKey ?? process.env.OLLAMA_API_KEY,
+          ollama?.headers
+        )) ?? undefined;
       if (!model) {
         throw new CommandError('No model specified and no Ollama models found', {
           hints: [

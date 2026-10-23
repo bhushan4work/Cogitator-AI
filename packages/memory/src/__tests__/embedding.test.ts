@@ -263,6 +263,25 @@ describe('OllamaEmbeddingService', () => {
       );
     });
 
+    it('sends custom headers and keeps its JSON content type', async () => {
+      const withHeaders = new OllamaEmbeddingService({
+        headers: { 'X-Gateway-Key': 'secret', 'content-type': 'text/plain' },
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ embeddings: [[0.1]] }),
+      });
+
+      await withHeaders.embed('Hello');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:11434/api/embed',
+        expect.objectContaining({
+          headers: { 'X-Gateway-Key': 'secret', 'Content-Type': 'application/json' },
+        })
+      );
+    });
+
     it('throws on API error', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -288,6 +307,25 @@ describe('OllamaEmbeddingService', () => {
       const result = await service.embedBatch(['one', 'two', 'three']);
 
       expect(result).toEqual(mockEmbeddings);
+    });
+
+    it('sends custom headers with batch requests', async () => {
+      const withHeaders = new OllamaEmbeddingService({
+        headers: { 'X-Gateway-Key': 'secret' },
+      });
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ embeddings: [[0.1]] }),
+      });
+
+      await withHeaders.embedBatch(['one']);
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:11434/api/embed',
+        expect.objectContaining({
+          headers: { 'X-Gateway-Key': 'secret', 'Content-Type': 'application/json' },
+        })
+      );
     });
 
     it('throws on API error', async () => {
