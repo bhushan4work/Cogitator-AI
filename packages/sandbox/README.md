@@ -40,6 +40,7 @@ if (result.success) {
 - **WASM Sandbox** - Extism-powered WebAssembly execution
 - **Native Fallback** - Optional host execution for Docker tools when Docker is unavailable (`allowNativeFallback`)
 - **Container Pool** - A fresh, pre-started container for every execution
+- **Docker Workspace** - One long-lived container per agent workspace, the project mounted, files guarded on the host
 - **Daemon Discovery** - Finds Docker like the `docker` CLI: `DOCKER_HOST`, contexts, Docker Desktop, OrbStack, Colima, Rancher, rootless
 - **Resource Limits** - Memory, CPU, PID limits
 - **Network Isolation** - Disabled by default
@@ -237,6 +238,34 @@ A container only serves requests with identical settings (image, resources, netw
 Pass the same options as `pool` to `SandboxManager`, `DockerSandboxExecutor` or `new Cogitator({ sandbox: { pool } })`.
 
 ---
+
+## Docker Workspace
+
+`DockerWorkspace` is a [workspace](https://cogitator.app/docs/tools/workspace) whose commands run in one long-lived container: created on first use (or in `start()`), kept between commands, removed in `dispose()`. The root of a host workspace (a `LocalWorkspace` from `@cogitator-ai/core`) is bind-mounted at `/workspace`, files are read and written through the host workspace and its path guard (a path under `/workspace` is mapped to the root), `remove` and `rename` run in the container where no symlink reaches the host, and commands run with `docker exec` in the matching directory.
+
+```typescript
+import { Agent, LocalWorkspace, workspaceTools } from '@cogitator-ai/core';
+import { DockerWorkspace } from '@cogitator-ai/sandbox';
+
+const workspace = new DockerWorkspace({
+  host: new LocalWorkspace({ root: './project' }),
+  image: 'node:24-alpine',
+  resources: { memory: '4GB', cpus: 4 },
+});
+try {
+  const agent = new Agent({
+    name: 'coder',
+    instructions: '...',
+    tools: workspaceTools(),
+    workspace,
+  });
+  await cog.run(agent, { input: 'Run the tests and fix what fails' });
+} finally {
+  await workspace.dispose();
+}
+```
+
+The container has the security defaults of the Docker executor, an init process, limits of 2 GB, 2 CPUs and 512 processes unless `resources` sets others, no network unless `network.mode` allows it, and on Linux runs commands as your uid and gid. Each command leads its own process group: a timeout or an abort signals the group (SIGTERM, then SIGKILL after `killGrace`), background and `env -i` processes included, and the container keeps running. A process that calls `setsid` escapes the group until `dispose()`. The image needs `sh`. Starting removes containers of the same root left by a process of this machine that is gone. Without Docker the first command fails with a `WorkspaceError` of code `UNAVAILABLE`, Docker API failures come as code `IO`. `dispose()` also disposes the host workspace.
 
 ## WASM Executor
 

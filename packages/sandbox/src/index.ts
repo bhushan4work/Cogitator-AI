@@ -16,10 +16,18 @@ export {
 export {
   ContainerPool,
   SANDBOX_CONTAINER_LABEL,
+  createSandboxContainer,
   type ContainerPoolOptions,
   type ContainerCreateOptions,
 } from './pool/index';
 export { parseMemory, cpusToNanoCpus } from './utils/index';
+export {
+  DockerWorkspace,
+  WORKSPACE_CONTAINER_LABEL,
+  WORKSPACE_ROOT_LABEL,
+  WORKSPACE_OWNER_LABEL,
+  type DockerWorkspaceOptions,
+} from './workspace/docker-workspace';
 
 export type {
   SandboxType,

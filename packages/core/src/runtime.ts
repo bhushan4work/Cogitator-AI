@@ -11,6 +11,7 @@ import type {
   ToolCall,
   ToolChoice,
   ToolResult,
+  Workspace,
   LLMBackend,
   ChatResponse,
   ModelRoute,
@@ -48,6 +49,7 @@ import type {
 } from '@cogitator-ai/types';
 import { memoryAgentId, type Agent } from './agent';
 import { ToolRegistry } from './registry';
+import { readFileBinding } from './tools/workspace-tools';
 import { createLLMBackend } from './llm/index';
 import { memoryCompactionMiddleware, type CompactionRun } from './middleware/memory-compaction';
 import { memoryExtractionMiddleware } from './middleware/memory-extraction';
@@ -190,7 +192,12 @@ import {
 } from './cogitator/message-builder';
 import { RunMemory } from './cogitator/run-memory';
 import { createSpan, getTextContent } from './cogitator/span-factory';
-import { runToolCall, createToolMessage, needsApproval } from './cogitator/tool-executor';
+import {
+  runToolCall,
+  createToolMessage,
+  createToolMessageWithOffload,
+  needsApproval,
+} from './cogitator/tool-executor';
 import { DEFAULT_TOOL_RESULT_MAX_LENGTH, toolResultLengthError } from './tool-content';
 import { streamChatRequest, type StreamTiming } from './cogitator/streaming';
 import {
@@ -408,6 +415,13 @@ export class Cogitator implements ToolInvoker {
     if (lengthError) {
       throw new CogitatorError({ message: lengthError, code: ErrorCode.CONFIGURATION_ERROR });
     }
+    const retention = config.limits?.toolResultRetention;
+    if (retention !== undefined && !(retention >= 0)) {
+      throw new CogitatorError({
+        message: `limits.toolResultRetention must be 0 or more milliseconds, got ${String(retention)}`,
+        code: ErrorCode.CONFIGURATION_ERROR,
+      });
+    }
     this.config = config;
     this.pricer = new CallPricer(config.llm?.pricing, (name) =>
       Object.hasOwn(config.llm?.backends ?? {}, name)
@@ -608,6 +622,9 @@ export class Cogitator implements ToolInvoker {
         ...(options.topicId !== undefined && { topicId: options.topicId }),
         ...(options.conversationId !== undefined && { conversationId: options.conversationId }),
         ...(options.deps !== undefined && { deps: options.deps }),
+        ...((options.workspace ?? agent?.config.workspace) && {
+          workspace: options.workspace ?? agent?.config.workspace,
+        }),
       },
       approved: approvedByUser,
       allowNativeFallback: this.config.sandbox?.allowNativeFallback !== false,
@@ -630,6 +647,9 @@ export class Cogitator implements ToolInvoker {
         ...(options.topicId !== undefined && { topicId: options.topicId }),
         ...(options.conversationId !== undefined && { conversationId: options.conversationId }),
         ...(options.deps !== undefined && { deps: options.deps }),
+        ...((options.workspace ?? agent?.config.workspace) && {
+          workspace: options.workspace ?? agent?.config.workspace,
+        }),
       },
     });
   }
@@ -1128,6 +1148,8 @@ export class Cogitator implements ToolInvoker {
         ]);
       let pipeline = pipelineFor(active);
       const middlewareState = new Map<string, unknown>();
+      const workspaceOf = (owner: Agent): Workspace | undefined =>
+        options.workspace ?? owner.config.workspace;
       const middlewareContext = (): RunMiddlewareContext => ({
         runId,
         threadId,
@@ -1143,6 +1165,7 @@ export class Cogitator implements ToolInvoker {
         ...(options.topicId !== undefined && { topicId: options.topicId }),
         ...(options.conversationId !== undefined && { conversationId: options.conversationId }),
         ...(options.deps !== undefined && { deps: options.deps }),
+        ...(workspaceOf(active) && { workspace: workspaceOf(active) }),
       });
 
       const buildRegistry = (owner: Agent) => {
@@ -1461,6 +1484,7 @@ export class Cogitator implements ToolInvoker {
                   topicId: options.topicId,
                   conversationId: options.conversationId,
                   ...(options.deps !== undefined && { deps: options.deps }),
+                  ...(workspaceOf(active) && { workspace: workspaceOf(active) }),
                 },
                 approved: decision?.approved === true,
                 allowNativeFallback: this.config.sandbox?.allowNativeFallback !== false,
@@ -1527,12 +1551,20 @@ export class Cogitator implements ToolInvoker {
 
           options.onToolResult?.(result);
 
-          const toolMessage = createToolMessage(
+          const offloadTo = offloadWorkspace(registry, workspaceOf(active));
+          const toolMessage = await createToolMessageWithOffload(
             toolCall,
             result,
             registry.get(toolCall.name)?.maxResultLength ??
               this.config.limits?.maxToolResultLength ??
-              DEFAULT_TOOL_RESULT_MAX_LENGTH
+              DEFAULT_TOOL_RESULT_MAX_LENGTH,
+            offloadTo
+              ? {
+                  workspace: offloadTo,
+                  runId,
+                  retention: this.config.limits?.toolResultRetention,
+                }
+              : undefined
           );
           messages.push(toolMessage);
 
@@ -3480,4 +3512,21 @@ interface PausedTurn {
 
 function isArgumentRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Where long tool results of a turn are saved: the workspace the agent's `read_file` reads, so
+ * the path in the note is one the model can open. That is its bound workspace when
+ * `workspaceTools(workspace)` made it, else the run's. A `read_file` of another origin (or none)
+ * means the reach cannot be told, and results are only cut.
+ */
+function offloadWorkspace(
+  registry: ToolRegistry,
+  runWorkspace: Workspace | undefined
+): Workspace | undefined {
+  const reader = registry.get('read_file');
+  if (!reader) return undefined;
+  const binding = readFileBinding(reader);
+  if (!binding) return undefined;
+  return binding.workspace ?? runWorkspace;
 }

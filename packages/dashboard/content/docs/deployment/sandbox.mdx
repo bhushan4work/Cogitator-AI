@@ -195,6 +195,29 @@ await pool.release(container, { corrupted: true });
 
 `reuseContainers: true` (`pool.reuseContainers` on the manager or executor) returns a released container to the pool as it is, the older behaviour: faster, but whatever one execution leaves in the container is visible to the next, including other runs and users. Releasing with `corrupted: true` always destroys the container.
 
+## DockerWorkspace
+
+The executors above start a fresh container for every execution. An agent that works on a project needs one container that keeps its state between commands (installed packages, build output), with the project's files mounted. `DockerWorkspace` is that: a [workspace](/docs/tools/workspace) whose commands run with `docker exec` in one long-lived container, created on first use (or in `start()`) and removed in `dispose()`.
+
+```typescript
+import { LocalWorkspace, workspaceTools } from '@cogitator-ai/core';
+import { DockerWorkspace } from '@cogitator-ai/sandbox';
+
+const workspace = new DockerWorkspace({
+  host: new LocalWorkspace({ root: './project' }),
+  image: 'node:24-alpine',
+  resources: { memory: '4GB', cpus: 4 },
+  network: { mode: 'none' },
+});
+try {
+  await cog.run(agent, { input: 'Run the tests and fix what fails', workspace });
+} finally {
+  await workspace.dispose();
+}
+```
+
+The host workspace's root is bind-mounted at `/workspace`. Files are read and written on the host through the host workspace and its path guard, so a symlink a command creates to a path outside the root is refused when read, `remove` and `rename` run in the container, where no symlink reaches the host, and a path under `/workspace` is taken as the same path under the root. The container has the security defaults above, an init process, limits of 2 GB, 2 CPUs and 512 processes unless `resources` sets others, and no network unless `network.mode` allows it (`allowedHosts` is refused, as for the Docker executor). Each command leads a process group of its own, and a timeout or an abort signals that group (SIGTERM, then SIGKILL), so background processes go too, while the container keeps running. The image needs `sh`. Starting removes containers of the same root left behind by a process of this machine that is gone. Without Docker the first command fails with a `WorkspaceError` of code `UNAVAILABLE`.
+
 ## Fallback
 
 `SandboxManager` falls back in one case only:

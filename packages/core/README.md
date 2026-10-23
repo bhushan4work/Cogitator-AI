@@ -82,6 +82,7 @@ console.log(result.output);
 - **Resilience** - Retry, circuit breaker, and fallback patterns
 - **PII Masking** - Personal data and secrets replaced with placeholders before they reach the provider
 - **Run Middleware** - Hooks around every model and tool call, tripwire guards that stop a run
+- **Workspace** - Files and commands confined to one directory (`LocalWorkspace`, `DockerWorkspace`), `workspaceTools()`, long tool results saved there for the model to page through
 - **Observability** - OpenTelemetry GenAI spans, one trace across runs, workflows and swarms, OTLP and Langfuse exporters
 
 ---
@@ -635,6 +636,29 @@ A Docker-sandboxed tool does not call `execute`: the sandbox runs the `command` 
 When Docker is unavailable (or `@cogitator-ai/sandbox` is missing), a Docker-sandboxed tool runs its command directly on the host with a warning; set `sandbox.allowNativeFallback: false` to make those calls fail instead. WASM tools never fall back to the host: they run their own `execute` only when `@cogitator-ai/sandbox` is missing or fails to start, and a WASM sandbox that cannot load the module returns an error. Each Docker execution gets a fresh container (the pool keeps them warm); `sandbox.pool.reuseContainers: true` reuses containers between executions with the same settings, which is faster but lets files and processes leak from one execution to the next.
 
 `timeout` is enforced for every tool: native tools get an aborted `context.signal` and the model receives a `Tool "<name>" timed out after <ms>ms` error; sandboxed tools forward it to the sandbox executor. Cancelling a run (`signal` in the run options) stops a sandboxed command too: the process is killed, its container removed or its WASM plugin closed, and the call fails with the abort reason. The sandbox is initialized lazily on the first sandboxed call, and that call already runs inside it.
+
+### Workspace
+
+A `Workspace` is the directory an agent works in: file access and commands that cannot leave its root (`..`, absolute paths elsewhere and symlinks out are refused with a `WorkspaceError` of code `OUTSIDE_ROOT`). `LocalWorkspace` is a directory of this machine, `DockerWorkspace` from `@cogitator-ai/sandbox` runs the commands in a container. `workspaceTools()` gives the agent `read_file` (by line range), `write_file`, `edit_file` (exact, unique replacement), `list_files`, `glob`, `grep` (in a worker thread, so a runaway pattern cannot block the process) and `run_command`, named apart from the global `file_*` and `exec` built-in tools.
+
+```typescript
+import { Agent, LocalWorkspace, workspaceTools } from '@cogitator-ai/core';
+
+const workspace = new LocalWorkspace({ root: './project' });
+const coder = new Agent({
+  name: 'coder',
+  model: 'anthropic/claude-sonnet-5-5',
+  instructions: 'Fix the failing test.',
+  tools: workspaceTools(),
+  workspace,
+});
+
+await cog.run(coder, { input: 'The parser test fails' });
+await cog.run(coder, { input: 'Same for this project', workspace: otherWorkspace });
+await workspace.dispose();
+```
+
+Tools and middleware get the run's workspace as `context.workspace` (`RunOptions.workspace`, else the agent's). A workspace starts itself on first use, the runtime only uses it, and whoever creates it disposes it. Only regular files are read and written, writes are atomic (a temporary file renamed over the target), and `remove` and `rename` check what they move and never replace an entry they did not check, so a symlink swapped in at the wrong moment cannot reach outside the root. `remove` and `rename` refuse with code `BUSY` while a command the workspace started still runs. Commands run in their own process group with a trimmed environment, a call returns when the command exits, its background processes stopped then unless `background: 'keep'`, and a timeout, an abort or `dispose()` kills the group. When a tool result is longer than the model may read and the agent has the `read_file` of `workspaceTools()`, the full text is saved in the workspace that `read_file` reads to `.cogitator/tool-results/<runId>/<toolCallId>.txt` (ignored by git, removed after `limits.toolResultRetention`, 7 days by default) and the model gets a preview with the path, to page through with `read_file`. `remove(path, { trash: true })` moves entries to `.cogitator/trash/`. See [Workspace](https://cogitator.app/docs/tools/workspace).
 
 ### Tool Registry
 
