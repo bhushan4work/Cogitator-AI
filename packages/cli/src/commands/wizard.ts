@@ -13,7 +13,7 @@ import {
 import { printBanner } from '../utils/logger.js';
 import { examplesHelp } from '../utils/cli.js';
 import { mergeEnvContent, parseDotenv } from '../utils/env.js';
-import { DEFAULT_OLLAMA_URL, resolveOllamaConnection, resolveOllamaUrl } from '../utils/ollama.js';
+import { DEFAULT_OLLAMA_URL, resolveOllamaUrl } from '../utils/ollama.js';
 import {
   API_KEY_ENV,
   fetchOllamaModelOptions,
@@ -397,12 +397,11 @@ export const wizardCommand = new Command('wizard')
     modelSpinner.start('Fetching available models...');
     let modelOptions;
     if (provider === 'ollama') {
-      const connection = resolveOllamaConnection({ url: ollamaUrl });
-      modelOptions = await fetchOllamaModelOptions(
-        connection.baseUrl,
-        ollamaApiKey ?? connection.apiKey,
-        connection.headers
-      );
+      /*
+       * The URL and key this wizard collected, never the ones a cogitator.yml
+       * in the directory may hold: that file belongs to another setup.
+       */
+      modelOptions = await fetchOllamaModelOptions(ollamaUrl, ollamaApiKey);
     } else {
       modelOptions = await fetchProviderModels(provider);
     }

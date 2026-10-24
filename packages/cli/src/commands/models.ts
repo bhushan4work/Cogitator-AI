@@ -11,10 +11,22 @@ import {
   listOllamaModels,
   pullOllamaModel,
   resolveOllamaConnection,
+  resolveOllamaUrl,
+  type OllamaConnection,
   type OllamaModelInfo,
 } from '../utils/ollama.js';
 
 const DAY_MS = 1000 * 60 * 60 * 24;
+
+/**
+ * The connection `models` uses when the project config cannot be read: the
+ * environment alone, so an unrelated invalid config, a missing config file or a
+ * provider key that is not set never stops the command. An explicit `url` is kept.
+ */
+function environmentConnection(url?: string): OllamaConnection {
+  const apiKey = process.env.OLLAMA_API_KEY;
+  return { baseUrl: resolveOllamaUrl(process.env, url), ...(apiKey ? { apiKey } : {}) };
+}
 
 export function formatSize(bytes: number): string {
   const gb = bytes / (1024 * 1024 * 1024);
@@ -156,7 +168,10 @@ async function pullModel(
 export const modelsCommand = new Command('models')
   .description('List available Ollama models')
   .option('--pull <model>', 'Pull a model from Ollama registry')
-  .option('--url <url>', 'Ollama base URL (default: $OLLAMA_URL or http://localhost:11434)')
+  .option(
+    '--url <url>',
+    'Ollama base URL (first in precedence, over cogitator.yml and OLLAMA_BASE_URL, and it never receives the configured server credentials or headers)'
+  )
   .option('--json', 'print the models, or the pulled model, as JSON')
   .addHelpText(
     'after',
@@ -167,7 +182,14 @@ export const modelsCommand = new Command('models')
     ])
   )
   .action(async (options: { pull?: string; url?: string; json?: boolean }) => {
-    const connection = resolveOllamaConnection({ url: options.url });
+    let connection: OllamaConnection;
+    try {
+      connection = resolveOllamaConnection({ url: options.url });
+    } catch (error) {
+      log.warn(`Cannot read the Ollama configuration: ${errorMessage(error).split('\n')[0]}`);
+      log.dim('Using the environment only (OLLAMA_BASE_URL, OLLAMA_API_KEY)');
+      connection = environmentConnection(options.url);
+    }
 
     if (options.pull) {
       await pullModel(

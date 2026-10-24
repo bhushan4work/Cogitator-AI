@@ -1,14 +1,21 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { dirname, join } from 'node:path';
 
-const { checkDocker, findDockerCompose, composePs, listOllamaModels, resolveOllamaConnection } =
-  vi.hoisted(() => ({
-    checkDocker: vi.fn(),
-    findDockerCompose: vi.fn(),
-    composePs: vi.fn(),
-    listOllamaModels: vi.fn(),
-    resolveOllamaConnection: vi.fn(),
-  }));
+const {
+  checkDocker,
+  findDockerCompose,
+  composePs,
+  listOllamaModels,
+  resolveOllamaConnection,
+  resolveOllamaUrl,
+} = vi.hoisted(() => ({
+  checkDocker: vi.fn(),
+  findDockerCompose: vi.fn(),
+  composePs: vi.fn(),
+  listOllamaModels: vi.fn(),
+  resolveOllamaConnection: vi.fn(),
+  resolveOllamaUrl: vi.fn(),
+}));
 
 vi.mock('../utils/docker.js', () => ({
   checkDocker,
@@ -19,8 +26,10 @@ vi.mock('../utils/docker.js', () => ({
 vi.mock('../utils/ollama.js', () => ({
   listOllamaModels,
   resolveOllamaConnection,
+  resolveOllamaUrl,
 }));
 
+import { log } from '../utils/logger.js';
 import { collectStatus } from '../commands/status.js';
 
 describe('collectStatus', () => {
@@ -30,6 +39,14 @@ describe('collectStatus', () => {
     composePs.mockReset();
     listOllamaModels.mockReset();
     resolveOllamaConnection.mockReset().mockReturnValue({ baseUrl: 'http://localhost:11434' });
+    resolveOllamaUrl.mockReset().mockReturnValue('http://localhost:11434');
+    vi.spyOn(log, 'warn').mockImplementation(() => {});
+    vi.spyOn(log, 'dim').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it('reports Docker unavailable without querying compose', async () => {
@@ -155,5 +172,28 @@ describe('collectStatus', () => {
       headers,
       timeoutMs: 3000,
     });
+  });
+
+  it('warns and falls back to the environment when the config cannot be read', async () => {
+    resolveOllamaConnection.mockImplementation(() => {
+      throw new Error('Invalid configuration:\nlimits.maxConcurrentRuns: Expected number');
+    });
+    resolveOllamaUrl.mockReturnValue('http://env.example');
+    vi.stubEnv('OLLAMA_API_KEY', 'env-key');
+    checkDocker.mockReturnValue(false);
+    listOllamaModels.mockResolvedValue([]);
+
+    const report = await collectStatus();
+
+    expect(report.ollama).toEqual({ url: 'http://env.example', running: true });
+    expect(resolveOllamaUrl).toHaveBeenCalledWith(process.env);
+    expect(listOllamaModels).toHaveBeenCalledWith('http://env.example', {
+      apiKey: 'env-key',
+      headers: undefined,
+      timeoutMs: 3000,
+    });
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      expect.stringContaining('Invalid configuration')
+    );
   });
 });

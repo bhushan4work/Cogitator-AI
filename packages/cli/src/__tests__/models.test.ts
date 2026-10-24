@@ -1,17 +1,22 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { resolveOllamaConnection, listOllamaModels, pullOllamaModel } = vi.hoisted(() => ({
-  resolveOllamaConnection: vi.fn(),
-  listOllamaModels: vi.fn(),
-  pullOllamaModel: vi.fn(),
-}));
+const { resolveOllamaConnection, resolveOllamaUrl, listOllamaModels, pullOllamaModel } = vi.hoisted(
+  () => ({
+    resolveOllamaConnection: vi.fn(),
+    resolveOllamaUrl: vi.fn(),
+    listOllamaModels: vi.fn(),
+    pullOllamaModel: vi.fn(),
+  })
+);
 
 vi.mock('../utils/ollama.js', () => ({
   resolveOllamaConnection,
+  resolveOllamaUrl,
   listOllamaModels,
   pullOllamaModel,
 }));
 
+import { log } from '../utils/logger.js';
 import { formatSize, formatDate, modelsCommand } from '../commands/models.js';
 
 const DAY = 1000 * 60 * 60 * 24;
@@ -21,12 +26,16 @@ const ago = (days: number) => new Date(NOW.getTime() - days * DAY).toISOString()
 beforeEach(() => {
   vi.clearAllMocks();
   resolveOllamaConnection.mockReturnValue({ baseUrl: 'http://localhost:11434' });
+  resolveOllamaUrl.mockReturnValue('http://localhost:11434');
   listOllamaModels.mockResolvedValue([]);
   pullOllamaModel.mockResolvedValue(undefined);
+  vi.spyOn(log, 'warn').mockImplementation(() => {});
+  vi.spyOn(log, 'dim').mockImplementation(() => {});
 });
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 describe('modelsCommand', () => {
@@ -73,6 +82,25 @@ describe('modelsCommand', () => {
     expect(listOllamaModels).toHaveBeenCalledWith(
       'http://other.example',
       expect.objectContaining({})
+    );
+  });
+
+  it('warns and falls back to the environment when the config cannot be read', async () => {
+    resolveOllamaConnection.mockImplementation(() => {
+      throw new Error('COGITATOR_CONFIG points to a missing file: missing.yml');
+    });
+    resolveOllamaUrl.mockReturnValue('http://env.example');
+    vi.stubEnv('OLLAMA_API_KEY', 'env-key');
+
+    await modelsCommand.parseAsync(['--json'], { from: 'user' });
+
+    expect(resolveOllamaUrl).toHaveBeenCalledWith(process.env, undefined);
+    expect(listOllamaModels).toHaveBeenCalledWith('http://env.example', {
+      apiKey: 'env-key',
+      headers: undefined,
+    });
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      expect.stringContaining('COGITATOR_CONFIG points to a missing file')
     );
   });
 });

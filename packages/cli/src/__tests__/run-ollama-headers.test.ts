@@ -72,4 +72,33 @@ describe('run Ollama model detection', () => {
     );
     expect(runAgent).toHaveBeenCalled();
   });
+
+  it('prefers a literal config apiKey over a different OLLAMA_API_KEY', async () => {
+    writeFileSync(
+      join(dir, 'cogitator.yml'),
+      [
+        'llm:',
+        '  providers:',
+        '    ollama:',
+        '      baseUrl: http://ollama.example',
+        '      apiKey: literal-config-key',
+        '',
+      ].join('\n')
+    );
+    process.env.OLLAMA_API_KEY = 'env-key';
+    const fetchMock = vi.fn(async () =>
+      Response.json({ models: [{ name: 'qwen3:8b', size: 1, modified_at: '' }] })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await runCommand.parseAsync(['--config', join(dir, 'cogitator.yml'), '--no-stream', 'hello'], {
+      from: 'user',
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://ollama.example/api/tags',
+      expect.objectContaining({ headers: { Authorization: 'Bearer literal-config-key' } })
+    );
+    expect(runAgent).toHaveBeenCalled();
+  });
 });

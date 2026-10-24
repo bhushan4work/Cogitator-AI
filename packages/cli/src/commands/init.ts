@@ -22,7 +22,7 @@ import {
 } from 'create-cogitator-app';
 import { printBanner } from '../utils/logger.js';
 import { errorMessage, EXIT, examplesHelp } from '../utils/cli.js';
-import { resolveOllamaConnection } from '../utils/ollama.js';
+import { resolveOllamaUrl } from '../utils/ollama.js';
 import {
   API_KEY_ENV,
   fetchOllamaModelOptions,
@@ -231,11 +231,13 @@ async function collectAnswers(nameArg?: string): Promise<InitAnswers> {
   spinner.start('Fetching available models...');
   let modelOptions;
   if (provider === 'ollama') {
-    const connection = resolveOllamaConnection();
+    /*
+     * The environment only: a cogitator.yml in the directory init runs in is
+     * another project's and never decides which server init lists models from.
+     */
     modelOptions = await fetchOllamaModelOptions(
-      connection.baseUrl,
-      connection.apiKey,
-      connection.headers
+      resolveOllamaUrl(process.env),
+      process.env.OLLAMA_API_KEY
     );
   } else {
     modelOptions = await fetchProviderModels(provider);

@@ -28,21 +28,45 @@ export interface OllamaConnection {
 }
 
 export interface OllamaConnectionOptions {
-  /** A flag that overrides the URL of the config, such as `models --url`. */
+  /**
+   * A flag that overrides the URL of the config, such as `models --url`. An
+   * explicit URL names a server of its own, so the config file is not read at
+   * all for it: its credentials and headers never reach that server.
+   */
   url?: string;
   cwd?: string;
 }
 
 /**
+ * The connection of a server named only by the environment: `resolveOllamaUrl`
+ * over `env`, and `OLLAMA_API_KEY` as its bearer token. No config file, no
+ * `.env` beside one, no headers, so it cannot fail on configuration.
+ */
+function environmentConnection(
+  env: Record<string, string | undefined>,
+  url?: string
+): OllamaConnection {
+  const apiKey = env.OLLAMA_API_KEY;
+  return {
+    baseUrl: resolveOllamaUrl(env, url),
+    ...(apiKey ? { apiKey } : {}),
+  };
+}
+
+/**
  * The Ollama server and credentials the CLI uses, loaded the way `run` loads them:
  * the `.env` next to the config file (or in `cwd`), `COGITATOR_CONFIG`, environment
- * variables and `cogitator.yml`. An explicit `url` wins over the config. Config
- * credentials are used only for the server the config names, so an explicit URL
- * never receives them. Config errors are thrown, not hidden.
+ * variables and `cogitator.yml`. An explicit `url` skips the config entirely and
+ * uses {@link environmentConnection} instead, so the configured server's credentials
+ * and headers are never sent to another one. Config credentials are used only for
+ * the server the config names. Config errors are thrown, not hidden: `status` and
+ * `models` catch them and fall back to {@link environmentConnection}.
  */
 export function resolveOllamaConnection(options: OllamaConnectionOptions = {}): OllamaConnection {
   const cwd = options.cwd ?? process.cwd();
   const env = process.env;
+  if (options.url !== undefined) return environmentConnection(env, options.url);
+
   const configPath = findConfig(undefined, env, cwd);
   if (env.COGITATOR_CONFIG && !configPath) {
     throw new Error(`COGITATOR_CONFIG points to a missing file: ${env.COGITATOR_CONFIG}`);
@@ -50,7 +74,7 @@ export function resolveOllamaConnection(options: OllamaConnectionOptions = {}): 
 
   const { config } = loadRunConfig(configPath, cwd);
   const ollama = config.llm?.providers?.ollama;
-  const baseUrl = resolveOllamaUrl(env, options.url ?? ollama?.baseUrl);
+  const baseUrl = resolveOllamaUrl(env, ollama?.baseUrl);
   const configUrl = resolveOllamaUrl({}, ollama?.baseUrl);
   const usesConfigServer = configUrl === baseUrl;
   const apiKey = (usesConfigServer ? ollama?.apiKey : undefined) ?? env.OLLAMA_API_KEY;
@@ -64,9 +88,11 @@ export function resolveOllamaConnection(options: OllamaConnectionOptions = {}): 
 }
 
 /**
- * The Ollama URL to use: `configured` (a flag or cogitator.yml), else
- * `OLLAMA_BASE_URL`, `OLLAMA_URL` or `OLLAMA_HOST`, each read the way Ollama
- * reads `OLLAMA_HOST`, the same way `loadConfig` reads them.
+ * The Ollama URL to use, in precedence: `configured` (an explicit `--url`, else
+ * the config's `llm.providers.ollama.baseUrl`), then `OLLAMA_BASE_URL`,
+ * `OLLAMA_URL` and `OLLAMA_HOST`, each read the way Ollama reads `OLLAMA_HOST`
+ * (port 11434 when none is given, `0.0.0.0` as `localhost`), then
+ * `http://localhost:11434`.
  */
 export function resolveOllamaUrl(
   env: Record<string, string | undefined> = process.env,

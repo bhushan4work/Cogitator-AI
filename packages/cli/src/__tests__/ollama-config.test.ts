@@ -93,7 +93,7 @@ describe('resolveOllamaConnection', () => {
     expect(() => resolveOllamaConnection({ cwd: dir })).toThrow('Invalid configuration');
   });
 
-  it('lets an explicit url win and keeps config credentials for the config server only', () => {
+  it('reads no config for an explicit url, so another server gets no config credentials', () => {
     writeFileSync(
       join(dir, 'cogitator.yml'),
       [
@@ -113,8 +113,38 @@ describe('resolveOllamaConnection', () => {
     });
     expect(resolveOllamaConnection({ cwd: dir, url: 'http://config.example/' })).toEqual({
       baseUrl: 'http://config.example',
-      apiKey: 'config-key',
-      headers: { 'X-Gateway-Key': 'secret' },
+    });
+  });
+
+  it('does not read the config at all when a url is given, even an unreadable one', () => {
+    writeFileSync(
+      join(dir, 'cogitator.yml'),
+      ['limits:', '  maxConcurrentRuns: not-a-number', ''].join('\n')
+    );
+    process.env.COGITATOR_CONFIG = 'missing.yml';
+
+    expect(resolveOllamaConnection({ cwd: dir, url: 'http://other.example' })).toEqual({
+      baseUrl: 'http://other.example',
+    });
+  });
+
+  it('uses the config apiKey over OLLAMA_API_KEY for the config server', () => {
+    process.env.OLLAMA_API_KEY = 'env-key';
+    writeFileSync(
+      join(dir, 'cogitator.yml'),
+      [
+        'llm:',
+        '  providers:',
+        '    ollama:',
+        '      baseUrl: http://config.example',
+        '      apiKey: literal-config-key',
+        '',
+      ].join('\n')
+    );
+
+    expect(resolveOllamaConnection({ cwd: dir })).toEqual({
+      baseUrl: 'http://config.example',
+      apiKey: 'literal-config-key',
     });
   });
 
