@@ -58,8 +58,11 @@ const config = loadConfig({
   skipEnv: false, // true: ignore environment variables
   skipYaml: false, // true: ignore config files
   overrides: { limits: { maxConcurrentRuns: 4 } },
+  env: process.env, // the variables ${VAR}, COGITATOR_* and OLLAMA_HOST are read from
 });
 ```
+
+`env` reads the config the way another environment would see it, such as the one a deployment gives the app. `loadEnvConfig(env)` and `loadEnvDefaults(env)` take it too.
 
 `loadConfig()` does not read `.env` files. Load them first with `process.loadEnvFile()` (Node 20.12+), or parse one with `loadDotenvFile(path)` / `parseDotenv(text)` from the same package.
 
@@ -77,7 +80,7 @@ const config = loadConfig({
 | `costRouting` | [Cost-aware model routing](/docs/advanced/cost-routing) and budgets                                                                                          |
 | `security`    | `promptInjection` detection and `pii` masking ([Security](/docs/advanced/security))                                                                          |
 | `context`     | [Context compression](/docs/advanced/context-management) for long conversations                                                                              |
-| `deploy`      | Target, server, port, registry and resources for `cogitator deploy` ([Deploy](/docs/deployment/deploy-package))                                              |
+| `deploy`      | Target, server, port, registry, resources, the Fly app and org and the Ollama service for `cogitator deploy` ([Deploy](/docs/deployment/deploy-package))     |
 | `logging`     | `level`, `format`, `destination`, `filePath` of the process-wide logger (see below)                                                                          |
 
 ### Memory

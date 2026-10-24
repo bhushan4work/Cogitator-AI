@@ -6,7 +6,7 @@ import type {
   PreflightResult,
   GeneratedArtifacts,
 } from '@cogitator-ai/types';
-import type { DeployProvider } from './base.js';
+import type { DeployCommand, DeployLogsOptions, DeployProvider } from './base.js';
 import { run, isCommandAvailable } from '../utils/exec.js';
 import { resolveDeployEnv, sanitizeName } from '../utils/env.js';
 import { isRegistryAuthenticated } from '../utils/registry-auth.js';
@@ -22,6 +22,9 @@ const COMPOSE_FILE = 'docker-compose.prod.yml';
 const DEFAULT_STARTUP_CHECK_MS = 8_000;
 const STARTUP_POLL_MS = 1_000;
 const LOG_TAIL_LINES = '30';
+const DEFAULT_LOGS_TAIL = '100';
+const COMPOSE_SERVICE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+const LOGS_TAIL = /^(?:all|\d+)$/;
 
 export interface DockerProviderOptions {
   /**
@@ -158,7 +161,15 @@ export class DockerProvider implements DeployProvider {
       env,
     });
     if (!upResult.success) {
-      return { success: false, error: `docker compose up failed: ${upResult.error}` };
+      return {
+        success: false,
+        error: [
+          `docker compose up failed: ${upResult.error}`,
+          this.pullLogs(config, projectDir, env),
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      };
     }
 
     const startupError = await this.verifyStartup(config, projectDir, env);
@@ -174,6 +185,30 @@ export class DockerProvider implements DeployProvider {
       url,
       endpoints: { api: url, ...(health ? { health: `${url}${health}` } : {}) },
     };
+  }
+
+  /**
+   * The last lines of the `ollama-pull` job when the deployment runs one, so a
+   * failed `docker compose up` shows why a model did not download (an unknown
+   * model, no network, a full disk) instead of only that the job failed.
+   */
+  private pullLogs(config: DeployConfig, projectDir: string, env: NodeJS.ProcessEnv): string {
+    if (!config.services?.ollama || (config.ollama?.models ?? []).length === 0) return '';
+    const logs = run(
+      'docker',
+      this.composeArgs(
+        config,
+        projectDir,
+        'logs',
+        '--no-color',
+        '--tail',
+        LOG_TAIL_LINES,
+        'ollama-pull'
+      ),
+      { cwd: projectDir, env }
+    );
+    const output = logs.output.trim();
+    return output ? `Last lines of ollama-pull:\n${output}` : '';
   }
 
   /**
@@ -246,6 +281,38 @@ export class DockerProvider implements DeployProvider {
       running,
       instances: running ? 1 : 0,
       url: running && servesHttp(config) ? `http://localhost:${config.port ?? 3000}` : undefined,
+    };
+  }
+
+  logsCommand(
+    config: DeployConfig,
+    projectDir: string,
+    options: DeployLogsOptions = {}
+  ): DeployCommand {
+    if (!existsSync(join(projectDir, ARTIFACTS_DIR, COMPOSE_FILE))) {
+      throw new Error('No docker deployment found (missing .cogitator/docker-compose.prod.yml)');
+    }
+    const tail = options.tail ?? DEFAULT_LOGS_TAIL;
+    if (!LOGS_TAIL.test(tail)) {
+      throw new Error(`Expected a number of lines or "all" for the log tail, got "${tail}"`);
+    }
+    if (options.service !== undefined && !COMPOSE_SERVICE_NAME.test(options.service)) {
+      throw new Error(`"${options.service}" is not a Docker Compose service name`);
+    }
+    return {
+      command: 'docker',
+      args: this.composeArgs(
+        config,
+        projectDir,
+        'logs',
+        ...(options.follow ? ['--follow'] : []),
+        '--tail',
+        tail,
+        ...(options.timestamps ? ['--timestamps'] : []),
+        ...(options.service ? [options.service] : [])
+      ),
+      cwd: projectDir,
+      env: resolveDeployEnv(projectDir),
     };
   }
 
