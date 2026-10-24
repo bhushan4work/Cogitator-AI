@@ -1,6 +1,6 @@
 {
   "name": "@cogitator-ai/cli",
-  "version": "0.11.5",
+  "version": "0.12.0",
   "description": "CLI for Cogitator AI Agent Runtime",
   "keywords": [
     "cogitator",
