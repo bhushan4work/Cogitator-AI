@@ -48,7 +48,7 @@ YAML configuration loading, environment variable overrides, and Cogitator runtim
 
 ### [`core/`](./core/) — Core Runtime Features
 
-Agent creation, tools, streaming, caching, reasoning, reflection, optimization, security, and more.
+Agent creation, tools, streaming, caching, reasoning, reflection, optimization, security, workspaces with long tool results saved to files, skills from `SKILL.md` folders with todo lists and tool search, and more.
 
 ### [`memory/`](./memory/) — Memory & Knowledge
 
@@ -76,8 +76,9 @@ Express, Fastify, Hono, Koa, Next.js, OpenAI compatibility, Vercel AI SDK.
 
 ### [`infrastructure/`](./infrastructure/) — Infrastructure
 
-Redis memory, PostgreSQL with pgvector, BullMQ workers, Docker deployment.
-Requires `docker-compose up -d`.
+Redis memory, PostgreSQL with pgvector, BullMQ workers, Docker deployment, and agent workspaces
+in E2B, Daytona and Vercel sandboxes.
+Requires `docker-compose up -d`, the remote workspace example a provider account instead.
 
 ### [`rag/`](./rag/) — RAG Pipeline
 

@@ -1,5 +1,51 @@
 # @cogitator-ai/rag
 
+## 0.9.5
+
+### Patch Changes
+
+- Updated dependencies [[`c5539d4`](https://github.com/cogitator-ai/Cogitator-AI/commit/c5539d41dc8611d9d8fae77a8e2b35f948f68bd1)]:
+  - @cogitator-ai/types@0.73.0
+  - @cogitator-ai/memory@0.26.2
+
+## 0.9.4
+
+### Patch Changes
+
+- Updated dependencies [[`7d96a55`](https://github.com/cogitator-ai/Cogitator-AI/commit/7d96a55a376770d0cce4d1d220fdad53f493b5bd)]:
+  - @cogitator-ai/types@0.72.0
+  - @cogitator-ai/memory@0.26.1
+
+## 0.9.3
+
+### Patch Changes
+
+- Updated dependencies [[`a19a0d6`](https://github.com/cogitator-ai/Cogitator-AI/commit/a19a0d6c3d1dfd281e336dea6e5307b20af1a34b), [`a19a0d6`](https://github.com/cogitator-ai/Cogitator-AI/commit/a19a0d6c3d1dfd281e336dea6e5307b20af1a34b)]:
+  - @cogitator-ai/memory@0.26.0
+  - @cogitator-ai/types@0.71.0
+
+## 0.9.2
+
+### Patch Changes
+
+- Updated dependencies [[`213e3fb`](https://github.com/cogitator-ai/Cogitator-AI/commit/213e3fba0f0ed9a1290fdd1499dd4a0e4101b6e2)]:
+  - @cogitator-ai/types@0.70.0
+  - @cogitator-ai/memory@0.25.6
+
+## 0.9.1
+
+### Patch Changes
+
+- Updated dependencies [[`091fa9e`](https://github.com/cogitator-ai/Cogitator-AI/commit/091fa9e659341bc0f39344e46ec0c56ba0338f83)]:
+  - @cogitator-ai/types@0.69.0
+  - @cogitator-ai/memory@0.25.5
+
+## 0.9.0
+
+### Minor Changes
+
+- [#274](https://github.com/cogitator-ai/Cogitator-AI/pull/274) [`ecf5b2e`](https://github.com/cogitator-ai/Cogitator-AI/commit/ecf5b2e43e2412156dc606b9994ca0d8126fe492) Thanks [@rahul05ranjan](https://github.com/rahul05ranjan)! - Add a `JSONLLoader` for `.jsonl` / `.ndjson` files: one document per line, blank lines skipped, a parse error naming the file and the 1-based line number, and the same `contentField` / `metadataFields` options as `JSONLoader`.
+
 ## 0.8.18
 
 ### Patch Changes

@@ -58,8 +58,11 @@ const config = loadConfig({
   skipEnv: false, // true: ignore environment variables
   skipYaml: false, // true: ignore config files
   overrides: { limits: { maxConcurrentRuns: 4 } },
+  env: process.env, // the variables ${VAR}, COGITATOR_* and OLLAMA_HOST are read from
 });
 ```
+
+`env` reads the config the way another environment would see it, such as the one a deployment gives the app. `loadEnvConfig(env)` and `loadEnvDefaults(env)` take it too.
 
 `loadConfig()` does not read `.env` files. Load them first with `process.loadEnvFile()` (Node 20.12+), or parse one with `loadDotenvFile(path)` / `parseDotenv(text)` from the same package.
 
@@ -77,7 +80,7 @@ const config = loadConfig({
 | `costRouting` | [Cost-aware model routing](/docs/advanced/cost-routing) and budgets                                                                                          |
 | `security`    | `promptInjection` detection and `pii` masking ([Security](/docs/advanced/security))                                                                          |
 | `context`     | [Context compression](/docs/advanced/context-management) for long conversations                                                                              |
-| `deploy`      | Target, server, port, registry and resources for `cogitator deploy` ([Deploy](/docs/deployment/deploy-package))                                              |
+| `deploy`      | Target, server, port, registry, resources, the Fly app and org and the Ollama service for `cogitator deploy` ([Deploy](/docs/deployment/deploy-package))     |
 | `logging`     | `level`, `format`, `destination`, `filePath` of the process-wide logger (see below)                                                                          |
 
 ### Memory
@@ -144,11 +147,12 @@ memory:
     timeZone: Europe/Lisbon # relative dates, when the thread names no metadata.timeZone (default UTC)
     windowTokens: 4000
     activationConfidence: 0.7
+    mode: shadow # every new item stays suggested until activated, apply by default
   compaction:
     at: 0.8
 ```
 
-Their hooks (`afterExtract`, `beforeCompact`, `afterCompact`) are functions, so they are set in code.
+Their hooks (`afterExtract`, `beforeCompact`, `afterCompact`) are functions, so they are set in code. `contextBuilder` without a `strategy` uses `hybrid` when `memory.embedding` is set and `recent` otherwise, see [What Is On by Default](/docs/memory#what-is-on-by-default).
 
 `memory.files` gives every agent the `memory` tool, notes under `/memories` it keeps across conversations, and lists them in each run's context, see [Memory Files](/docs/memory#memory-files). It is off unless set, and `files: {}` turns it on with the defaults:
 

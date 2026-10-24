@@ -1,6 +1,6 @@
 # @cogitator-ai/sandbox
 
-Secure sandbox execution for Cogitator agents. Run untrusted code in isolated Docker containers, WASM modules, or native fallback with resource limits, network isolation, and timeout enforcement.
+Secure sandbox execution for Cogitator agents. Run untrusted code in isolated Docker containers, WASM modules, or native fallback with resource limits, network isolation, and timeout enforcement, and give agents a workspace in a Docker container or in a cloud sandbox on E2B, Daytona or Vercel Sandbox.
 
 ## Installation
 
@@ -10,6 +10,9 @@ pnpm add @cogitator-ai/sandbox
 # Optional peer dependencies
 pnpm add dockerode       # For Docker sandbox
 pnpm add @extism/extism  # For WASM sandbox
+pnpm add e2b             # For E2BWorkspace (2.28.1 or later)
+pnpm add @daytona/sdk    # For DaytonaWorkspace
+pnpm add @vercel/sandbox # For VercelSandboxWorkspace
 ```
 
 ## Quick Start
@@ -40,6 +43,8 @@ if (result.success) {
 - **WASM Sandbox** - Extism-powered WebAssembly execution
 - **Native Fallback** - Optional host execution for Docker tools when Docker is unavailable (`allowNativeFallback`)
 - **Container Pool** - A fresh, pre-started container for every execution
+- **Docker Workspace** - One long-lived container per agent workspace, the project mounted, files guarded on the host
+- **Remote Workspaces** - The whole workspace in an E2B, Daytona or Vercel sandbox, with the same behavior on every provider
 - **Daemon Discovery** - Finds Docker like the `docker` CLI: `DOCKER_HOST`, contexts, Docker Desktop, OrbStack, Colima, Rancher, rootless
 - **Resource Limits** - Memory, CPU, PID limits
 - **Network Isolation** - Disabled by default
@@ -237,6 +242,76 @@ A container only serves requests with identical settings (image, resources, netw
 Pass the same options as `pool` to `SandboxManager`, `DockerSandboxExecutor` or `new Cogitator({ sandbox: { pool } })`.
 
 ---
+
+## Docker Workspace
+
+`DockerWorkspace` is a [workspace](https://cogitator.app/docs/tools/workspace) whose commands run in one long-lived container: created on first use (or in `start()`), kept between commands, removed in `dispose()`. The root of a host workspace (a `LocalWorkspace` from `@cogitator-ai/core`) is bind-mounted at `/workspace`, files are read and written through the host workspace and its path guard (a path under `/workspace` is mapped to the root), `remove` and `rename` run in the container where no symlink reaches the host, and commands run with `docker exec` in the matching directory.
+
+```typescript
+import { Agent, LocalWorkspace, workspaceTools } from '@cogitator-ai/core';
+import { DockerWorkspace } from '@cogitator-ai/sandbox';
+
+const workspace = new DockerWorkspace({
+  host: new LocalWorkspace({ root: './project' }),
+  image: 'node:24-alpine',
+  resources: { memory: '4GB', cpus: 4 },
+});
+try {
+  const agent = new Agent({
+    name: 'coder',
+    instructions: '...',
+    tools: workspaceTools(),
+    workspace,
+  });
+  await cog.run(agent, { input: 'Run the tests and fix what fails' });
+} finally {
+  await workspace.dispose();
+}
+```
+
+The container has the security defaults of the Docker executor, an init process, limits of 2 GB, 2 CPUs and 512 processes unless `resources` sets others, no network unless `network.mode` allows it, and on Linux runs commands as your uid and gid. Each command leads its own process group: a timeout or an abort signals the group (SIGTERM, then SIGKILL after `killGrace`), background and `env -i` processes included, and the container keeps running. A process that calls `setsid` escapes the group until `dispose()`. The image needs `sh`. Starting removes containers of the same root left by a process of this machine that is gone. Without Docker the first command fails with a `WorkspaceError` of code `UNAVAILABLE`, Docker API failures come as code `IO`. `dispose()` also disposes the host workspace.
+
+## Remote Workspaces
+
+`E2BWorkspace`, `DaytonaWorkspace` and `VercelSandboxWorkspace` are [workspaces](https://cogitator.app/docs/tools/remote-workspaces) whose files and commands live in a cloud sandbox: created on first use (or reused by id or name), released in `dispose()`. Each needs its provider's SDK, an optional peer dependency, and credentials:
+
+| Workspace                | Package           | Credentials                                                                   | Default root      |
+| ------------------------ | ----------------- | ----------------------------------------------------------------------------- | ----------------- |
+| `E2BWorkspace`           | `e2b`             | `E2B_API_KEY`                                                                 | `/home/user`      |
+| `DaytonaWorkspace`       | `@daytona/sdk`    | `DAYTONA_API_KEY` (`DAYTONA_API_URL`, `DAYTONA_TARGET`)                       | `/home/daytona`   |
+| `VercelSandboxWorkspace` | `@vercel/sandbox` | Vercel's OIDC token, or `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID` | `/vercel/sandbox` |
+
+```typescript
+import { Agent, workspaceTools } from '@cogitator-ai/core';
+import { E2BWorkspace } from '@cogitator-ai/sandbox';
+
+const workspace = new E2BWorkspace({ root: 'project', lifetime: 30 * 60_000 });
+try {
+  const agent = new Agent({
+    name: 'coder',
+    instructions: '...',
+    tools: workspaceTools(),
+    workspace,
+  });
+  await cog.run(agent, { input: 'Clone the repo and make its tests pass' });
+} finally {
+  await workspace.dispose();
+}
+```
+
+All three are `RemoteShellWorkspace` over a small driver (create or connect, read and write bytes, run a program, release), and everything else runs as shell scripts in the sandbox, so they behave the same:
+
+- Paths are normalized against the root and resolved in the sandbox with `realpath -m`, a symlink out of the root is refused with `OUTSIDE_ROOT`
+- Writes upload to a fresh file of the sandbox's temporary directory and move over the file in one step, keeping its mode, reads go through a private copy in the sandbox's temporary directory and never write the root, `maxFileBytes` caps both
+- `list`, `remove` (with the trash in `.cogitator/trash`) and `rename` follow the `LocalWorkspace` rules, and refuse with `BUSY` while a command runs or kept background processes
+- Commands run under `setsid` in their own process group, with unforgeable marker lines (the token comes on stdin): a timeout returns 124 and kills the group, `background: 'keep'` leaves background processes until `dispose()`
+- `snapshot()`, `restore()`, `listSnapshots()` and `deleteSnapshot()` keep tar archives in `.cogitator/snapshots` inside the sandbox, `.cogitator/**` always excluded, names that are not UTF-8 kept as they are, and `maxSnapshotBytes` (1 GiB) refusing a bigger one with `TOO_LARGE`
+- Reads copy at most one byte over `maxFileBytes` before they download, listings are sorted, cut at `limit` and narrowed by `glob` in the sandbox, and a command that prints more than `maxStreamBytes` (64 MiB) is stopped, because the SDKs keep whole outputs in memory
+- E2B and Vercel sandboxes get a `lifetime` (30 minutes) that the workspace pushes back while it is used
+
+`onDispose` picks what `dispose()` does with the sandbox: `destroy` (default for a created one), `stop` (Daytona and Vercel, the files survive) or `keep` (default for one given by id or name, `stop` for a named Vercel sandbox). The image needs `sh`, GNU coreutils, findutils and tar, and util-linux `setsid`, as the providers' default images have, and `start()` names what is missing. Without the SDK or the credentials the first operation fails with a `WorkspaceError` of code `UNAVAILABLE`. `e2b` needs 2.28.1 or later, and from 2.59 it needs Node.js 22.19 or later. A process that starts a session of its own (`setsid`) escapes the group kill and lives until the sandbox goes. `DaytonaWorkspace` passes `env` in a short-lived file of a private directory, so Daytona's record of the command line never holds the values.
+
+Bring another provider by implementing `RemoteShellDriver` and passing it to `new RemoteShellWorkspace({ driver })`. `shellQuote` and `shellCommand` build a safe shell line from an argv.
 
 ## WASM Executor
 

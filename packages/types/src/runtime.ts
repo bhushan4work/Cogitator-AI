@@ -24,6 +24,8 @@ import type { DeployConfig } from './deploy';
 import type { DecisionBackend } from './decision';
 import type { ContextManagerConfig } from './context';
 import type { RunMiddleware } from './middleware';
+import type { Workspace } from './workspace';
+import type { TodoItem } from './todos';
 import type { LoggingConfig } from './logging';
 import type { ABTestStore, ABTestVariant, InstructionVersionStore } from './prompt-optimization';
 
@@ -72,6 +74,8 @@ export interface RunObserver {
   /** A finished span of the run, with the id of the run it belongs to. */
   onSpan?(span: Span, run: { runId: string }): void;
   onRunComplete?(result: RunResult): void;
+  /** The todo list of the run each time `write_todos` changes it, see `RunOptions.onTodos` */
+  onTodos?(todos: readonly TodoItem[], run: { runId: string }): void;
   /**
    * A run that failed, with what its finished model calls used and cost:
    * a run cut short by its timeout or an abort still spent them.
@@ -162,6 +166,12 @@ export interface CogitatorConfig {
      * application still gets the whole result, in `onToolResult`.
      */
     maxToolResultLength?: number;
+    /**
+     * Milliseconds the full text of long tool results stays in a run's workspace
+     * (`.cogitator/tool-results/<runId>/`, see `RunOptions.workspace`): saving a result removes
+     * the folders of runs older than this. Default: 7 days, `Infinity` keeps them all
+     */
+    toolResultRetention?: number;
   };
   memory?: MemoryConfig;
   /** Sandbox configuration for isolated tool execution */
@@ -237,6 +247,14 @@ export interface RunOptions<TDeps = unknown> {
    * the agent declares its deps type (`new Agent<Deps>(...)`)
    */
   deps?: TDeps;
+  /**
+   * The workspace for this run, instead of the agent's `workspace`: tools get it as
+   * `context.workspace`, and a tool result too long for the model is saved there in full, the
+   * model gets a preview and the path to read the rest from. Like `deps` it is not kept in a
+   * paused run's checkpoint, so pass it again to `resume()`. The run only uses it, whoever
+   * created it starts and disposes it
+   */
+  workspace?: Workspace;
   threadId?: string;
   timeout?: number;
   /** Abort signal for cancelling the run. */
@@ -285,6 +303,11 @@ export interface RunOptions<TDeps = unknown> {
     | Promise<ToolApprovalDecision | 'pause' | undefined>;
   onToolCall?: (call: ToolCall) => void;
   onToolResult?: (result: ToolResult) => void;
+  /**
+   * The agent's todo list each time `write_todos` changes it (`AgentConfig.todos`), the whole
+   * list every time
+   */
+  onTodos?: (todos: readonly TodoItem[]) => void;
 
   /** Enable/disable memory for this run. Default: true if adapter configured */
   useMemory?: boolean;
@@ -433,7 +456,10 @@ export interface ToolInvocationAgent {
   readonly id: string;
   readonly name: string;
   readonly model: string | undefined;
-  readonly config: { readonly middleware?: readonly RunMiddleware[] };
+  readonly config: {
+    readonly middleware?: readonly RunMiddleware[];
+    readonly workspace?: Workspace;
+  };
 }
 
 /** Options of one tool call made outside an agent run, see `ToolInvoker`. */
@@ -468,6 +494,8 @@ export interface ToolInvocationOptions {
    * `deps` for the tool, as a run passes them (`RunOptions.deps`)
    */
   deps?: unknown;
+  /** The workspace the tool gets as `context.workspace` (default: the `agent`'s workspace) */
+  workspace?: Workspace;
   /**
    * Decides a call that needs approval (`requiresApproval`, or the guardrails), as
    * `RunOptions.onApproval` does in a run. Without it `guardrails.onToolApproval` decides. A call
@@ -692,6 +720,11 @@ export interface RunResult {
   readonly reflectionSummary?: ReflectionSummary;
   /** Where the run wrote in the thread's memory, when it wrote anything */
   readonly memory?: RunMemoryPlace;
+  /**
+   * The agent's todo list as the run left it, when the agent keeps one (`AgentConfig.todos`) and
+   * the list was written in this run or an earlier run of the thread
+   */
+  readonly todos?: readonly TodoItem[];
 }
 
 export interface Span {

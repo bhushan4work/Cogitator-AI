@@ -1,5 +1,45 @@
 # @cogitator-ai/workflows
 
+## 0.14.14
+
+### Patch Changes
+
+- Updated dependencies [[`c5539d4`](https://github.com/cogitator-ai/Cogitator-AI/commit/c5539d41dc8611d9d8fae77a8e2b35f948f68bd1)]:
+  - @cogitator-ai/types@0.73.0
+  - @cogitator-ai/core@0.63.1
+
+## 0.14.13
+
+### Patch Changes
+
+- Updated dependencies [[`7d96a55`](https://github.com/cogitator-ai/Cogitator-AI/commit/7d96a55a376770d0cce4d1d220fdad53f493b5bd)]:
+  - @cogitator-ai/types@0.72.0
+  - @cogitator-ai/core@0.63.0
+
+## 0.14.12
+
+### Patch Changes
+
+- Updated dependencies [[`a19a0d6`](https://github.com/cogitator-ai/Cogitator-AI/commit/a19a0d6c3d1dfd281e336dea6e5307b20af1a34b)]:
+  - @cogitator-ai/core@0.62.0
+  - @cogitator-ai/types@0.71.0
+
+## 0.14.11
+
+### Patch Changes
+
+- Updated dependencies [[`213e3fb`](https://github.com/cogitator-ai/Cogitator-AI/commit/213e3fba0f0ed9a1290fdd1499dd4a0e4101b6e2)]:
+  - @cogitator-ai/types@0.70.0
+  - @cogitator-ai/core@0.61.1
+
+## 0.14.10
+
+### Patch Changes
+
+- Updated dependencies [[`091fa9e`](https://github.com/cogitator-ai/Cogitator-AI/commit/091fa9e659341bc0f39344e46ec0c56ba0338f83)]:
+  - @cogitator-ai/types@0.69.0
+  - @cogitator-ai/core@0.61.0
+
 ## 0.14.9
 
 ### Patch Changes

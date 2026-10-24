@@ -1,0 +1,216 @@
+---
+title: Workspace
+description: Give an agent one directory to work in, with file tools and commands that cannot leave it, locally, in a Docker container or in a cloud sandbox, and long tool results saved there instead of lost.
+---
+
+## Overview
+
+A `Workspace` is the directory an agent works in. It reads, writes, lists and runs commands, and every path it takes is relative to its root: `..`, an absolute path elsewhere and a symlink that points out are refused with a `WorkspaceError` of code `OUTSIDE_ROOT`.
+
+These implementations ship:
+
+- `LocalWorkspace` from `@cogitator-ai/core`: a directory of this machine, commands run as your process.
+- `DockerWorkspace` from `@cogitator-ai/sandbox`: the same files, commands run in one long-lived container.
+- `E2BWorkspace`, `DaytonaWorkspace` and `VercelSandboxWorkspace` from `@cogitator-ai/sandbox`: files and commands in a cloud sandbox, see [Remote Workspaces](/docs/tools/remote-workspaces).
+
+Hand a workspace to an agent (or to one run) and the tools get it as `context.workspace`. `workspaceTools()` gives the agent `read_file`, `write_file`, `edit_file`, `list_files`, `glob`, `grep` and `run_command` on top of it.
+
+```typescript
+import { Agent, Cogitator, LocalWorkspace, workspaceTools } from '@cogitator-ai/core';
+
+const workspace = new LocalWorkspace({ root: './project' });
+
+const coder = new Agent({
+  name: 'coder',
+  model: 'anthropic/claude-sonnet-5-5',
+  instructions: 'You fix bugs in the project. Read files before you edit them.',
+  tools: workspaceTools(),
+  workspace,
+});
+
+const cog = new Cogitator();
+await cog.run(coder, { input: 'The parser test fails, find out why and fix it' });
+
+await workspace.dispose();
+```
+
+## Lifecycle
+
+Whoever creates a workspace owns it and calls `dispose()` when done: it kills what commands left running and, for `DockerWorkspace`, removes the container (a remote workspace releases its sandbox). Every workspace starts itself on first use. Call `start()` ahead of time to surface errors early (a missing root, no Docker) or to keep the image pull out of the first command. The runtime only uses the workspace it is given, it never starts or disposes one.
+
+## Agent or run
+
+`AgentConfig.workspace` is the agent's default, `RunOptions.workspace` replaces it for one run, which is how one agent serves many projects or users:
+
+```typescript
+await cog.run(coder, { input: 'Bump the version', workspace: workspaceFor(user) });
+```
+
+After a handoff, the agent the run went on as brings its own workspace, unless the run set one. An agent called as a tool (`agentAsTool`) gets the caller's workspace unless it has its own. `invokeTool(tool, args, { workspace })` passes one to a tool called outside a run. Middleware hooks see the run's workspace as `context.workspace`. Like `deps`, a workspace is not kept in a paused run's checkpoint, so pass it again to `resume()`.
+
+## The interface
+
+| Member                                                   | What it does                                                                                    |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `id`, `root`, `cwd`                                      | Stable id, absolute root, current directory relative to the root (`.` by default)               |
+| `start()`, `dispose()`                                   | Prepare (optional) and release, both idempotent                                                 |
+| `withCwd(cwd)`                                           | The same workspace (id, files, container) with another current directory                        |
+| `contains(path)`                                         | Whether a path lies inside the root once symlinks are followed, never throws                    |
+| `read`, `readBytes`, `write`                             | Text (UTF-8) or bytes of regular files, with a size limit (`maxBytes`)                          |
+| `list(path, { recursive, glob, ... })`                   | Entries with type, size and modification time, symlinked directories listed but not entered     |
+| `stat`, `exists`, `mkdir`, `rename`                      | What their names say, `rename` refuses to replace an entry unless `overwrite` is set            |
+| `remove(path, { recursive, trash })`                     | Deletes, or with `trash: true` moves the entry to `.cogitator/trash/<time>/` inside the root    |
+| `exec(command, options)`                                 | A shell command in `cwd` or `options.cwd`, streaming `onStdout`/`onStderr`, `timeout`, `signal` |
+| `snapshot`, `restore`, `listSnapshots`, `deleteSnapshot` | Optional: record the files and go back to them                                                  |
+
+`exec` resolves with `{ stdout, stderr, exitCode, timedOut, truncated, durationMs }`, also for a non-zero exit or a timeout (exit code 124), and rejects with code `ABORTED` when its signal aborts. A timeout or an abort sends SIGTERM to the command's process group, then SIGKILL. The call returns when the command itself exits, even when a process it started in the background (`server &`) still holds its output open: with `background: 'kill'` (the default) the rest of the group is stopped then, with `background: 'keep'` it runs on until `dispose()`, its output no longer read, so redirect it (`server > server.log 2>&1 &`).
+
+Every failure is a `WorkspaceError` with a `code`: `OUTSIDE_ROOT`, `NOT_FOUND`, `NOT_A_FILE`, `NOT_A_DIRECTORY`, `EXISTS`, `NOT_EMPTY`, `TOO_LARGE`, `INVALID_PATH`, `NOT_STARTED`, `DISPOSED`, `UNAVAILABLE`, `ABORTED`, `DENIED` (the system or a policy refused it, such as missing permissions), `BUSY` (a `LocalWorkspace` refuses `remove` and `rename` while a command it started is still running or left processes in the background), `UNSUPPORTED` or `IO`.
+
+```typescript
+import { WorkspaceError } from '@cogitator-ai/core';
+
+try {
+  await workspace.read('../secrets.env');
+} catch (error) {
+  if (WorkspaceError.is(error, 'OUTSIDE_ROOT')) console.log('refused');
+}
+```
+
+The workspace keeps its own files in `.cogitator/` inside the root (trash, saved tool results, entries being moved), with a `.gitignore` that keeps all of it out of git. `.cogitator` itself and `.cogitator/pending` cannot be written, moved or removed through the workspace.
+
+## LocalWorkspace
+
+```typescript
+const workspace = new LocalWorkspace({
+  root: './project',
+  cwd: 'packages/api', // commands run here by default
+  maxFileBytes: 5 * 1024 * 1024,
+  exec: {
+    timeout: 60_000,
+    maxOutputBytes: 512 * 1024,
+    env: { CI: 'true' },
+    inheritEnv: ['PATH', 'HOME', 'NODE_OPTIONS'],
+  },
+});
+```
+
+| Option                | Default                   | What it does                                                                  |
+| --------------------- | ------------------------- | ----------------------------------------------------------------------------- |
+| `root`                | required                  | The directory the workspace is confined to                                    |
+| `cwd`                 | `.`                       | Current directory, relative to the root                                       |
+| `create`              | `true`                    | Create the root when missing                                                  |
+| `maxFileBytes`        | 10 MiB                    | Largest file `read` and `write` accept                                        |
+| `refuseHardLinks`     | `false`                   | Refuse to read files with more than one hard link (code `DENIED`)             |
+| `exec.shell`          | `/bin/sh`                 | The shell commands run with (`cmd.exe /d /s /c` on Windows without one)       |
+| `exec.timeout`        | 120000                    | Milliseconds before a command is stopped                                      |
+| `exec.killGrace`      | 2000                      | Milliseconds between SIGTERM and SIGKILL                                      |
+| `exec.maxOutputBytes` | 1 MiB                     | Bytes of stdout and of stderr a result keeps                                  |
+| `exec.env`            | none                      | Variables every command gets                                                  |
+| `exec.inheritEnv`     | `WORKSPACE_INHERITED_ENV` | What commands inherit from your environment, `true` for all of it             |
+| `exec.launch`         | none                      | Changes what is spawned, e.g. to run commands under `sandbox-exec` or `bwrap` |
+
+By default a command inherits only what a shell needs (`PATH`, `HOME`, the locale and a few more, see `WORKSPACE_INHERITED_ENV`), so the API keys in your environment do not reach commands the model writes. `HOME` is passed, so a command can still read what your home directory holds, such as `~/.ssh` and `~/.aws`: run untrusted commands in a `DockerWorkspace`.
+
+Each command runs in a process group of its own. A timeout or an abort stops the whole group, also background processes the shell already left behind, and `dispose()` kills every group the workspace started that still has processes. A process that starts a new session (`setsid`) leaves the group. On Windows there are no process groups: only the command itself is killed.
+
+### How paths are guarded
+
+A path is resolved with every symlink followed, a dangling one too (writing through a dangling link would create its target), and refused when it lands outside the root. A symlink a command creates is refused like any other.
+
+- Only regular files are read or written: a FIFO, a socket or a device is refused before it is opened, and files are opened with `O_NONBLOCK`, so nothing can hang a read.
+- Files are opened with `O_NOFOLLOW` and checked again once open: the path must still resolve inside the root, to the very file that was opened. A symlink swapped in between the check and the open is caught, for the file and for a parent directory.
+- Writes go to a temporary file in the same directory, flushed to disk, which is then renamed over the target, keeping its mode. A crash never leaves half a file (a leftover temporary file, a regular file with one link untouched for `leftoverAge`, one hour by default, is removed when a workspace starts), and a hard link to a file outside the root is replaced instead of written through (the other links keep the old content, and the owner of the new file is your process). A read-only file is refused with code `DENIED` unless the write passes `force`.
+- `remove` and `rename` refuse with code `BUSY` while a command the workspace started is running or left processes behind, since such a process can write the root and could swap directories at the right moment.
+- `remove` and `rename` first move the entry into `.cogitator/pending/` and check it is the entry they resolved. When a parent directory was swapped for a symlink in between, the entry that was moved instead (possibly from outside the root) is not moved again to a path that would have to be resolved anew, which the same change could steer: it stays quarantined in `.cogitator/pending/`, the error names where, and a warning is logged. An entry is never deleted by a refused move, and a quarantined one is readable by every process that can read the root.
+- An entry never lands on top of another one: it goes to a fresh random name in the verified target directory, the directory is checked again, and it takes its final name with a hard link (or a new symlink, or a rename only onto nothing for a directory), so a target directory swapped for a symlink never gets an outside file replaced. `rename` with `overwrite` first moves the old target aside the same way and deletes it only once the move succeeded. An entry left under its random name by a crash is never deleted: when the workspace starts and it is older than `leftoverAge`, it is moved into `.cogitator/pending/recovered-*` and logged.
+- An entry on another device than the root (a mount inside it) cannot be moved aside: `remove` then checks the parent and the entry again right before deleting it, a narrower guarantee, and `rename` refuses with code `UNSUPPORTED`.
+
+What the guard does not stop:
+
+- A process outside the workspace that can write the root and swaps a directory for a symlink twice at the right moments, once before a move and back right after it, can carry a staged entry out of the root under its random name. The call fails and says so, but the entry stays where the symlink pointed.
+
+- Reading a hard link to a file outside the root: it is that file, hard links cannot be told from the original. `refuseHardLinks: true` refuses every file with more than one link, which also makes pnpm's `node_modules` (hard-linked to its store) unreadable.
+- A race that swaps a parent directory for a symlink right before `mkdir` can leave an empty directory outside the root, never content.
+- A recursive `remove` deletes the moved-aside directory with Node's `rm`, which a process changing that very tree at the same moment could still redirect. `DockerWorkspace` removes inside the container, where no symlink reaches the host.
+- `exec` runs as your process, only its directory is confined: `cat /etc/passwd` works. Use `DockerWorkspace` for commands you do not trust.
+
+### Snapshots
+
+`LocalWorkspace` does not implement snapshots. Copying the tree for every checkpoint is too slow for real projects, so they wait for a content-addressed store that keeps each version of a file once. Remote workspaces implement them as tar archives inside their sandbox, see [Remote Workspaces](/docs/tools/remote-workspaces#same-behavior-on-every-provider). The interface is ready for a checkpoint per user message: `snapshot({ label, metadata, exclude })` returns an `id`, the `workspaceId`, `createdAt` and the globs it left out (`.cogitator/**` by default, so restoring never wipes the trash or saved results), and `listSnapshots()` and `deleteSnapshot(id)` manage what is kept.
+
+## DockerWorkspace
+
+`DockerWorkspace` runs commands in a container while the files stay on your machine: the root of a host workspace is bind-mounted at `/workspace`, files are read and written through the host workspace (so its guard applies), and commands run with `docker exec` in the matching directory of the container. Paths under `/workspace`, as commands print them, are taken as the same paths under the root.
+
+```typescript
+import { LocalWorkspace } from '@cogitator-ai/core';
+import { DockerWorkspace } from '@cogitator-ai/sandbox';
+
+const workspace = new DockerWorkspace({
+  host: new LocalWorkspace({ root: './project' }),
+  image: 'node:24-alpine',
+  resources: { memory: '4GB', cpus: 4 },
+  network: { mode: 'bridge' }, // default: no network
+});
+try {
+  await cog.run(coder, { input: 'Run the tests and fix what fails', workspace });
+} finally {
+  await workspace.dispose();
+}
+```
+
+One container serves the whole workspace: created on first use (or in `start()`), kept between commands (installed packages and build output stay), and removed in `dispose()`, which also disposes the host workspace it owns. It has the [sandbox defaults](/docs/deployment/sandbox#security-defaults) (no capabilities, no new privileges, no network unless `network` allows it), an init process that reaps killed commands, and limits of 2 GB, 2 CPUs and 512 processes unless `resources` says otherwise. On Linux commands run as your uid and gid, so the files they write stay yours. When it starts, it removes containers of the same root that a process of this machine (same host name, boot and PID namespace) left behind and that is gone (a crash, a kill). Without Docker, the first command (or `start()`) fails with code `UNAVAILABLE`, and errors of the Docker API come as code `IO`.
+
+`remove` and `rename` run in the container (`rm`, `rmdir`, `mv -T`), where a symlink a command plants cannot reach the host, while reads and writes go through the host workspace and its guard. Each command runs as the leader of its own process group in the container, which a small `sh` wrapper reports with a marker line on stderr, taken out again wherever it appears. The token that makes the markers unforgeable reaches the wrapper on stdin, so it is in no argv or environment the command can read. A timeout or an abort signals that group with the container's own `kill` (SIGTERM, then SIGKILL after `killGrace`), so background processes and processes with a cleared environment (`env -i`) go too, and the call returns at most `killGrace` plus a second later. `background` works as for `LocalWorkspace`. A process that starts a new session (`setsid`) escapes and lives on until `dispose()`. The image needs `sh`: distroless images without a shell cannot run commands.
+
+| Option           | Default                     | What it does                                 |
+| ---------------- | --------------------------- | -------------------------------------------- |
+| `host`           | required                    | The workspace whose root is mounted          |
+| `image`          | `alpine:3.19`               | Image of the container, pulled when missing  |
+| `workdir`        | `/workspace`                | Where the root is mounted                    |
+| `resources`      | 2 GB, 2 CPUs, 512 processes | `memory`, `cpus`, `cpuShares`, `pidsLimit`   |
+| `network`        | `{ mode: 'none' }`          | `mode` and `dns`, `allowedHosts` is refused  |
+| `mounts`         | none                        | More bind mounts                             |
+| `env`, `user`    | none, your uid on Linux     | Environment and user of commands             |
+| `docker`         | the CLI's socket            | How to reach the daemon                      |
+| `timeout`        | 120000                      | Milliseconds before a command is stopped     |
+| `killGrace`      | 2000                        | Milliseconds between SIGTERM and SIGKILL     |
+| `maxOutputBytes` | 1 MiB                       | Bytes of stdout and of stderr a result keeps |
+
+## workspaceTools
+
+`workspaceTools(workspace?, options?)` returns the tools. Each call uses the workspace passed here, else the run's (`context.workspace`), and fails with a clear error when there is none, so one tool set serves every workspace. Their names differ from the global `file_read`, `file_write` and `exec` [built-in tools](/docs/tools/built-in), which reach the whole file system, so both sets can be registered side by side.
+
+| Tool          | What it does                                                                                                                                                                                                                                                                                                                        |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `read_file`   | Text by line range: `offset` (1-based) and `limit` (default 2000 lines), at most 80,000 characters. `nextOffset` says where to go on, with `nextColumn` (passed back as `column`) inside a line too long for one page. Lines come without their endings, `lineEndings` says when they are CRLF                                      |
+| `write_file`  | Replaces a file's content, creating it and its directories                                                                                                                                                                                                                                                                          |
+| `edit_file`   | Replaces `oldString` with `newString`, which must appear exactly once unless `replaceAll` is set. In a CRLF file the strings are written with plain newlines and the CRLF endings are kept. Binary files and files that are not UTF-8 are refused                                                                                   |
+| `list_files`  | A directory's entries, optionally recursive, at most 1000                                                                                                                                                                                                                                                                           |
+| `glob`        | Files matching a pattern such as `**/*.ts`, at most 1000                                                                                                                                                                                                                                                                            |
+| `grep`        | Lines matching a regular expression, at most `maxMatches`. Binary files, files over 1 MiB and hidden files (unless `includeHidden`) are skipped. Each line is matched whole, in a worker thread with `grepTimeout` per file, so a pattern that backtracks catastrophically, such as `(a+)+$`, fails instead of blocking the process |
+| `run_command` | A shell command through `workspace.exec`, stopped when the run is cancelled. `background: true` keeps what it starts with `&` running                                                                                                                                                                                               |
+
+| Option            | Default                | What it does                                              |
+| ----------------- | ---------------------- | --------------------------------------------------------- |
+| `tools`           | all                    | Only these tools, e.g. all but `run_command`              |
+| `requireApproval` | `run_command` only     | Which tools wait for an [approval](/docs/tools/approvals) |
+| `skipDirs`        | `.git`, `node_modules` | Directories `list_files`, `glob` and `grep` skip          |
+| `execTimeout`     | the workspace's        | Timeout of `run_command` when the call sets none          |
+| `grepTimeout`     | 5000                   | Milliseconds `grep` may spend on one file                 |
+
+```typescript
+const reviewed = workspaceTools(undefined, {
+  tools: ['read_file', 'list_files', 'glob', 'grep', 'write_file', 'edit_file'],
+  requireApproval: (name) => name === 'write_file' || name === 'edit_file',
+});
+```
+
+`restrictFileTools` and the global file tools stay as they are. The workspace tools are a factory, like the memory tools, not part of `builtinTools`.
+
+## Long tool results
+
+A tool result longer than the tool's `maxResultLength` (or `limits.maxToolResultLength`, 100,000 characters by default) is cut for the model. When the agent has the `read_file` of `workspaceTools()`, the full text is saved first, to the workspace that `read_file` reads (the one it was bound to, else the run's), to `.cogitator/tool-results/<runId>/<toolCallId>.txt` (ids made safe for a file name, with a short hash when they had to change), and the model gets the cut preview with a note naming the file and telling it how to page through it. `toolResultPath(runId, toolCallId)` gives the same path in your code.
+
+Saved results can hold whatever tools returned, secrets included: `.cogitator/` is ignored by git, and saving a result removes the results of runs older than `limits.toolResultRetention` (7 days by default, `Infinity` keeps them). Without such a workspace, or with a `read_file` of another origin (whose reach cannot be told), the result is only cut, and when saving fails the result is only cut, with a warning in the log. See [context management](/docs/advanced/context-management#long-tool-results).

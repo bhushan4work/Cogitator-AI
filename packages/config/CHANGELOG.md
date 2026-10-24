@@ -1,5 +1,62 @@
 # @cogitator-ai/config
 
+## 0.26.0
+
+### Minor Changes
+
+- [#292](https://github.com/cogitator-ai/Cogitator-AI/pull/292) [`c5539d4`](https://github.com/cogitator-ai/Cogitator-AI/commit/c5539d41dc8611d9d8fae77a8e2b35f948f68bd1) - An Ollama container in the Docker deployment of a project with local models, `cogitator deploy logs`, and the Fly app and organization in the deploy config.
+
+  Behavior change: a docker deployment whose models run on a local Ollama used to reach the Ollama of the Docker host through `host.docker.internal`. From this release its next deploy runs an Ollama container next to the app instead and downloads the models into it on the first start, which takes as long as the download. Set `deploy.services.ollama: false` to keep reaching the Ollama of the host.
+
+  - When the project's models run on a local Ollama, the docker target's Compose file runs an `ollama` service on `ollama/ollama:0.40.10`, with the models in the `ollama-data` volume and a health check. The roles are looked at one by one, in the environment the deployment gets (`deploy.env` included): the chat models the runtime uses (`llm.defaultModel`, `context.summaryModel` unless context is off, the models of the memory stages that are set, `reflection.reflectionModel` with reflection on, `guardrails.model` unless guardrails are off, `security.promptInjection.llmModel` with `classifier: llm`) and the embeddings of `memory.embedding` with `provider: ollama` (`nomic-embed-text` unless `memory.embedding.model` names another). Ollama Cloud models (a `:cloud` tag, or an API key without a URL) belong to the chat role and are never pulled. A role whose Ollama URL points beyond this machine keeps it, the variables it follows are forwarded (`GPU_OLLAMA` for `baseUrl: ${GPU_OLLAMA}`), and only the local roles move to the container. With `llm.defaultProvider: ollama` and no model in the config there is nothing to pull, so the app reaches the Ollama of the host with a warning unless `deploy.ollama.models` lists the models. A one-shot `ollama-pull` service pulls their models before the app starts: each model is an argument after `--`, never part of the script, and one the volume has already is skipped, so a restart without network still starts. A model name `ollama pull` would refuse or read as a flag fails preflight. A failed download fails the deploy with the last lines of the job, and the CLI says that the first start downloads the models. Redis and Postgres stay as they were.
+  - A local chat role gets `COGITATOR_OLLAMA_BASE_URL`, `OLLAMA_BASE_URL`, `OLLAMA_URL` and `OLLAMA_HOST` set to `http://ollama:11434`, also when one of them was detected as a secret with a localhost value. Local embeddings get the variables their `memory.embedding.baseUrl` follows, such as `${OLLAMA_EMBEDDING_URL:-http://localhost:11434}`, with the whole URL or only the host for a variable that is the host part, checked to give the service URL, else left alone with a warning. A variable another provider's settings reference is never rewritten, and a variable is set only when it moves no role that stays remote, and the analyzer warns when the embeddings cannot reach the container or when `services.ollama: true` runs one no model uses.
+  - `deploy.services.ollama` turns the container on or off. Off, the local roles reach the Ollama of the Docker host through `host.docker.internal` as before, each on the port of its own local URL, and a warning lists the models to pull there. The keys of `deploy.services` replace the detected ones one by one, so the opt-out keeps Redis and Postgres detected from the memory adapter. `deploy.ollama` sets the `models` to pull (the detected ones when unset, models agents name in code are not detected), `gpu: true` to reserve the NVIDIA GPUs of the host and the `image`. On Fly the analyzer warns when Ollama models or `services.ollama` have no Ollama to run on.
+  - `cogitator deploy logs [service]` shows the logs of the deployment: `docker compose logs` of the deployed stack on the docker target (`-f, --follow`, `-n, --tail`, 100 lines by default, `--timestamps`, one service such as `app` or `ollama-pull`), `flyctl logs --app <app>` on Fly (`--no-tail` unless following). The commands are built as argument lists, a service name or tail that would read as a flag is refused, flags that do not apply to an action (or to Fly) are usage errors, and a logs command stopped by a signal exits with 128 plus its number. `Deployer.logsCommand()` resolves to the command for custom pipelines, and the optional `DeployProvider.logsCommand()` may return it or a promise of it.
+  - `loadConfig({ env })` reads the `${VAR}` references of the file, the `COGITATOR_*` variables and the shared Ollama variables from `env` instead of `process.env`, and `loadEnvConfig(env)` and `loadEnvDefaults(env)` take it too. The deploy analyzer loads the config this way in exactly the environment the app container gets (`deploy.env`, the forwarded secrets and the Ollama variables it sets), and forwards the variables the config reads that are set (`${VAR}` references and `COGITATOR_*` overrides such as `COGITATOR_LLM_DEFAULT_MODEL`), so the app asks for the models the deployment pulled. `configOverrides.ollama` merges into `deploy.ollama` field by field.
+  - `deploy.app` names the Fly app, the image name stays the fallback, and `deploy.org` creates a new app with `fly apps create --org <org>`. The config schema and Fly preflight refuse an app name Fly would refuse (lowercase letters, digits and dashes, starting and ending with a letter or digit, 63 characters at most) and an organization that is not a slug. `isFlyAppName`, `isFlyOrgSlug` and `isOllamaModelName` are exported from `@cogitator-ai/types`.
+  - The README of a project from `create-cogitator-app` whose docker deployment gets an Ollama container says that it runs and fills its own Ollama.
+
+### Patch Changes
+
+- Updated dependencies [[`c5539d4`](https://github.com/cogitator-ai/Cogitator-AI/commit/c5539d41dc8611d9d8fae77a8e2b35f948f68bd1)]:
+  - @cogitator-ai/types@0.73.0
+
+## 0.25.1
+
+### Patch Changes
+
+- Updated dependencies [[`7d96a55`](https://github.com/cogitator-ai/Cogitator-AI/commit/7d96a55a376770d0cce4d1d220fdad53f493b5bd)]:
+  - @cogitator-ai/types@0.72.0
+
+## 0.25.0
+
+### Minor Changes
+
+- [#288](https://github.com/cogitator-ai/Cogitator-AI/pull/288) [`a19a0d6`](https://github.com/cogitator-ai/Cogitator-AI/commit/a19a0d6c3d1dfd281e336dea6e5307b20af1a34b) - Memory defaults chosen on the memory benchmarks, and a shadow mode for extraction.
+
+  - Behavior change: `memory.contextBuilder` without a `strategy` now uses `hybrid` when `memory.embedding` is set, and `recent` otherwise as before. A runtime with embeddings and no strategy keeps the newest turns as history and also recalls the earlier turns and memory items that match the turn, which embeds every message of a thread once, in the background. On seven long-memory datasets `hybrid` averaged 44.9% against 18.0% for `recent`, as much as `relevant` at three quarters of its cost. A `strategy` you set is kept, so set `strategy: 'recent'` to keep the old behavior.
+  - `memory.extraction.mode` (types, core, config): `apply` by default, or `shadow`, which writes every new item as `suggested`, so it reaches no context, no recall and no fact until it is reviewed (`MemoryItems.query` with `statuses: ['suggested']`) and activated (`MemoryItems.activate`). It is `MemoryItems({ shadow: true })` (memory), which also leaves the confidence of other opinions alone. Extraction stays off by default and the docs recommend starting with `shadow`. Compaction stays off by default too.
+  - Scaffolded projects with a lasting store (`sqlite`, `postgres`, `redis`, `mongodb`) get long-term memory in `cogitator.yml`: the provider's embedding model in `memory.embedding` with the `hybrid` strategy (`recent` with Anthropic, which has no embedding model), and `memory.files` for the agents' notes. On Ollama the embedding model is pulled with the chat model. The `assistant` preset is among them. Only Postgres keeps the vectors: on SQLite, Redis and MongoDB the message index lives in the process, so after a restart (`cogitator dev` restarts on every change) each thread's messages are embedded again the first time it is used, one embedding per message. That cost is cents beside the gain of `hybrid`, so those templates keep it, and the generated AGENTS.md says so.
+
+### Patch Changes
+
+- Updated dependencies [[`a19a0d6`](https://github.com/cogitator-ai/Cogitator-AI/commit/a19a0d6c3d1dfd281e336dea6e5307b20af1a34b)]:
+  - @cogitator-ai/types@0.71.0
+
+## 0.24.8
+
+### Patch Changes
+
+- Updated dependencies [[`213e3fb`](https://github.com/cogitator-ai/Cogitator-AI/commit/213e3fba0f0ed9a1290fdd1499dd4a0e4101b6e2)]:
+  - @cogitator-ai/types@0.70.0
+
+## 0.24.7
+
+### Patch Changes
+
+- Updated dependencies [[`091fa9e`](https://github.com/cogitator-ai/Cogitator-AI/commit/091fa9e659341bc0f39344e46ec0c56ba0338f83)]:
+  - @cogitator-ai/types@0.69.0
+
 ## 0.24.6
 
 ### Patch Changes

@@ -1,0 +1,532 @@
+import {
+  WorkspaceError,
+  workspaceGlobMatcher,
+  type Tool,
+  type ToolContext,
+  type Workspace,
+} from '@cogitator-ai/types';
+import { z } from 'zod';
+import { tool } from '../tool';
+import { RegexWorker } from './regex-worker';
+
+const DEFAULT_READ_LINES = 2000;
+const READ_CHAR_BUDGET = 80_000;
+const MAX_LIST_ENTRIES = 1000;
+const MAX_GLOB_RESULTS = 1000;
+const DEFAULT_GREP_MATCHES = 200;
+const MAX_GREP_MATCHES = 2000;
+const MAX_GREP_FILES = 5000;
+const MAX_GREP_FILE_BYTES = 1024 * 1024;
+const MAX_GREP_SCANNED_BYTES = 50 * 1024 * 1024;
+const MAX_GREP_LINE_SHOWN = 500;
+const BINARY_SNIFF_BYTES = 8192;
+const DEFAULT_GREP_TIMEOUT = 5_000;
+const DEFAULT_SKIP_DIRS = ['.git', 'node_modules'];
+
+/** The `read_file` tools `workspaceTools()` made, with the workspace each was bound to (if any). */
+const readFileBindings = new WeakMap<Tool, { workspace?: Workspace }>();
+
+/**
+ * Which workspace a `read_file` tool reads: `{ workspace }` for one `workspaceTools()` made (its
+ * bound workspace, or `undefined` when it reads the run's), `undefined` for any other tool,
+ * whose reach cannot be told.
+ */
+export function readFileBinding(tool: Tool): { workspace?: Workspace } | undefined {
+  return readFileBindings.get(tool);
+}
+
+/** Names of the tools `workspaceTools()` returns. */
+export const WORKSPACE_TOOL_NAMES = [
+  'read_file',
+  'write_file',
+  'edit_file',
+  'list_files',
+  'glob',
+  'grep',
+  'run_command',
+] as const;
+
+export type WorkspaceToolName = (typeof WORKSPACE_TOOL_NAMES)[number];
+
+export interface WorkspaceToolsOptions {
+  /**
+   * Which tools must be approved before they run. Default: `run_command`, the tool that can do
+   * anything a shell can. Return `true` for `write_file` and `edit_file` too to review every
+   * change
+   */
+  requireApproval?: (name: WorkspaceToolName) => boolean;
+  /** Directory names `list_files`, `glob` and `grep` do not descend into (default: `.git`, `node_modules`) */
+  skipDirs?: readonly string[];
+  /** Only these tools, e.g. everything but `run_command` for an agent that should not run commands (default: all) */
+  tools?: readonly WorkspaceToolName[];
+  /** Milliseconds `run_command` lets a command run when the call sets none (default: the workspace's timeout) */
+  execTimeout?: number;
+  /**
+   * Milliseconds `grep` may spend on one file before it stops, so a pattern that backtracks
+   * catastrophically fails instead of running on (default: 5000). Matching runs in a worker
+   * thread, so it never blocks other runs
+   */
+  grepTimeout?: number;
+}
+
+/**
+ * Tools that work in a workspace: `read_file` (with line ranges), `write_file`, `edit_file`
+ * (exact replacement of a unique string), `list_files`, `glob`, `grep` and `run_command`. Each
+ * call uses `workspace` when given, else the run's (`context.workspace`, from
+ * `RunOptions.workspace` or the agent's `workspace`), and fails with a clear error when there is
+ * none. Paths are relative to the workspace root and cannot leave it. Their names differ from
+ * the global `file_read`, `file_write` and `exec` built-in tools, which reach the whole file
+ * system, so both sets can be registered side by side.
+ *
+ * @example
+ * ```ts
+ * const workspace = new LocalWorkspace({ root: './project' });
+ * const agent = new Agent({ name: 'coder', instructions: '...', tools: workspaceTools(), workspace });
+ * ```
+ */
+export function workspaceTools(workspace?: Workspace, options: WorkspaceToolsOptions = {}): Tool[] {
+  const needsApproval = options.requireApproval ?? ((name) => name === 'run_command');
+  const skipDirs = options.skipDirs ?? DEFAULT_SKIP_DIRS;
+  const resolveWorkspace = (context: ToolContext): Workspace => {
+    const found = workspace ?? context.workspace;
+    if (!found) {
+      throw new Error(
+        'No workspace: pass one to workspaceTools(), the agent (workspace) or the run (RunOptions.workspace)'
+      );
+    }
+    return found;
+  };
+  const approval = (name: WorkspaceToolName) =>
+    needsApproval(name) ? { requiresApproval: true } : {};
+
+  const readFile = tool({
+    name: 'read_file',
+    description: `Read a text file of the workspace, by line range. Paths are relative to the workspace root. Returns up to ${DEFAULT_READ_LINES} lines from \`offset\` (1-based line number, default 1), at most ${READ_CHAR_BUDGET} characters, and \`nextOffset\` (with \`nextColumn\` inside a very long line) when more follows: call again with them to continue. Lines are shown without their line endings.`,
+    parameters: z.object({
+      path: z.string().min(1).describe('File path relative to the workspace root'),
+      offset: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe('First line to read, 1-based (default: 1)'),
+      column: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe(
+          'Character of the first line to start at, 1-based, to continue a long line (default: 1)'
+        ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(10_000)
+        .optional()
+        .describe(`Number of lines to read (default: ${DEFAULT_READ_LINES})`),
+    }),
+    category: 'file',
+    ...approval('read_file'),
+    execute: async ({ path, offset = 1, column = 1, limit = DEFAULT_READ_LINES }, context) => {
+      const ws = resolveWorkspace(context);
+      const bytes = await call(() => ws.readBytes(path));
+      if (looksBinary(bytes)) throw new Error(`${path} is a binary file`);
+      const text = Buffer.from(bytes).toString('utf8');
+      const lines = splitLines(text);
+      const totalLines = lines.length;
+      if (offset > Math.max(totalLines, 1)) {
+        throw new Error(`${path} has ${totalLines} lines, offset ${offset} is past the end`);
+      }
+      const first = lines[offset - 1] ?? '';
+      if (column > first.length + 1) {
+        throw new Error(
+          `Line ${offset} of ${path} has ${first.length} characters, column ${column} is past its end`
+        );
+      }
+
+      const picked: string[] = [];
+      let chars = 0;
+      let next: { offset: number; column?: number } | undefined;
+      const last = Math.min(totalLines, offset - 1 + limit);
+      for (let i = offset - 1; i < last; i++) {
+        const start = i === offset - 1 ? column - 1 : 0;
+        const rest = lines[i].slice(start);
+        const room = READ_CHAR_BUDGET - chars - (picked.length > 0 ? 1 : 0);
+        if (rest.length <= room) {
+          picked.push(rest);
+          chars += rest.length + (picked.length > 1 ? 1 : 0);
+          continue;
+        }
+        if (picked.length > 0) {
+          next = { offset: i + 1 };
+        } else {
+          const piece = rest.slice(0, cutAt(rest, room));
+          picked.push(piece);
+          next = { offset: i + 1, column: start + piece.length + 1 };
+        }
+        break;
+      }
+      if (!next && last < totalLines) next = { offset: last + 1 };
+      const endings = lineEndings(text);
+      return {
+        path,
+        content: picked.join('\n'),
+        startLine: offset,
+        ...(column > 1 && { startColumn: column }),
+        endLine: offset - 1 + picked.length,
+        totalLines,
+        ...(next && { nextOffset: next.offset }),
+        ...(next?.column !== undefined && { nextColumn: next.column }),
+        ...(endings !== 'lf' && { lineEndings: endings }),
+      };
+    },
+  });
+
+  const writeFile = tool({
+    name: 'write_file',
+    description:
+      'Write a text file in the workspace, replacing its content, creating it and its parent directories when missing. Paths are relative to the workspace root.',
+    parameters: z.object({
+      path: z.string().min(1).describe('File path relative to the workspace root'),
+      content: z.string().describe('The whole new content of the file'),
+    }),
+    category: 'file',
+    sideEffects: ['filesystem'],
+    ...approval('write_file'),
+    execute: async ({ path, content }, context) => {
+      const ws = resolveWorkspace(context);
+      const existed = await call(() => ws.exists(path));
+      await call(() => ws.write(path, content));
+      return { path, bytes: Buffer.byteLength(content), created: !existed };
+    },
+  });
+
+  const editFile = tool({
+    name: 'edit_file',
+    description:
+      'Edit a text file of the workspace by replacing an exact string. `oldString` must appear exactly once (include surrounding lines to make it unique), or set `replaceAll` to replace every occurrence. Read the file first. In a file with CRLF line endings, write the strings with plain newlines: the CRLF endings are kept. Binary files and files that are not UTF-8 are refused.',
+    parameters: z.object({
+      path: z.string().min(1).describe('File path relative to the workspace root'),
+      oldString: z.string().min(1).describe('The exact text to replace, whitespace included'),
+      newString: z.string().describe('The text to put in its place'),
+      replaceAll: z
+        .boolean()
+        .optional()
+        .describe('Replace every occurrence instead of requiring exactly one (default: false)'),
+    }),
+    category: 'file',
+    sideEffects: ['filesystem'],
+    ...approval('edit_file'),
+    execute: async ({ path, oldString, newString, replaceAll = false }, context) => {
+      const ws = resolveWorkspace(context);
+      if (oldString === newString) throw new Error('oldString and newString are the same');
+      const bytes = await call(() => ws.readBytes(path));
+      if (looksBinary(bytes))
+        throw new Error(`${path} is a binary file, edit_file only edits text`);
+      let original: string;
+      try {
+        original = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+      } catch (error) {
+        throw new Error(`${path} is not valid UTF-8, edit_file would corrupt it`, { cause: error });
+      }
+      const crlf = lineEndings(original) === 'crlf';
+      const text = crlf ? original.replace(/\r\n/g, '\n') : original;
+      const search = crlf ? oldString.replace(/\r\n/g, '\n') : oldString;
+      const replacement = crlf ? newString.replace(/\r\n/g, '\n') : newString;
+      const count = occurrences(text, search);
+      if (count === 0) throw new Error(`oldString was not found in ${path}`);
+      if (count > 1 && !replaceAll) {
+        throw new Error(
+          `oldString appears ${count} times in ${path}: add surrounding lines to make it unique, or set replaceAll`
+        );
+      }
+      const edited = replaceAll
+        ? text.split(search).join(replacement)
+        : text.replace(search, () => replacement);
+      const updated = crlf ? edited.replace(/\n/g, '\r\n') : edited;
+      await call(() => ws.write(path, updated));
+      return { path, replacements: replaceAll ? count : 1 };
+    },
+  });
+
+  const listFiles = tool({
+    name: 'list_files',
+    description: `List the entries of a workspace directory (the root by default), with type and size. At most ${MAX_LIST_ENTRIES} entries, \`truncated\` says when there were more.`,
+    parameters: z.object({
+      path: z
+        .string()
+        .optional()
+        .describe('Directory relative to the workspace root (default: the root)'),
+      recursive: z.boolean().optional().describe('Include subdirectories (default: false)'),
+      includeHidden: z
+        .boolean()
+        .optional()
+        .describe('Include entries whose name starts with a dot (default: false)'),
+    }),
+    category: 'file',
+    ...approval('list_files'),
+    execute: async ({ path = '.', recursive = false, includeHidden = false }, context) => {
+      const ws = resolveWorkspace(context);
+      const entries = await call(() =>
+        ws.list(path, { recursive, includeHidden, skipDirs, limit: MAX_LIST_ENTRIES + 1 })
+      );
+      return {
+        path,
+        entries: entries
+          .slice(0, MAX_LIST_ENTRIES)
+          .map(({ path: entryPath, type, size }) => ({ path: entryPath, type, size })),
+        truncated: entries.length > MAX_LIST_ENTRIES,
+      };
+    },
+  });
+
+  const glob = tool({
+    name: 'glob',
+    description: `Find workspace files whose path matches a glob, such as "**/*.ts" or "src/**/*.{ts,tsx}". \`*\` stays within one directory, \`**\` spans any depth. Paths are relative to \`path\` (default: the root). At most ${MAX_GLOB_RESULTS} files.`,
+    parameters: z.object({
+      pattern: z.string().min(1).describe('Glob pattern, e.g. "**/*.test.ts"'),
+      path: z.string().optional().describe('Directory to search in (default: the root)'),
+    }),
+    category: 'file',
+    ...approval('glob'),
+    execute: async ({ pattern, path = '.' }, context) => {
+      const ws = resolveWorkspace(context);
+      const entries = await call(() =>
+        ws.list(path, {
+          recursive: true,
+          includeHidden: pattern.split('/').some((part) => part.startsWith('.')),
+          glob: pattern,
+          skipDirs,
+        })
+      );
+      const files = entries.filter((entry) => entry.type === 'file').map((entry) => entry.path);
+      return {
+        pattern,
+        files: files.slice(0, MAX_GLOB_RESULTS),
+        count: files.length,
+        truncated: files.length > MAX_GLOB_RESULTS,
+      };
+    },
+  });
+
+  const grep = tool({
+    name: 'grep',
+    description: `Search the text files of the workspace for a regular expression (JavaScript syntax), line by line. Binary files and files over ${MAX_GREP_FILE_BYTES / 1024} KiB are skipped, and so are hidden files unless \`includeHidden\` is set. Returns matching lines with their file and line number, at most \`maxMatches\` (default ${DEFAULT_GREP_MATCHES}): \`truncated\` says more lines matched, \`incomplete\` that not every file was searched.`,
+    parameters: z.object({
+      pattern: z.string().min(1).describe('Regular expression to search for'),
+      path: z.string().optional().describe('File or directory to search (default: the root)'),
+      glob: z
+        .string()
+        .optional()
+        .describe('Only files whose path matches this glob, e.g. "**/*.ts"'),
+      ignoreCase: z.boolean().optional().describe('Case-insensitive search (default: false)'),
+      includeHidden: z
+        .boolean()
+        .optional()
+        .describe(
+          'Also search files and directories whose name starts with a dot (default: false)'
+        ),
+      maxMatches: z
+        .number()
+        .int()
+        .min(1)
+        .max(MAX_GREP_MATCHES)
+        .optional()
+        .describe(`Stop after this many matches (default: ${DEFAULT_GREP_MATCHES})`),
+    }),
+    category: 'file',
+    ...approval('grep'),
+    execute: async (
+      {
+        pattern,
+        path = '.',
+        glob: fileGlob,
+        ignoreCase = false,
+        includeHidden = false,
+        maxMatches = DEFAULT_GREP_MATCHES,
+      },
+      context
+    ) => {
+      const ws = resolveWorkspace(context);
+      const flags = ignoreCase ? 'i' : '';
+      try {
+        new RegExp(pattern, flags);
+      } catch (error) {
+        throw new Error(
+          `Invalid pattern: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error }
+        );
+      }
+      const target = await call(() => ws.stat(path));
+      const matchesGlob = fileGlob ? workspaceGlobMatcher(fileGlob) : undefined;
+      const listLimit = MAX_GREP_FILES * 4;
+      const listed =
+        target.type === 'file'
+          ? [{ path: target.path, size: target.size, type: target.type }]
+          : await call(() =>
+              ws.list(path, { recursive: true, includeHidden, skipDirs, limit: listLimit })
+            );
+      const candidates = listed.filter(
+        (entry) =>
+          entry.type === 'file' &&
+          (!matchesGlob || matchesGlob(relativeTo(target.path, entry.path)))
+      );
+
+      const matches: { path: string; line: number; text: string }[] = [];
+      let filesSearched = 0;
+      let skipped = 0;
+      let scanned = 0;
+      let truncated = false;
+      let incomplete = listed.length >= listLimit;
+      const matcher = new RegexWorker({
+        pattern,
+        flags,
+        timeout: options.grepTimeout ?? DEFAULT_GREP_TIMEOUT,
+        maxShown: MAX_GREP_LINE_SHOWN,
+      });
+      const onAbort = () => matcher.stop(new Error('The search was cancelled'));
+      context.signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        for (const file of candidates) {
+          if (truncated) break;
+          if (filesSearched >= MAX_GREP_FILES || scanned >= MAX_GREP_SCANNED_BYTES) {
+            incomplete = true;
+            break;
+          }
+          if (file.size > MAX_GREP_FILE_BYTES) {
+            skipped++;
+            continue;
+          }
+          let bytes: Uint8Array;
+          try {
+            bytes = await ws.readBytes(file.path, { maxBytes: MAX_GREP_FILE_BYTES });
+          } catch {
+            skipped++;
+            continue;
+          }
+          filesSearched++;
+          scanned += bytes.byteLength;
+          if (looksBinary(bytes)) {
+            skipped++;
+            continue;
+          }
+          const remaining = maxMatches - matches.length;
+          const hits = await matcher.match(
+            Buffer.from(bytes).toString('utf8'),
+            remaining,
+            file.path
+          );
+          for (const hit of hits.slice(0, remaining)) matches.push({ path: file.path, ...hit });
+          if (hits.length > remaining) truncated = true;
+        }
+      } finally {
+        context.signal.removeEventListener('abort', onAbort);
+        matcher.stop();
+      }
+      return {
+        pattern,
+        matches,
+        filesSearched,
+        filesSkipped: skipped,
+        truncated,
+        ...(incomplete && { incomplete: true }),
+      };
+    },
+  });
+
+  const runCommand = tool({
+    name: 'run_command',
+    description:
+      'Run a shell command in the workspace (sh -c), in its current directory or `cwd` (relative to the root). Returns stdout, stderr, the exit code, and whether it timed out or its output was cut.',
+    parameters: z.object({
+      command: z.string().min(1).describe('The shell command to run'),
+      cwd: z.string().optional().describe('Directory to run in, relative to the workspace root'),
+      timeout: z
+        .number()
+        .int()
+        .min(100)
+        .max(600_000)
+        .optional()
+        .describe('Milliseconds before the command is killed'),
+      background: z
+        .boolean()
+        .optional()
+        .describe(
+          'Keep processes the command starts in the background (with &) running after it returns, e.g. a dev server. Redirect their output to a file, it is not captured (default: false, they are stopped)'
+        ),
+    }),
+    category: 'system',
+    sideEffects: ['process', 'filesystem', 'network'],
+    ...approval('run_command'),
+    execute: async ({ command, cwd, timeout, background }, context) => {
+      const ws = resolveWorkspace(context);
+      const result = await call(() =>
+        ws.exec(command, {
+          ...(cwd !== undefined && { cwd }),
+          ...((timeout ?? options.execTimeout) !== undefined && {
+            timeout: timeout ?? options.execTimeout,
+          }),
+          signal: context.signal,
+          background: background ? 'keep' : 'kill',
+        })
+      );
+      return { command, ...result };
+    },
+  });
+
+  readFileBindings.set(readFile, workspace ? { workspace } : {});
+  const all = [readFile, writeFile, editFile, listFiles, glob, grep, runCommand];
+  const wanted = options.tools ? new Set<string>(options.tools) : undefined;
+  return wanted ? all.filter((t) => wanted.has(t.name)) : all;
+}
+
+/** Runs a workspace operation, its `WorkspaceError` turned into a plain error the model reads. */
+async function call<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof WorkspaceError) throw new Error(error.message, { cause: error });
+    throw error;
+  }
+}
+
+function looksBinary(bytes: Uint8Array): boolean {
+  const end = Math.min(bytes.byteLength, BINARY_SNIFF_BYTES);
+  for (let i = 0; i < end; i++) if (bytes[i] === 0) return true;
+  return false;
+}
+
+function splitLines(text: string): string[] {
+  const lines = text.split(/\r?\n/);
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
+
+/** How the lines of `text` end: all `\n`, all `\r\n`, or both. */
+function lineEndings(text: string): 'lf' | 'crlf' | 'mixed' {
+  const crlf = (text.match(/\r\n/g) ?? []).length;
+  const all = (text.match(/\n/g) ?? []).length;
+  if (crlf === 0) return 'lf';
+  return crlf === all ? 'crlf' : 'mixed';
+}
+
+/** Where to cut `text` to at most `max` characters without splitting a surrogate pair. */
+function cutAt(text: string, max: number): number {
+  const at = Math.max(1, Math.min(max, text.length));
+  const code = text.charCodeAt(at - 1);
+  return at > 1 && code >= 0xd800 && code <= 0xdbff ? at - 1 : at;
+}
+
+function occurrences(text: string, search: string): number {
+  let count = 0;
+  for (let at = text.indexOf(search); at !== -1; at = text.indexOf(search, at + search.length)) {
+    count++;
+  }
+  return count;
+}
+
+function relativeTo(dir: string, path: string): string {
+  if (dir === '.' || dir === '') return path;
+  return path.startsWith(`${dir}/`) ? path.slice(dir.length + 1) : path;
+}

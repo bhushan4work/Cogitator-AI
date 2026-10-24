@@ -82,6 +82,8 @@ console.log(result.output);
 - **Resilience** - Retry, circuit breaker, and fallback patterns
 - **PII Masking** - Personal data and secrets replaced with placeholders before they reach the provider
 - **Run Middleware** - Hooks around every model and tool call, tripwire guards that stop a run
+- **Agent Skills** - `SKILL.md` skills from the host or the workspace, activated on demand with `use_skill`, `write_todos` planning kept in the thread, deferred tools found with `tool_search`
+- **Workspace** - Files and commands confined to one directory (`LocalWorkspace`, `DockerWorkspace`), `workspaceTools()`, long tool results saved there for the model to page through
 - **Observability** - OpenTelemetry GenAI spans, one trace across runs, workflows and swarms, OTLP and Langfuse exporters
 
 ---
@@ -353,6 +355,41 @@ const restored = Agent.deserialize(snapshot, { toolRegistry: registry });
 To run an agent in another process (queue jobs, workflow jobs, distributed swarm turns), send it in the agent wire format instead: `toAgentWire(agent)` keeps every setting (stop sequences, timeout, handoffs, the response schema as JSON Schema, ...) and `fromAgentWire(payload, { cogitator, tools })` rebuilds it, refusing unknown keys and routing the model exactly as the sender would. `toAgentWireRunResult` / `fromAgentWireRunResult` do the same for a run's outcome, cost included.
 
 See [Agents](https://cogitator.app/docs/core/agents).
+
+### Agent Skills from SKILL.md
+
+Skills in the [Agent Skills](https://agentskills.io/specification) format are folders with a `SKILL.md` (YAML frontmatter with `name` and `description`, then instructions) and the files they need. A `SkillRegistry` finds them in `dirs`, in a `project` folder, with `user` in the home folder, and in the run's workspace (`.agents/skills`, `.cogitator/skills`, `.claude/skills`), the first of a name winning (`precedence: 'workspace'` puts the workspace before the host folders). Skills are trusted content: their instructions reach the model as they are, so load them only from places you trust. The model sees each skill's name and description in an `<available_skills>` section of the system prompt and activates one with the built-in `use_skill({ skill })`, which returns the body, the skill folder and its files. Host skills' files are read with `read_skill_file({ skill, path })`, confined to the skill folder, workspace skills' with `read_file`:
+
+```typescript
+import { Agent, SkillRegistry } from '@cogitator-ai/core';
+
+const agent = new Agent({
+  name: 'maintainer',
+  model: 'anthropic/claude-sonnet-5-5',
+  instructions: 'You maintain this project.',
+  skills: [new SkillRegistry({ project: process.cwd(), user: true })],
+});
+```
+
+Frontmatter is read leniently: a skill without a description is skipped, other problems (a name that breaks the rules or differs from its folder, wrong types) load with a warning in the catalog's `diagnostics`. `allowed-tools` is kept on the skill as `allowedTools`, not enforced. Instructions past `maxInstructionChars` (20 000) are cut with a note, a workspace skill never follows a symbolic link, a repeated `use_skill` returns a short note, and the newest `use_skill` results (up to 40 000 characters) survive tool output clearing and compaction. See [Skills](https://cogitator.app/docs/core/skills).
+
+### Todo Lists and Tool Search
+
+`todos: true` gives the agent `write_todos({ todos: [{ id, content, status }] })`: each call replaces the list, at most one item is `in_progress`. The list is read back from the conversation, copied to the thread's metadata (`todos`, with the entry it was written at, so other branches do not take it) for later runs, reported with `onTodos` and returned as `result.todos`.
+
+A tool marked `deferred: true` keeps its schema out of the requests. The run offers `tool_search({ query, limit })` instead, which ranks the deferred tools with BM25 over names, descriptions and parameters and loads the best ones from the next turn on. The loaded set is read from the `tool_search` results in the history, so resumed and forked runs keep it. A call to a deferred tool that was never loaded still runs. Loading a tool changes the tool list and so the prompt cache prefix.
+
+```typescript
+const agent = new Agent({
+  name: 'back-office',
+  model: 'openai/gpt-6.1-sol',
+  instructions: 'You run the back office. Plan multi-step work with write_todos.',
+  tools: [lookupCustomer, tool({ ...invoiceConfig, deferred: true })],
+  todos: true,
+});
+```
+
+See [Todo Lists](https://cogitator.app/docs/core/todos) and [Tool Search](https://cogitator.app/docs/tools/tool-search).
 
 ### Structured Output
 
@@ -635,6 +672,29 @@ A Docker-sandboxed tool does not call `execute`: the sandbox runs the `command` 
 When Docker is unavailable (or `@cogitator-ai/sandbox` is missing), a Docker-sandboxed tool runs its command directly on the host with a warning; set `sandbox.allowNativeFallback: false` to make those calls fail instead. WASM tools never fall back to the host: they run their own `execute` only when `@cogitator-ai/sandbox` is missing or fails to start, and a WASM sandbox that cannot load the module returns an error. Each Docker execution gets a fresh container (the pool keeps them warm); `sandbox.pool.reuseContainers: true` reuses containers between executions with the same settings, which is faster but lets files and processes leak from one execution to the next.
 
 `timeout` is enforced for every tool: native tools get an aborted `context.signal` and the model receives a `Tool "<name>" timed out after <ms>ms` error; sandboxed tools forward it to the sandbox executor. Cancelling a run (`signal` in the run options) stops a sandboxed command too: the process is killed, its container removed or its WASM plugin closed, and the call fails with the abort reason. The sandbox is initialized lazily on the first sandboxed call, and that call already runs inside it.
+
+### Workspace
+
+A `Workspace` is the directory an agent works in: file access and commands that cannot leave its root (`..`, absolute paths elsewhere and symlinks out are refused with a `WorkspaceError` of code `OUTSIDE_ROOT`). `LocalWorkspace` is a directory of this machine, `DockerWorkspace` from `@cogitator-ai/sandbox` runs the commands in a container. `workspaceTools()` gives the agent `read_file` (by line range), `write_file`, `edit_file` (exact, unique replacement), `list_files`, `glob`, `grep` (in a worker thread, so a runaway pattern cannot block the process) and `run_command`, named apart from the global `file_*` and `exec` built-in tools.
+
+```typescript
+import { Agent, LocalWorkspace, workspaceTools } from '@cogitator-ai/core';
+
+const workspace = new LocalWorkspace({ root: './project' });
+const coder = new Agent({
+  name: 'coder',
+  model: 'anthropic/claude-sonnet-5-5',
+  instructions: 'Fix the failing test.',
+  tools: workspaceTools(),
+  workspace,
+});
+
+await cog.run(coder, { input: 'The parser test fails' });
+await cog.run(coder, { input: 'Same for this project', workspace: otherWorkspace });
+await workspace.dispose();
+```
+
+Tools and middleware get the run's workspace as `context.workspace` (`RunOptions.workspace`, else the agent's). A workspace starts itself on first use, the runtime only uses it, and whoever creates it disposes it. Only regular files are read and written, writes are atomic (a temporary file renamed over the target), and `remove` and `rename` check what they move and never replace an entry they did not check, so a symlink swapped in at the wrong moment cannot reach outside the root. `remove` and `rename` refuse with code `BUSY` while a command the workspace started still runs. Commands run in their own process group with a trimmed environment, a call returns when the command exits, its background processes stopped then unless `background: 'keep'`, and a timeout, an abort or `dispose()` kills the group. When a tool result is longer than the model may read and the agent has the `read_file` of `workspaceTools()`, the full text is saved in the workspace that `read_file` reads to `.cogitator/tool-results/<runId>/<toolCallId>.txt` (ignored by git, removed after `limits.toolResultRetention`, 7 days by default) and the model gets a preview with the path, to page through with `read_file`. `remove(path, { trash: true })` moves entries to `.cogitator/trash/`. See [Workspace](https://cogitator.app/docs/tools/workspace).
 
 ### Tool Registry
 
@@ -1124,6 +1184,7 @@ const cog = new Cogitator({
     extraction: {
       scope: 'user', // default, or 'agent' / 'thread'
       timeZone: 'Europe/Lisbon', // a thread's metadata.timeZone wins, UTC by default
+      mode: 'shadow', // items stay suggested until activated, 'apply' by default
       afterExtract: (items) => console.log(items.map((item) => item.content)),
     },
   },
@@ -1131,6 +1192,8 @@ const cog = new Cogitator({
 ```
 
 The entries of the active branch new since the last extraction (the thread keeps its cursor in `metadata.memoryExtraction`, `EXTRACTION_CURSOR`), or a first extraction's run entries (a first extraction that fails is taken up by the next one, and the thread keeps its place after every window), are read in windows by `extraction.model` (the model the run ended on by default), every item checked against its quotes: only what the user said with quotes that hold becomes `active`. Items are kept under the agent's configured `id`, else its `name` (`memoryAgentId(agent)`, also on the `afterRun` event), and belong to the run's own user, never the thread's owner. A window the model could not answer three extractions in a row is left out, never one a provider or storage failure stopped, and runs of one thread extract one after another. A run without a user keeps its items in the thread's scope, and a thread `metadata.timeZone` that is not an IANA zone falls back to `timeZone`. The calls are counted in the run's costs and `usage`, a failure is logged while the run keeps its result and the thread waits a minute (doubling up to an hour) before the next try. It is the built-in middleware `cogitator:memory-extraction` (`memoryExtractionMiddleware`), whose `afterRun` runs before the compaction's. With `includeFacts`, a store that keeps memory items (every built-in one) gives the context the items the run's agent, user and thread see that hold now, one state per slot, in place of `FactAdapter` facts. See [Extraction After a Run](https://cogitator.app/docs/memory#extraction-after-a-run).
+
+Without a `strategy`, `contextBuilder` uses `hybrid` when `memory.embedding` is set and `recent` otherwise: on the [memory benchmarks](https://cogitator.app/docs/memory/benchmarks) `hybrid` averaged 44.9% over seven datasets against 18.0% for `recent`, as much as `relevant` (44.6%) at three quarters of its cost. Set `strategy: 'recent'` to keep the newest turns only. Compaction and extraction stay off by default: compaction saves input tokens and helps on threads up to about 100K tokens but was no better than `recent` on longer ones, and extraction gained less than `hybrid` everywhere, so turn it on with `extraction.mode: 'shadow'` first, which keeps every new item `suggested` and out of the context until you activate it.
 
 `contextBuilder.strategy: 'hybrid'` keeps the newest turns as history and recalls older turns and memory items a search of memory finds for the turn into the `<memory_context>` block (`Earlier in this conversation:` and `From memory:`). `memory.reranker`, any `Reranker` such as `CohereReranker` from `@cogitator-ai/rag`, reorders the best 30 hits. The search resolves the time a turn names ("yesterday") from the run's `asOf` (now by default, set it to replay or evaluate a recorded conversation) in the thread's `metadata.timeZone`, else `contextBuilder.timeZone`, else `extraction.timeZone`, else UTC, and reads memory items as of `asOf`. A run counts the facts and recalled items it sent to the model (`timesRetrieved`, `lastRetrievedAt`) once it finishes or pauses, in the background, and `close()` waits for those writes. See [Recall](https://cogitator.app/docs/memory#recall).
 

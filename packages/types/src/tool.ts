@@ -4,6 +4,7 @@
 
 import type { ZodType } from 'zod';
 import type { SandboxConfig } from './sandbox';
+import type { Workspace } from './workspace';
 
 export type ToolCategory =
   | 'math'
@@ -56,6 +57,13 @@ export interface ToolConfig<TParams = unknown, TResult = unknown, TDeps = unknow
    * training, and every other provider gets the schema as usual
    */
   providerTypes?: ProviderToolTypes;
+  /**
+   * Keep the tool's schema out of the model's requests until the model finds it with the built-in
+   * `tool_search` tool, which a run offers while it has deferred tools. Found tools are sent from
+   * the next model turn on. For agents with many tools, most of them rarely needed: their schemas
+   * cost no context until used. A call to a deferred tool that was not loaded yet still runs
+   */
+  deferred?: boolean;
 }
 
 export interface Tool<TParams = unknown, TResult = unknown, TDeps = unknown> {
@@ -91,6 +99,13 @@ export interface Tool<TParams = unknown, TResult = unknown, TDeps = unknown> {
    * training, and every other provider gets the schema as usual
    */
   providerTypes?: ProviderToolTypes;
+  /**
+   * Keep the tool's schema out of the model's requests until the model finds it with the built-in
+   * `tool_search` tool, which a run offers while it has deferred tools. Found tools are sent from
+   * the next model turn on. For agents with many tools, most of them rarely needed: their schemas
+   * cost no context until used. A call to a deferred tool that was not loaded yet still runs
+   */
+  deferred?: boolean;
   toJSON(): ToolSchema;
 }
 
@@ -142,6 +157,11 @@ export interface BaseToolContext<TDeps = unknown> {
    * memory, so a resumed run passes them again
    */
   deps?: TDeps;
+  /**
+   * The workspace of the run (`RunOptions.workspace`, else the agent's `workspace`), for tools
+   * that read, write or run commands in it, see `workspaceTools()`
+   */
+  workspace?: Workspace;
 }
 
 /**

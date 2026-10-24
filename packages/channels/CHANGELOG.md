@@ -1,5 +1,65 @@
 # @cogitator-ai/channels
 
+## 0.18.6
+
+### Patch Changes
+
+- Updated dependencies [[`c5539d4`](https://github.com/cogitator-ai/Cogitator-AI/commit/c5539d41dc8611d9d8fae77a8e2b35f948f68bd1)]:
+  - @cogitator-ai/types@0.73.0
+  - @cogitator-ai/browser@0.4.49
+  - @cogitator-ai/core@0.63.1
+  - @cogitator-ai/mcp@19.5.31
+  - @cogitator-ai/memory@0.26.2
+  - @cogitator-ai/rag@0.9.5
+
+## 0.18.5
+
+### Patch Changes
+
+- Updated dependencies [[`7d96a55`](https://github.com/cogitator-ai/Cogitator-AI/commit/7d96a55a376770d0cce4d1d220fdad53f493b5bd)]:
+  - @cogitator-ai/types@0.72.0
+  - @cogitator-ai/core@0.63.0
+  - @cogitator-ai/browser@0.4.48
+  - @cogitator-ai/mcp@19.5.30
+  - @cogitator-ai/memory@0.26.1
+  - @cogitator-ai/rag@0.9.4
+
+## 0.18.4
+
+### Patch Changes
+
+- Updated dependencies [[`a19a0d6`](https://github.com/cogitator-ai/Cogitator-AI/commit/a19a0d6c3d1dfd281e336dea6e5307b20af1a34b), [`a19a0d6`](https://github.com/cogitator-ai/Cogitator-AI/commit/a19a0d6c3d1dfd281e336dea6e5307b20af1a34b)]:
+  - @cogitator-ai/memory@0.26.0
+  - @cogitator-ai/core@0.62.0
+  - @cogitator-ai/types@0.71.0
+  - @cogitator-ai/rag@0.9.3
+  - @cogitator-ai/browser@0.4.47
+  - @cogitator-ai/mcp@19.5.29
+
+## 0.18.3
+
+### Patch Changes
+
+- Updated dependencies [[`213e3fb`](https://github.com/cogitator-ai/Cogitator-AI/commit/213e3fba0f0ed9a1290fdd1499dd4a0e4101b6e2)]:
+  - @cogitator-ai/types@0.70.0
+  - @cogitator-ai/core@0.61.1
+  - @cogitator-ai/browser@0.4.46
+  - @cogitator-ai/mcp@19.5.28
+  - @cogitator-ai/memory@0.25.6
+  - @cogitator-ai/rag@0.9.2
+
+## 0.18.2
+
+### Patch Changes
+
+- Updated dependencies [[`091fa9e`](https://github.com/cogitator-ai/Cogitator-AI/commit/091fa9e659341bc0f39344e46ec0c56ba0338f83)]:
+  - @cogitator-ai/types@0.69.0
+  - @cogitator-ai/core@0.61.0
+  - @cogitator-ai/browser@0.4.45
+  - @cogitator-ai/mcp@19.5.27
+  - @cogitator-ai/memory@0.25.5
+  - @cogitator-ai/rag@0.9.1
+
 ## 0.18.1
 
 ### Patch Changes

@@ -43,6 +43,28 @@ export {
   DEFAULT_TOOL_RESULT_MAX_LENGTH,
 } from './tool-content';
 export { defineSkill, validateSkill, mergeSkillsIntoAgent } from './skill';
+export * from './skills/index';
+export {
+  toolSearchTool,
+  rankTools,
+  toolsFoundIn,
+  loadedToolsNote,
+  withIdentifierWords,
+  TOOL_SEARCH,
+  type ToolSearchOptions,
+} from './tools/tool-search';
+export {
+  writeTodosTool,
+  renderTodos,
+  todosIn,
+  parseTodos,
+  parseKeptTodos,
+  type KeptTodos,
+  todoListSchema,
+  WRITE_TODOS,
+  TODOS_METADATA_KEY,
+  MAX_TODOS,
+} from './tools/write-todos';
 export { agentAsTool } from './agent-tool';
 export {
   decisionTool,
@@ -106,6 +128,8 @@ export {
   createSchedulerTools,
   restrictFileTools,
   isPathAllowed,
+  workspaceTools,
+  WORKSPACE_TOOL_NAMES,
   createCapabilitiesTool,
   recallToolOutputTool,
   isRecallToolOutput,
@@ -123,6 +147,8 @@ export type {
   CoreFactsLike,
   SchedulerToolsConfig,
   RestrictFileToolsOptions,
+  WorkspaceToolName,
+  WorkspaceToolsOptions,
   WebScrapeOptions,
   HttpRequestToolOptions,
   WebSearchOptions,
@@ -133,6 +159,38 @@ export type {
   SearchResult,
   SearchResponse,
 } from './tools/index';
+export {
+  LocalWorkspace,
+  WORKSPACE_SERVICE_DIR,
+  WORKSPACE_TRASH_DIR,
+  WORKSPACE_INHERITED_ENV,
+  type LocalWorkspaceOptions,
+  type LocalWorkspaceExecConfig,
+  type WorkspaceLaunch,
+} from './workspace/index';
+export { WorkspaceError, WORKSPACE_SNAPSHOT_DEFAULT_EXCLUDE } from '@cogitator-ai/types';
+export {
+  toolResultPath,
+  TOOL_RESULTS_DIR,
+  DEFAULT_TOOL_RESULT_RETENTION,
+} from './cogitator/tool-executor';
+export type {
+  Workspace,
+  WorkspaceErrorCode,
+  WorkspaceEntry,
+  WorkspaceEntryType,
+  WorkspaceStat,
+  WorkspaceReadOptions,
+  WorkspaceWriteOptions,
+  WorkspaceListOptions,
+  WorkspaceRemoveOptions,
+  WorkspaceRemoveResult,
+  WorkspaceRenameOptions,
+  WorkspaceExecOptions,
+  WorkspaceExecResult,
+  WorkspaceSnapshot,
+  WorkspaceSnapshotOptions,
+} from '@cogitator-ai/types';
 export {
   RobotsPolicy,
   robotsRulesFor,
@@ -379,6 +437,7 @@ export {
   guardrailsMiddleware,
   compactionMiddleware,
   clearToolOutputsMiddleware,
+  PINNED_TOOL_OUTPUTS,
   restoreClearedOutputs,
   clearedOutputNote,
   isClearedArguments,

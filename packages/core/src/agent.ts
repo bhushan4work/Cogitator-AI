@@ -8,7 +8,7 @@ import type {
   SerializedAgentConfig,
 } from '@cogitator-ai/types';
 import { nanoid } from 'nanoid';
-import { mergeSkillsIntoAgent } from './skill';
+import { isCodeSkill, mergeSkillsIntoAgent } from './skill';
 
 const SNAPSHOT_VERSION = '1.0.0';
 
@@ -20,6 +20,33 @@ export class AgentDeserializationError extends Error {
 }
 
 const generatedIds = new WeakMap<Agent, string>();
+
+/** The tools and instructions an agent was given, before its code skills were merged into them. */
+const unmergedConfigs = new WeakMap<Agent, { tools?: Tool[]; instructions: string }>();
+
+/**
+ * Checks the entries of `skills`: a skill defined in code, a skill loader (`discover()`) or the
+ * configuration of a `SkillRegistry`. An object that looks like a code skill but is not one
+ * (no `version`, say) would be taken for a registry configuration, so it is refused here.
+ */
+function checkSkills(agentName: string, skills: readonly unknown[]): void {
+  skills.forEach((skill, index) => {
+    if (typeof skill !== 'object' || skill === null) {
+      throw new TypeError(`Agent "${agentName}": skills[${index}] is not a skill`);
+    }
+    if (isCodeSkill(skill) || typeof (skill as { discover?: unknown }).discover === 'function') {
+      return;
+    }
+    const looksLikeCodeSkill = ['tools', 'instructions', 'version', 'name'].some(
+      (key) => key in skill
+    );
+    if (looksLikeCodeSkill) {
+      throw new TypeError(
+        `Agent "${agentName}": skills[${index}] is neither a skill made with defineSkill() (it needs name, version, description and tools) nor a SkillRegistry or its configuration`
+      );
+    }
+  });
+}
 
 /**
  * AI agent that can execute tasks using LLM and tools.
@@ -72,8 +99,14 @@ export class Agent<TDeps = unknown> implements IAgent<TDeps> {
     this.name = config.name;
 
     let finalConfig = { ...config };
-    if (config.skills && config.skills.length > 0) {
-      const merged = mergeSkillsIntoAgent(config.tools ?? [], config.instructions, config.skills);
+    checkSkills(config.name, config.skills ?? []);
+    const codeSkills = (config.skills ?? []).filter(isCodeSkill);
+    if (codeSkills.length > 0) {
+      unmergedConfigs.set(this, {
+        ...(config.tools && { tools: config.tools as Tool[] }),
+        instructions: config.instructions,
+      });
+      const merged = mergeSkillsIntoAgent(config.tools ?? [], config.instructions, codeSkills);
       finalConfig = { ...finalConfig, tools: merged.tools, instructions: merged.instructions };
     }
 
@@ -128,8 +161,13 @@ export class Agent<TDeps = unknown> implements IAgent<TDeps> {
    */
   clone(overrides: Partial<AgentConfig<TDeps>>): Agent<TDeps> {
     const { id: _id, ...rest } = this.config;
+    const unmerged = unmergedConfigs.get(this);
     return new Agent<TDeps>({
       ...rest,
+      ...(unmerged && {
+        tools: unmerged.tools as AgentConfig<TDeps>['tools'],
+        instructions: unmerged.instructions,
+      }),
       ...overrides,
     });
   }
@@ -171,6 +209,7 @@ export class Agent<TDeps = unknown> implements IAgent<TDeps> {
         maxIterations: this.config.maxIterations,
         ...(this.config.onIterationLimit && { onIterationLimit: this.config.onIterationLimit }),
         timeout: this.config.timeout,
+        ...(this.config.todos !== undefined && { todos: this.config.todos }),
       },
       metadata: {
         serializedAt: new Date().toISOString(),
@@ -241,6 +280,7 @@ export class Agent<TDeps = unknown> implements IAgent<TDeps> {
         onIterationLimit: snapshot.config.onIterationLimit,
       }),
       timeout: snapshot.config.timeout,
+      ...(snapshot.config.todos !== undefined && { todos: snapshot.config.todos }),
       ...overrides,
     });
   }

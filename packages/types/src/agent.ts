@@ -3,10 +3,11 @@
  */
 
 import type { Tool } from './tool';
-import type { Skill } from './skill';
+import type { AgentSkillSource } from './skill';
 import type { ZodType } from 'zod';
 import type { ReasoningConfig } from './llm';
 import type { RunMiddleware } from './middleware';
+import type { Workspace } from './workspace';
 
 /**
  * An agent's configuration. `TDeps` is the type of the `deps` its runs pass (`RunOptions.deps`):
@@ -34,7 +35,13 @@ export interface AgentConfig<TDeps = unknown> {
   fallbackModels?: FallbackModel[];
   instructions: string;
   tools?: Tool<unknown, unknown, TDeps>[];
-  skills?: Skill[];
+  /**
+   * Skills of the agent. A skill defined in code (`defineSkill`) joins its tools and instructions
+   * to the agent's. A source of `SKILL.md` skills (a `SkillRegistry`, or the configuration of one)
+   * is searched when a run starts: the model sees each skill's name and description in the
+   * system prompt and loads one with the built-in `use_skill` tool when a task needs it
+   */
+  skills?: AgentSkillSource[];
   temperature?: number;
   topP?: number;
   maxTokens?: number;
@@ -58,11 +65,24 @@ export interface AgentConfig<TDeps = unknown> {
   onIterationLimit?: 'answer' | 'stop';
   timeout?: number;
   /**
+   * Gives the model the built-in `write_todos` tool, to plan a long task as a todo list and keep
+   * it current: each call replaces the list, with at most one item in progress. The list is kept
+   * in the thread's metadata (`todos`) across runs and compaction, reported with
+   * `RunOptions.onTodos` and returned as `RunResult.todos` (default false)
+   */
+  todos?: boolean;
+  /**
    * Hooks around this agent's model and tool calls, after the Cogitator's middleware and
    * before the run's (see `RunMiddleware`). After a handoff, the agent the run went on as
    * brings its own.
    */
   middleware?: RunMiddleware<TDeps>[];
+  /**
+   * The directory this agent's tools work in: they get it as `context.workspace`, and a tool
+   * result too long for the model is saved there in full. `RunOptions.workspace` wins over it.
+   * The agent only uses it: whoever created the workspace starts and disposes it
+   */
+  workspace?: Workspace;
 }
 
 /** A model to fall back to: `provider/model`, or a model name with the provider to run it on. */
@@ -124,6 +144,7 @@ export interface SerializedAgentConfig {
   maxIterations?: number;
   onIterationLimit?: 'answer' | 'stop';
   timeout?: number;
+  todos?: boolean;
 }
 
 export interface DeserializeOptions {
