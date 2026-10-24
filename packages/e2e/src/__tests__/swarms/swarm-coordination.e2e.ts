@@ -177,11 +177,7 @@ describeE2E('Swarms: Multi-Agent Coordination', () => {
       },
     });
 
-    const result = await swarm.run({
-      input: 'What is 2+2?',
-      saveHistory: false,
-      timeout: 240_000,
-    });
+    const result = await swarm.run({ input: 'What is 2+2?', saveHistory: false });
     const output = String(result.output);
 
     expect(output.length).toBeGreaterThan(0);
