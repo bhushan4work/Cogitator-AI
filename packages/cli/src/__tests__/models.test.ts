@@ -1,20 +1,39 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { resolveOllamaConnection, resolveOllamaUrl, listOllamaModels, pullOllamaModel } = vi.hoisted(
-  () => ({
-    resolveOllamaConnection: vi.fn(),
-    resolveOllamaUrl: vi.fn(),
-    listOllamaModels: vi.fn(),
-    pullOllamaModel: vi.fn(),
-  })
-);
-
-vi.mock('../utils/ollama.js', () => ({
+const {
   resolveOllamaConnection,
   resolveOllamaUrl,
   listOllamaModels,
   pullOllamaModel,
-}));
+  environmentConnection,
+} = vi.hoisted(() => {
+  const resolveOllamaUrl = vi.fn();
+  return {
+    resolveOllamaConnection: vi.fn(),
+    resolveOllamaUrl,
+    listOllamaModels: vi.fn(),
+    pullOllamaModel: vi.fn(),
+    environmentConnection: vi.fn((env, url) => {
+      const apiKey = (env ?? process.env).OLLAMA_API_KEY;
+      return {
+        baseUrl: resolveOllamaUrl(env, url),
+        ...(apiKey ? { apiKey } : {}),
+      };
+    }),
+  };
+});
+
+vi.mock('../utils/ollama.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/ollama.js')>();
+  return {
+    ...actual,
+    resolveOllamaConnection,
+    resolveOllamaUrl,
+    listOllamaModels,
+    pullOllamaModel,
+    environmentConnection,
+  };
+});
 
 import { log } from '../utils/logger.js';
 import { formatSize, formatDate, modelsCommand } from '../commands/models.js';
@@ -85,12 +104,14 @@ describe('modelsCommand', () => {
     );
   });
 
-  it('warns and falls back to the environment when the config cannot be read', async () => {
+  it('warns on stderr and emits valid JSON on stdout when the config cannot be read', async () => {
     resolveOllamaConnection.mockImplementation(() => {
       throw new Error('COGITATOR_CONFIG points to a missing file: missing.yml');
     });
     resolveOllamaUrl.mockReturnValue('http://env.example');
     vi.stubEnv('OLLAMA_API_KEY', 'env-key');
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     await modelsCommand.parseAsync(['--json'], { from: 'user' });
 
@@ -99,9 +120,29 @@ describe('modelsCommand', () => {
       apiKey: 'env-key',
       headers: undefined,
     });
-    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.anything(),
       expect.stringContaining('COGITATOR_CONFIG points to a missing file')
     );
+    expect(JSON.parse(logSpy.mock.calls[0][0])).toEqual({
+      ok: true,
+      url: 'http://env.example',
+      models: [],
+    });
+  });
+
+  it('fails safely on pull when the config cannot be read instead of falling back to another server', async () => {
+    resolveOllamaConnection.mockImplementation(() => {
+      throw new Error('Invalid configuration:\nlimits.maxConcurrentRuns: Expected number');
+    });
+
+    await expect(
+      modelsCommand.parseAsync(['--pull', 'qwen3:8b'], { from: 'user' })
+    ).rejects.toThrow(
+      'Cannot read the Ollama configuration: Invalid configuration: limits.maxConcurrentRuns: Expected number'
+    );
+
+    expect(pullOllamaModel).not.toHaveBeenCalled();
   });
 });
 

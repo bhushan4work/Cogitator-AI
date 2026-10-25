@@ -197,7 +197,10 @@ function packagesCheck(projectDir: string, manifest: PackageManifest | undefined
  * Loads the project's `cogitator.yml` the way the project does. `${VAR}` in it
  * reads `process.env`, so the command loads `.env` into it first.
  */
-function configCheck(projectDir: string): { check: DoctorCheck; config?: CogitatorConfig } {
+function configCheck(
+  projectDir: string,
+  env: Record<string, string | undefined> = process.env
+): { check: DoctorCheck; config?: CogitatorConfig } {
   const path = findConfigFile(projectDir);
   if (!path) {
     return {
@@ -210,7 +213,7 @@ function configCheck(projectDir: string): { check: DoctorCheck; config?: Cogitat
     };
   }
   try {
-    const config = loadConfig({ configPath: path });
+    const config = loadConfig({ configPath: path, env });
     return {
       check: {
         id: 'config',
@@ -270,7 +273,7 @@ async function modelCheck(
     let models;
     try {
       models = await listOllamaModels(baseUrl, {
-        apiKey: config?.llm?.providers?.ollama?.apiKey ?? env.OLLAMA_API_KEY,
+        apiKey: config?.llm?.providers?.ollama?.apiKey,
         headers: config?.llm?.providers?.ollama?.headers,
         timeoutMs: 3000,
       });
@@ -420,7 +423,7 @@ export async function runDoctor(context: DoctorContext): Promise<DoctorCheck[]> 
   }
   checks.push(nodeCheck(manifest, context.nodeVersion));
   checks.push(packagesCheck(context.projectDir, manifest));
-  const { check, config } = configCheck(context.projectDir);
+  const { check, config } = configCheck(context.projectDir, context.env);
   checks.push(check);
   checks.push(envCheck(context.projectDir, context.env));
   if (context.probe) {

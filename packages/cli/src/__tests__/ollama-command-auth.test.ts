@@ -15,7 +15,6 @@ vi.mock('../utils/docker.js', () => ({
   composePs,
 }));
 
-import { log } from '../utils/logger.js';
 import { modelsCommand } from '../commands/models.js';
 import { collectStatus } from '../commands/status.js';
 
@@ -110,6 +109,21 @@ describe('Ollama command authorization', () => {
     expect(headersOf(fetchMock)).toEqual({});
   });
 
+  it('models --url sends OLLAMA_API_KEY from the environment without leaking config apiKey or custom headers', async () => {
+    process.env.OLLAMA_API_KEY = 'env-key';
+    const fetchMock = vi.fn(async (_url: string) =>
+      Response.json({ models: [{ name: 'qwen3:8b', size: 1, modified_at: '' }] })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await modelsCommand.parseAsync(['--url', 'http://other.example', '--json'], { from: 'user' });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://other.example/api/tags');
+    expect(headersOf(fetchMock)).toEqual({
+      Authorization: 'Bearer env-key',
+    });
+  });
+
   it('models --url reads no config at all, not even the one COGITATOR_CONFIG names', async () => {
     process.env.COGITATOR_CONFIG = 'missing.yml';
     const fetchMock = vi.fn(async (_url: string) =>
@@ -123,14 +137,15 @@ describe('Ollama command authorization', () => {
     expect(headersOf(fetchMock)).toEqual({});
   });
 
-  it('status and models warn and use the environment when the config is invalid', async () => {
+  it('status and models warn on stderr and emit valid JSON on stdout when config is invalid', async () => {
     writeFileSync(
       join(dir, 'cogitator.yml'),
       ['limits:', '  maxConcurrentRuns: not-a-number', ''].join('\n')
     );
     process.env.OLLAMA_BASE_URL = 'http://env.example';
     process.env.OLLAMA_API_KEY = 'env-key';
-    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const fetchMock = vi.fn(async (_url: string) =>
       Response.json({ models: [{ name: 'qwen3:8b', size: 1, modified_at: '' }] })
     );
@@ -140,11 +155,19 @@ describe('Ollama command authorization', () => {
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe('http://env.example/api/tags');
     expect(headersOf(fetchMock)).toEqual({ Authorization: 'Bearer env-key' });
+    expect(JSON.parse(logSpy.mock.calls[0][0])).toEqual({
+      ok: true,
+      url: 'http://env.example',
+      models: [{ name: 'qwen3:8b', size: 1, modifiedAt: '' }],
+    });
 
     const report = await collectStatus();
 
     expect(report.ollama).toEqual({ url: 'http://env.example', running: true });
     expect(headersOf(fetchMock, 1)).toEqual({ Authorization: 'Bearer env-key' });
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Invalid configuration'));
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('limits.maxConcurrentRuns')
+    );
   });
 });

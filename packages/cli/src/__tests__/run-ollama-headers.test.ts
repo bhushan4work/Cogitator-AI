@@ -73,7 +73,36 @@ describe('run Ollama model detection', () => {
     expect(runAgent).toHaveBeenCalled();
   });
 
-  it('prefers a literal config apiKey over a different OLLAMA_API_KEY', async () => {
+  it('uses a literal config apiKey when no OLLAMA_API_KEY is in the environment', async () => {
+    writeFileSync(
+      join(dir, 'cogitator.yml'),
+      [
+        'llm:',
+        '  providers:',
+        '    ollama:',
+        '      baseUrl: http://ollama.example',
+        '      apiKey: literal-config-key',
+        '',
+      ].join('\n')
+    );
+    delete process.env.OLLAMA_API_KEY;
+    const fetchMock = vi.fn(async () =>
+      Response.json({ models: [{ name: 'qwen3:8b', size: 1, modified_at: '' }] })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await runCommand.parseAsync(['--config', join(dir, 'cogitator.yml'), '--no-stream', 'hello'], {
+      from: 'user',
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://ollama.example/api/tags',
+      expect.objectContaining({ headers: { Authorization: 'Bearer literal-config-key' } })
+    );
+    expect(runAgent).toHaveBeenCalled();
+  });
+
+  it('prefers OLLAMA_API_KEY in the environment over a literal config apiKey', async () => {
     writeFileSync(
       join(dir, 'cogitator.yml'),
       [
@@ -97,7 +126,7 @@ describe('run Ollama model detection', () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       'http://ollama.example/api/tags',
-      expect.objectContaining({ headers: { Authorization: 'Bearer literal-config-key' } })
+      expect.objectContaining({ headers: { Authorization: 'Bearer env-key' } })
     );
     expect(runAgent).toHaveBeenCalled();
   });

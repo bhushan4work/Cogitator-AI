@@ -1,3 +1,4 @@
+import chalk from 'chalk';
 import { resolveOllamaHost } from '@cogitator-ai/config';
 import { findConfig, loadRunConfig } from './run-config.js';
 
@@ -42,15 +43,27 @@ export interface OllamaConnectionOptions {
  * over `env`, and `OLLAMA_API_KEY` as its bearer token. No config file, no
  * `.env` beside one, no headers, so it cannot fail on configuration.
  */
-function environmentConnection(
-  env: Record<string, string | undefined>,
+export function environmentConnection(
+  env: Record<string, string | undefined> = process.env,
   url?: string
 ): OllamaConnection {
-  const apiKey = env.OLLAMA_API_KEY;
+  const resolvedEnv = env ?? process.env;
+  const apiKey = resolvedEnv.OLLAMA_API_KEY;
   return {
-    baseUrl: resolveOllamaUrl(env, url),
+    baseUrl: resolveOllamaUrl(resolvedEnv, url),
     ...(apiKey ? { apiKey } : {}),
   };
+}
+
+/**
+ * Warns on stderr when the Ollama configuration cannot be read, keeping stdout
+ * clean for commands with `--json`.
+ */
+export function warnConfigError(error: unknown, fallbackMessage: string): void {
+  const detail =
+    error instanceof Error ? error.message.split('\n').slice(0, 4).join(' ') : String(error);
+  console.error(chalk.yellow('⚠'), `Cannot read the Ollama configuration: ${detail}`);
+  console.error(chalk.dim(fallbackMessage));
 }
 
 /**
@@ -77,7 +90,7 @@ export function resolveOllamaConnection(options: OllamaConnectionOptions = {}): 
   const baseUrl = resolveOllamaUrl(env, ollama?.baseUrl);
   const configUrl = resolveOllamaUrl({}, ollama?.baseUrl);
   const usesConfigServer = configUrl === baseUrl;
-  const apiKey = (usesConfigServer ? ollama?.apiKey : undefined) ?? env.OLLAMA_API_KEY;
+  const apiKey = usesConfigServer ? ollama?.apiKey : env.OLLAMA_API_KEY;
   const headers = usesConfigServer ? ollama?.headers : undefined;
 
   return {

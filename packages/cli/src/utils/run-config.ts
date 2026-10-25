@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { CONFIG_FILE_NAMES, interpolateEnv, loadConfig } from '@cogitator-ai/config';
+import { CONFIG_FILE_NAMES, loadConfig } from '@cogitator-ai/config';
 import type { CogitatorConfig } from '@cogitator-ai/types';
 import { loadDotenvInto } from './env.js';
 import { detectConfigKind, type ProjectConfigKind } from './project-config.js';
@@ -53,24 +53,6 @@ function assistantModel(document: unknown): string | undefined {
 }
 
 /**
- * The `llm.providers.ollama.apiKey` the config file itself names, once `${VAR}`
- * in it is interpolated, or `undefined` when the file names none.
- *
- * `loadConfig` reads `OLLAMA_API_KEY` over the file, so a key written in the
- * project would lose to the environment. The file's own key wins here: it is
- * the one the project configured, and `OLLAMA_API_KEY` stays the fallback for a
- * file that has none.
- */
-function fileOllamaApiKey(document: unknown): string | undefined {
-  const file = interpolateEnv(document, process.env);
-  const llm = isRecord(file) ? file.llm : undefined;
-  const providers = isRecord(llm) ? llm.providers : undefined;
-  const ollama = isRecord(providers) ? providers.ollama : undefined;
-  const apiKey = isRecord(ollama) ? ollama.apiKey : undefined;
-  return typeof apiKey === 'string' && apiKey.trim() ? apiKey : undefined;
-}
-
-/**
  * The runtime config `cogitator run` uses. The `.env` next to the config file
  * (or in `cwd` without one) is loaded first, without overriding variables
  * already set, so API keys reach the env loader. An assistant config from
@@ -95,20 +77,5 @@ export function loadRunConfig(configPath: string | null, cwd: string = process.c
     };
   }
 
-  const config = loadConfig({ configPath });
-  const fileApiKey = fileOllamaApiKey(document);
-  const ollama = config.llm?.providers?.ollama;
-  if (fileApiKey === undefined || ollama === undefined || config.llm === undefined) {
-    return { config, kind: 'runtime' };
-  }
-  return {
-    config: {
-      ...config,
-      llm: {
-        ...config.llm,
-        providers: { ...config.llm.providers, ollama: { ...ollama, apiKey: fileApiKey } },
-      },
-    },
-    kind: 'runtime',
-  };
+  return { config: loadConfig({ configPath }), kind: 'runtime' };
 }

@@ -236,12 +236,7 @@ export const runCommand = new Command('run')
     if (!model) {
       const ollama = config.llm?.providers?.ollama;
       const baseUrl = resolveOllamaUrl(process.env, ollama?.baseUrl);
-      model =
-        (await detectOllamaModel(
-          baseUrl,
-          ollama?.apiKey ?? process.env.OLLAMA_API_KEY,
-          ollama?.headers
-        )) ?? undefined;
+      model = (await detectOllamaModel(baseUrl, ollama?.apiKey, ollama?.headers)) ?? undefined;
       if (!model) {
         throw new CommandError('No model specified and no Ollama models found', {
           hints: [

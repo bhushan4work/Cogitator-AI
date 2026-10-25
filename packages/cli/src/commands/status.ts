@@ -9,21 +9,12 @@ import { log } from '../utils/logger.js';
 import { errorMessage, examplesHelp, printJson } from '../utils/cli.js';
 import { findDockerCompose, checkDocker, composePs } from '../utils/docker.js';
 import {
+  environmentConnection,
   listOllamaModels,
   resolveOllamaConnection,
-  resolveOllamaUrl,
+  warnConfigError,
   type OllamaConnection,
 } from '../utils/ollama.js';
-
-/**
- * The connection `status` reports when the project config cannot be read: the
- * environment alone, so an unrelated invalid config, a missing config file or a
- * provider key that is not set never stops the command from reporting what it can.
- */
-function environmentConnection(): OllamaConnection {
-  const apiKey = process.env.OLLAMA_API_KEY;
-  return { baseUrl: resolveOllamaUrl(process.env), ...(apiKey ? { apiKey } : {}) };
-}
 
 async function checkOllama(
   baseUrl: string,
@@ -83,8 +74,7 @@ export async function collectStatus(): Promise<StatusReport> {
   try {
     connection = resolveOllamaConnection();
   } catch (error) {
-    log.warn(`Cannot read the Ollama configuration: ${errorMessage(error).split('\n')[0]}`);
-    log.dim('Reporting the environment only (OLLAMA_BASE_URL, OLLAMA_API_KEY)');
+    warnConfigError(error, 'Reporting the environment only (OLLAMA_BASE_URL, OLLAMA_API_KEY)');
     connection = environmentConnection();
   }
   return {

@@ -8,25 +8,16 @@ import ora from 'ora';
 import { log } from '../utils/logger.js';
 import { CommandError, errorMessage, examplesHelp, printJson } from '../utils/cli.js';
 import {
+  environmentConnection,
   listOllamaModels,
   pullOllamaModel,
   resolveOllamaConnection,
-  resolveOllamaUrl,
+  warnConfigError,
   type OllamaConnection,
   type OllamaModelInfo,
 } from '../utils/ollama.js';
 
 const DAY_MS = 1000 * 60 * 60 * 24;
-
-/**
- * The connection `models` uses when the project config cannot be read: the
- * environment alone, so an unrelated invalid config, a missing config file or a
- * provider key that is not set never stops the command. An explicit `url` is kept.
- */
-function environmentConnection(url?: string): OllamaConnection {
-  const apiKey = process.env.OLLAMA_API_KEY;
-  return { baseUrl: resolveOllamaUrl(process.env, url), ...(apiKey ? { apiKey } : {}) };
-}
 
 export function formatSize(bytes: number): string {
   const gb = bytes / (1024 * 1024 * 1024);
@@ -186,9 +177,13 @@ export const modelsCommand = new Command('models')
     try {
       connection = resolveOllamaConnection({ url: options.url });
     } catch (error) {
-      log.warn(`Cannot read the Ollama configuration: ${errorMessage(error).split('\n')[0]}`);
-      log.dim('Using the environment only (OLLAMA_BASE_URL, OLLAMA_API_KEY)');
-      connection = environmentConnection(options.url);
+      if (options.pull) {
+        const detail =
+          error instanceof Error ? error.message.split('\n').slice(0, 4).join(' ') : String(error);
+        throw new CommandError(`Cannot read the Ollama configuration: ${detail}`);
+      }
+      warnConfigError(error, 'Using the environment only (OLLAMA_BASE_URL, OLLAMA_API_KEY)');
+      connection = environmentConnection(process.env, options.url);
     }
 
     if (options.pull) {

@@ -128,8 +128,28 @@ describe('resolveOllamaConnection', () => {
     });
   });
 
-  it('uses the config apiKey over OLLAMA_API_KEY for the config server', () => {
+  it('prefers OLLAMA_API_KEY over the config apiKey for the config server', () => {
     process.env.OLLAMA_API_KEY = 'env-key';
+    writeFileSync(
+      join(dir, 'cogitator.yml'),
+      [
+        'llm:',
+        '  providers:',
+        '    ollama:',
+        '      baseUrl: http://config.example',
+        '      apiKey: literal-config-key',
+        '',
+      ].join('\n')
+    );
+
+    expect(resolveOllamaConnection({ cwd: dir })).toEqual({
+      baseUrl: 'http://config.example',
+      apiKey: 'env-key',
+    });
+  });
+
+  it('uses the config apiKey when no OLLAMA_API_KEY is in the environment', () => {
+    delete process.env.OLLAMA_API_KEY;
     writeFileSync(
       join(dir, 'cogitator.yml'),
       [

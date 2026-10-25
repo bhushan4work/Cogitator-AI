@@ -8,14 +8,25 @@ const {
   listOllamaModels,
   resolveOllamaConnection,
   resolveOllamaUrl,
-} = vi.hoisted(() => ({
-  checkDocker: vi.fn(),
-  findDockerCompose: vi.fn(),
-  composePs: vi.fn(),
-  listOllamaModels: vi.fn(),
-  resolveOllamaConnection: vi.fn(),
-  resolveOllamaUrl: vi.fn(),
-}));
+  environmentConnection,
+} = vi.hoisted(() => {
+  const resolveOllamaUrl = vi.fn();
+  return {
+    checkDocker: vi.fn(),
+    findDockerCompose: vi.fn(),
+    composePs: vi.fn(),
+    listOllamaModels: vi.fn(),
+    resolveOllamaConnection: vi.fn(),
+    resolveOllamaUrl,
+    environmentConnection: vi.fn((env = process.env) => {
+      const apiKey = env.OLLAMA_API_KEY;
+      return {
+        baseUrl: resolveOllamaUrl(env),
+        ...(apiKey ? { apiKey } : {}),
+      };
+    }),
+  };
+});
 
 vi.mock('../utils/docker.js', () => ({
   checkDocker,
@@ -23,14 +34,19 @@ vi.mock('../utils/docker.js', () => ({
   composePs,
 }));
 
-vi.mock('../utils/ollama.js', () => ({
-  listOllamaModels,
-  resolveOllamaConnection,
-  resolveOllamaUrl,
-}));
+vi.mock('../utils/ollama.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/ollama.js')>();
+  return {
+    ...actual,
+    listOllamaModels,
+    resolveOllamaConnection,
+    resolveOllamaUrl,
+    environmentConnection,
+  };
+});
 
 import { log } from '../utils/logger.js';
-import { collectStatus } from '../commands/status.js';
+import { collectStatus, statusCommand } from '../commands/status.js';
 
 describe('collectStatus', () => {
   beforeEach(() => {
@@ -174,7 +190,7 @@ describe('collectStatus', () => {
     });
   });
 
-  it('warns and falls back to the environment when the config cannot be read', async () => {
+  it('warns on stderr with the failing field and falls back to the environment when config cannot be read', async () => {
     resolveOllamaConnection.mockImplementation(() => {
       throw new Error('Invalid configuration:\nlimits.maxConcurrentRuns: Expected number');
     });
@@ -182,6 +198,8 @@ describe('collectStatus', () => {
     vi.stubEnv('OLLAMA_API_KEY', 'env-key');
     checkDocker.mockReturnValue(false);
     listOllamaModels.mockResolvedValue([]);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     const report = await collectStatus();
 
@@ -192,8 +210,16 @@ describe('collectStatus', () => {
       headers: undefined,
       timeoutMs: 3000,
     });
-    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
-      expect.stringContaining('Invalid configuration')
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('limits.maxConcurrentRuns')
     );
+
+    await statusCommand.parseAsync(['--json'], { from: 'user' });
+    expect(JSON.parse(logSpy.mock.calls[0][0])).toEqual({
+      ok: true,
+      docker: { available: false, services: [] },
+      ollama: { url: 'http://env.example', running: true },
+    });
   });
 });
