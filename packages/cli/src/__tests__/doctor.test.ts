@@ -239,21 +239,24 @@ describe('runDoctor', () => {
   it('checks that the memory service answers', async () => {
     const { port } = await listen();
     const dir = await project({ memory: 'postgres' });
-    vi.stubEnv('DATABASE_URL', `postgresql://cogitator:cogitator@127.0.0.1:${port}/cogitator`);
-
     const up = await runDoctor({
       projectDir: dir,
-      env: { OPENAI_API_KEY: 'sk' },
+      env: {
+        OPENAI_API_KEY: 'sk',
+        DATABASE_URL: `postgresql://cogitator:cogitator@127.0.0.1:${port}/cogitator`,
+      },
       nodeVersion: 'v24.1.0',
       probe: true,
       fetch: async () => new Response('{}', { status: 200 }),
     });
     expect(up.find((c) => c.id === 'memory')).toMatchObject({ status: 'pass' });
 
-    vi.stubEnv('DATABASE_URL', 'postgresql://cogitator:cogitator@127.0.0.1:1/cogitator');
     const down = await runDoctor({
       projectDir: dir,
-      env: { OPENAI_API_KEY: 'sk' },
+      env: {
+        OPENAI_API_KEY: 'sk',
+        DATABASE_URL: 'postgresql://cogitator:cogitator@127.0.0.1:1/cogitator',
+      },
       nodeVersion: 'v24.1.0',
       probe: true,
       fetch: async () => new Response('{}', { status: 200 }),

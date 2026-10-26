@@ -47,10 +47,9 @@ export function environmentConnection(
   env: Record<string, string | undefined> = process.env,
   url?: string
 ): OllamaConnection {
-  const resolvedEnv = env ?? process.env;
-  const apiKey = resolvedEnv.OLLAMA_API_KEY;
+  const apiKey = env.OLLAMA_API_KEY;
   return {
-    baseUrl: resolveOllamaUrl(resolvedEnv, url),
+    baseUrl: resolveOllamaUrl(env, url),
     ...(apiKey ? { apiKey } : {}),
   };
 }
@@ -71,9 +70,10 @@ export function warnConfigError(error: unknown, fallbackMessage: string): void {
  * the `.env` next to the config file (or in `cwd`), `COGITATOR_CONFIG`, environment
  * variables and `cogitator.yml`. An explicit `url` skips the config entirely and
  * uses {@link environmentConnection} instead, so the configured server's credentials
- * and headers are never sent to another one. Config credentials are used only for
- * the server the config names. Config errors are thrown, not hidden: `status` and
- * `models` catch them and fall back to {@link environmentConnection}.
+ * and headers are never sent to another one. Otherwise the server, key and headers
+ * are the ones `loadConfig` merges, the same the chat uses. Config errors are
+ * thrown, not hidden: `status` and `models` catch them and fall back to
+ * {@link environmentConnection}.
  */
 export function resolveOllamaConnection(options: OllamaConnectionOptions = {}): OllamaConnection {
   const cwd = options.cwd ?? process.cwd();
@@ -88,10 +88,8 @@ export function resolveOllamaConnection(options: OllamaConnectionOptions = {}): 
   const { config } = loadRunConfig(configPath, cwd);
   const ollama = config.llm?.providers?.ollama;
   const baseUrl = resolveOllamaUrl(env, ollama?.baseUrl);
-  const configUrl = resolveOllamaUrl({}, ollama?.baseUrl);
-  const usesConfigServer = configUrl === baseUrl;
-  const apiKey = usesConfigServer ? ollama?.apiKey : env.OLLAMA_API_KEY;
-  const headers = usesConfigServer ? ollama?.headers : undefined;
+  const apiKey = ollama?.apiKey;
+  const headers = ollama?.headers;
 
   return {
     baseUrl,

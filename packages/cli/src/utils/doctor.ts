@@ -194,8 +194,8 @@ function packagesCheck(projectDir: string, manifest: PackageManifest | undefined
 }
 
 /**
- * Loads the project's `cogitator.yml` the way the project does. `${VAR}` in it
- * reads `process.env`, so the command loads `.env` into it first.
+ * Loads the project's `cogitator.yml` the way the project does, over `env`. The
+ * command passes `process.env` with the project's `.env` loaded into it.
  */
 function configCheck(
   projectDir: string,
